@@ -354,8 +354,36 @@ class PostgresServer < Sequel::Model
       observe_metrics_backlog(session)
     end
 
+    # Emit server-level gauge metrics that are computed locally but not
+    # scraped from Prometheus on the VM.
+    if tsdb_client
+      lines = []
+      lines << "pg_archival_backlog_count #{session[:archival_backlog]}" if session[:archival_backlog]
+      lines << "pg_metrics_backlog_count #{session[:metrics_backlog]}" if session[:metrics_backlog]
+
+      lsn_lag = compute_lsn_lag_bytes
+      lines << "pg_lsn_replication_lag_bytes #{lsn_lag}" if lsn_lag
+
+      unless lines.empty?
+        scrape = VictoriaMetrics::Client::Scrape.new(time: Time.now, samples: lines.join("\n"))
+        tsdb_client.import_prometheus(scrape, metrics_config[:additional_labels])
+      end
+    end
+
     # Call parent implementation to export actual metrics
     super
+  end
+
+  def compute_lsn_lag_bytes
+    return 0 if primary?
+
+    primary_lsn = resource.representative_server&.lsn_monitor_ds&.get(:last_known_lsn)
+    my_lsn = lsn_monitor_ds.get(:last_known_lsn)
+    return unless primary_lsn && my_lsn
+
+    lsn_diff(primary_lsn, my_lsn)
+  rescue
+    nil
   end
 
   def metrics_config
@@ -431,6 +459,7 @@ class PostgresServer < Sequel::Model
       version:,
     )
     archival_backlog = Integer(result.strip, 10)
+    session[:archival_backlog] = archival_backlog
 
     now = Time.now
     previous_oldest = session[:previous_oldest_pending_wal]
@@ -492,6 +521,7 @@ class PostgresServer < Sequel::Model
       metrics_done_dir:,
     )
     metrics_backlog = Integer(result.strip, 10)
+    session[:metrics_backlog] = metrics_backlog
     metrics_interval = metrics_config[:interval].to_i
 
     if metrics_backlog * metrics_interval > METRICS_BACKLOG_THRESHOLD_SECONDS
