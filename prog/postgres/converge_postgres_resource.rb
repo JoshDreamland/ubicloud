@@ -160,4 +160,17 @@ class Prog::Postgres::ConvergePostgresResource < Prog::Base
   def upgrade_candidate
     @upgrade_candidate ||= postgres_resource.upgrade_candidate_server
   end
+
+  on_failure :start, "Postgres resource failed to begin provisioning."
+  on_failure :provision_servers, "Postgres resource is stuck provisioning new servers."
+  on_failure :wait_servers_to_be_ready, "Postgres servers are not becoming ready in time."
+  on_failure :wait_for_maintenance_window, "Postgres resource did not enter its maintenance window in time."
+  on_failure :wait_fence_primary, "Primary server did not reach the fenced state in time during version upgrade."
+  on_failure :upgrade_standby, "Postgres version upgrade script did not complete in time."
+  on_failure :update_metadata, "Postgres server metadata update did not complete in time after upgrade."
+  on_failure :wait_upgrade_candidate, "Upgraded standby did not reach a ready state in time."
+  on_failure :upgrade_failed, "Postgres upgrade failure handling is stuck."
+  on_failure :recycle_representative_server, "Representative server failover did not complete in time."
+  on_failure :prune_servers, "Postgres server pruning did not complete in time."
+  on_failure :wait_prune_servers, "Old Postgres servers are not being destroyed in time."
 end

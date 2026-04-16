@@ -163,4 +163,11 @@ class Prog::Postgres::PostgresTimelineNexus < Prog::Base
       ssl_ca_data: postgres_timeline.blob_storage.root_certs,
     )
   end
+
+  on_failure :start, "Postgres WAL timeline failed to initialize."
+  on_failure :setup_bucket, "Postgres WAL timeline blob storage bucket could not be created."
+  on_failure :wait_leader, "No Postgres primary came online to lead this WAL timeline."
+  on_failure :wait, "Postgres WAL timeline is stuck in steady state; backup or self-destruct check may be failing."
+  on_failure :take_backup, "Postgres base backup did not start or complete in time."
+  on_failure :destroy, "Postgres WAL timeline could not be destroyed."
 end

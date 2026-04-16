@@ -68,6 +68,14 @@ end
     @labels || []
   end
 
+  def self.on_failure(label, message)
+    (@label_alerts ||= {})[label.to_sym] = message
+  end
+
+  def self.label_alert_for(label)
+    @label_alerts&.[](label.to_sym)
+  end
+
   def self.label(label)
     (@labels ||= []) << label
 
