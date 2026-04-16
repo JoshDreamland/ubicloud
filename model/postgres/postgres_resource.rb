@@ -292,10 +292,28 @@ class PostgresResource < Sequel::Model
     extra_email_content = if storage_auto_scale_canceled_set?
       :canceled_previously
     elsif next_option.nil?
-      Prog::PageNexus.assemble("#{ubid} high disk usage #{disk_usage_percent}%. No further auto-scaling possible.", ["PGStorageAutoScaleMaxSize", id], ubid, severity: "warning")
+      Prog::PageNexus.assemble("#{ubid} high disk usage #{disk_usage_percent}%. No further auto-scaling possible.", ["PGStorageAutoScaleMaxSize", id], ubid,
+        severity: "warning",
+        escalation: Prog::PageNexus::EscalationInfo.new(
+          urgency: "PAGE",
+          owner: "ubicloud",
+          blast_radius: "SINGLE",
+          impact_timeline: "SOON",
+          customer_impact: "OUTAGE",
+          service_ubid: ubid
+        ))
       :at_max_size
     elsif !project.quota_available?("PostgresVCpu", vcpu_delta(next_option))
-      Prog::PageNexus.assemble("#{ubid} high disk usage #{disk_usage_percent}%. Quota insufficient for auto-scale.", ["PGStorageAutoScaleQuotaInsufficient", id], ubid, severity: "warning")
+      Prog::PageNexus.assemble("#{ubid} high disk usage #{disk_usage_percent}%. Quota insufficient for auto-scale.", ["PGStorageAutoScaleQuotaInsufficient", id], ubid,
+        severity: "warning",
+        escalation: Prog::PageNexus::EscalationInfo.new(
+          urgency: "PAGE",
+          owner: "ubicloud",
+          blast_radius: "SINGLE",
+          impact_timeline: "SOON",
+          customer_impact: "OUTAGE",
+          service_ubid: ubid
+        ))
       :quota_insufficient
     end
 
@@ -371,7 +389,16 @@ class PostgresResource < Sequel::Model
 
       incr_storage_auto_scale_canceled
 
-      Prog::PageNexus.assemble("#{ubid} storage auto-scale canceled by user", ["PGStorageAutoScaleCanceled", id], ubid, severity: "warning")
+      Prog::PageNexus.assemble("#{ubid} storage auto-scale canceled by user", ["PGStorageAutoScaleCanceled", id], ubid,
+        severity: "warning",
+        escalation: Prog::PageNexus::EscalationInfo.new(
+          urgency: "NOTIFY",
+          owner: "ubicloud",
+          blast_radius: "SINGLE",
+          impact_timeline: "EVENTUALLY",
+          customer_impact: "NONE",
+          service_ubid: ubid
+        ))
 
       send_storage_auto_scale_canceled_notification
 

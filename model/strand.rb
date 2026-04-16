@@ -211,7 +211,36 @@ SQL
           {}
         end
         extra_data.compact!
-        Prog::PageNexus.assemble("#{ubid} has an expired deadline! #{effective_prog}.#{label} did not reach #{frame["deadline_target"]} on time", ["Deadline", id, effective_prog, frame["deadline_target"]], ubid, extra_data:)
+        escalation = case sbj
+        when PostgresServer
+          Prog::PageNexus::EscalationInfo.new(
+            urgency: "PAGE",
+            owner: "ubicloud",
+            blast_radius: "SINGLE",
+            impact_timeline: "SOON",
+            customer_impact: "DEGRADE",
+            service_ubid: sbj.resource&.ubid
+          )
+        when PostgresResource
+          Prog::PageNexus::EscalationInfo.new(
+            urgency: "PAGE",
+            owner: "ubicloud",
+            blast_radius: "SINGLE",
+            impact_timeline: "SOON",
+            customer_impact: "DEGRADE",
+            service_ubid: sbj.ubid
+          )
+        when PostgresTimeline
+          Prog::PageNexus::EscalationInfo.new(
+            urgency: "PAGE",
+            owner: "ubicloud",
+            blast_radius: "SINGLE",
+            impact_timeline: "EVENTUALLY",
+            customer_impact: "NONE",
+            service_ubid: sbj.leader&.resource&.ubid
+          )
+        end
+        Prog::PageNexus.assemble("#{ubid} has an expired deadline! #{effective_prog}.#{label} did not reach #{frame["deadline_target"]} on time", ["Deadline", id, effective_prog, frame["deadline_target"]], ubid, extra_data:, escalation:)
         modified!(:stack)
       end
 

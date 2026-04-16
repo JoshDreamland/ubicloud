@@ -444,7 +444,15 @@ class PostgresServer < Sequel::Model
         severity = (disk_usage_percent >= 85) ? "error" : "warning"
         Prog::PageNexus.assemble("#{ubid} archival backlog high",
           ["PGArchivalBacklogHigh", id], ubid,
-          severity:, extra_data: {archival_backlog:, disk_usage_percent:})
+          severity:, extra_data: {archival_backlog:, disk_usage_percent:},
+          escalation: Prog::PageNexus::EscalationInfo.new(
+            urgency: severity == "error" ? "PAGE" : "TICKET",
+            owner: "ubicloud",
+            blast_radius: "SINGLE",
+            impact_timeline: "SOON",
+            customer_impact: "DEGRADE",
+            service_ubid: resource&.ubid
+          ))
       end
     elsif archival_backlog < archival_backlog_threshold * 0.8
       Page.from_tag_parts("PGArchivalBacklogHigh", id)&.incr_resolve
@@ -497,7 +505,15 @@ class PostgresServer < Sequel::Model
     if metrics_backlog * metrics_interval > METRICS_BACKLOG_THRESHOLD_SECONDS
       Prog::PageNexus.assemble("#{ubid} metrics backlog high",
         ["PGMetricsBacklogHigh", id], ubid,
-        severity: "warning", extra_data: {metrics_backlog:})
+        severity: "warning", extra_data: {metrics_backlog:},
+        escalation: Prog::PageNexus::EscalationInfo.new(
+          urgency: "NOTIFY",
+          owner: "ubicloud",
+          blast_radius: "SINGLE",
+          impact_timeline: "UNLIKELY",
+          customer_impact: "NONE",
+          service_ubid: resource&.ubid
+        ))
     elsif metrics_backlog * metrics_interval < METRICS_BACKLOG_THRESHOLD_SECONDS * 0.8
       Page.from_tag_parts("PGMetricsBacklogHigh", id)&.incr_resolve
     end
@@ -517,7 +533,15 @@ class PostgresServer < Sequel::Model
       if vm_now - io_max_mtime > 120
         Prog::PageNexus.assemble("#{ubid} I/O throttle stale",
           ["PGIOThrottleStale", id], ubid,
-          severity: "warning", extra_data: {io_max_mtime:})
+          severity: "warning", extra_data: {io_max_mtime:},
+          escalation: Prog::PageNexus::EscalationInfo.new(
+            urgency: "TICKET",
+            owner: "ubicloud",
+            blast_radius: "SINGLE",
+            impact_timeline: "EVENTUALLY",
+            customer_impact: "DEGRADE",
+            service_ubid: resource&.ubid
+          ))
       else
         Page.from_tag_parts("PGIOThrottleStale", id)&.incr_resolve
         Clog.emit("I/O throttle applied", {postgres_server_id: id, io_max_mtime:})
@@ -533,7 +557,16 @@ class PostgresServer < Sequel::Model
         resource.incr_check_disk_usage
       end
     elsif disk_usage_percent >= 95
-      Prog::PageNexus.assemble("High disk usage on non-primary PG server (#{disk_usage_percent}%)", ["PGDiskUsageHigh", id], ubid, severity: "warning", extra_data: {disk_usage_percent:})
+      Prog::PageNexus.assemble("High disk usage on non-primary PG server (#{disk_usage_percent}%)", ["PGDiskUsageHigh", id], ubid,
+        severity: "warning", extra_data: {disk_usage_percent:},
+        escalation: Prog::PageNexus::EscalationInfo.new(
+          urgency: "TICKET",
+          owner: "ubicloud",
+          blast_radius: "SINGLE",
+          impact_timeline: "EVENTUALLY",
+          customer_impact: "NONE",
+          service_ubid: resource&.ubid
+        ))
     else
       Page.from_tag_parts("PGDiskUsageHigh", id)&.incr_resolve
     end
@@ -544,7 +577,16 @@ class PostgresServer < Sequel::Model
   def observe_root_disk_usage(session)
     root_disk_usage_percent = session[:ssh_session].exec!("df --output=pcent / | tail -n 1").strip.delete("%").to_i
     if root_disk_usage_percent >= 90
-      Prog::PageNexus.assemble("High root disk usage on PG server (#{root_disk_usage_percent}%)", ["PGRootDiskUsageHigh", id], ubid, severity: primary? ? "error" : "warning", extra_data: {root_disk_usage_percent:})
+      Prog::PageNexus.assemble("High root disk usage on PG server (#{root_disk_usage_percent}%)", ["PGRootDiskUsageHigh", id], ubid,
+        severity: primary? ? "error" : "warning", extra_data: {root_disk_usage_percent:},
+        escalation: Prog::PageNexus::EscalationInfo.new(
+          urgency: primary? ? "PAGE" : "TICKET",
+          owner: "ubicloud",
+          blast_radius: "SINGLE",
+          impact_timeline: primary? ? "SOON" : "EVENTUALLY",
+          customer_impact: primary? ? "DEGRADE" : "NONE",
+          service_ubid: resource&.ubid
+        ))
     else
       Page.from_tag_parts("PGRootDiskUsageHigh", id)&.incr_resolve
     end
