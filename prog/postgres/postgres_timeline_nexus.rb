@@ -69,7 +69,8 @@ class Prog::Postgres::PostgresTimelineNexus < Prog::Base
     # if no backup is taken for 2 days.
     latest_backup_completed_at = backups.map(&:last_modified).max || postgres_timeline.created_at
     if postgres_timeline.leader && latest_backup_completed_at < Time.now - 2 * 24 * 60 * 60 # 2 days
-      Prog::PageNexus.assemble("Missing backup at #{postgres_timeline}!", ["MissingBackup", postgres_timeline.id], postgres_timeline.ubid)
+      Prog::PageNexus.assemble("Missing backup at #{postgres_timeline}!", ["MissingBackup", postgres_timeline.id], postgres_timeline.ubid,
+        enrich: {"subject_type" => "PostgresTimeline", "subject_id" => postgres_timeline.id})
     else
       Page.from_tag_parts("MissingBackup", postgres_timeline.id)&.incr_resolve
     end

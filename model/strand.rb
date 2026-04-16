@@ -211,7 +211,15 @@ SQL
           {}
         end
         extra_data.compact!
-        Prog::PageNexus.assemble("#{ubid} has an expired deadline! #{effective_prog}.#{label} did not reach #{frame["deadline_target"]} on time", ["Deadline", id, effective_prog, frame["deadline_target"]], ubid, extra_data:)
+        enrich = case sbj
+        when PostgresServer
+          {"subject_type" => "PostgresServer", "subject_id" => sbj.id}
+        when PostgresResource
+          {"subject_type" => "PostgresResource", "subject_id" => sbj.id}
+        when PostgresTimeline
+          {"subject_type" => "PostgresTimeline", "subject_id" => sbj.id}
+        end
+        Prog::PageNexus.assemble("#{ubid} has an expired deadline! #{effective_prog}.#{label} did not reach #{frame["deadline_target"]} on time", ["Deadline", id, effective_prog, frame["deadline_target"]], ubid, extra_data:, enrich:)
         modified!(:stack)
       end
 

@@ -214,7 +214,8 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
       previous_try_count = frame["initialize_database_from_backup_try_count"] || 0
       if previous_try_count >= 3
         Prog::PageNexus.assemble("#{postgres_server.ubid} initialize database from backup failed after 3 attempts",
-          ["PGInitializeDatabaseFromBackupFailed", postgres_server.id], postgres_server.ubid)
+          ["PGInitializeDatabaseFromBackupFailed", postgres_server.id], postgres_server.ubid,
+          enrich: {"subject_type" => "PostgresServer", "subject_id" => postgres_server.id})
       end
       update_stack({"initialize_database_from_backup_try_count" => previous_try_count + 1})
 
