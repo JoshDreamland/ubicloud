@@ -211,7 +211,13 @@ SQL
           {}
         end
         extra_data.compact!
-        Prog::PageNexus.assemble("#{ubid} has an expired deadline! #{effective_prog}.#{label} did not reach #{frame["deadline_target"]} on time", ["Deadline", id, effective_prog, frame["deadline_target"]], ubid, extra_data:)
+        prog_class = Object.const_get("::Prog::" + effective_prog) rescue nil
+        purpose = prog_class&.label_description_for(label)
+        Clog.emit("deadline page fired for label with no description", {strand_id: id, prog: effective_prog, label:}) unless purpose
+        extra_data[:current_label_purpose] = purpose if purpose
+        summary = "#{ubid} has an expired deadline! #{effective_prog}.#{label} did not reach #{frame["deadline_target"]} on time"
+        summary += " — #{purpose}" if purpose
+        Prog::PageNexus.assemble(summary, ["Deadline", id, effective_prog, frame["deadline_target"]], ubid, extra_data:)
         modified!(:stack)
       end
 

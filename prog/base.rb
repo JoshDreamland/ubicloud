@@ -68,7 +68,21 @@ end
     @labels || []
   end
 
-  def self.label(label)
+  def self.label_descriptions
+    @label_descriptions || {}
+  end
+
+  def self.label_description_for(label)
+    @label_descriptions&.[](label.to_sym)
+  end
+
+  def self.label(label_or_description, label = nil)
+    if label.nil?
+      label = label_or_description
+    else
+      (@label_descriptions ||= {})[label] = label_or_description
+    end
+
     (@labels ||= []) << label
 
     if label == :destroy

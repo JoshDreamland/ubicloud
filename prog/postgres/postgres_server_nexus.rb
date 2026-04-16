@@ -97,25 +97,25 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
     end
   end
 
-  label def start
+  label "Waits for the VM to become ready, then kicks off Postgres server provisioning.", def start
     nap 5 unless vm.strand.label == "wait"
 
     postgres_server.incr_initial_provisioning
     hop_bootstrap_rhizome
   end
 
-  label def bootstrap_rhizome
+  label "Installs the Rhizome management toolset on the VM.", def bootstrap_rhizome
     register_deadline("wait", 10 * 60)
 
     bud Prog::BootstrapRhizome, {"target_folder" => "postgres", "subject_id" => vm.id, "user" => "ubi", "no_bundler_install" => true}
     hop_wait_bootstrap_rhizome
   end
 
-  label def wait_bootstrap_rhizome
+  label "Waits for the Rhizome bootstrap child strand to finish on the VM.", def wait_bootstrap_rhizome
     reap(:mount_data_disk, nap: 5)
   end
 
-  label def mount_data_disk
+  label "Formats and mounts the data disk at /dat for Postgres data storage.", def mount_data_disk
     storage_device_paths = postgres_server.storage_device_paths
     case vm.sshable.d_check("format_disk")
     when "Succeeded"
@@ -151,7 +151,7 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
     nap 5
   end
 
-  label def run_init_script
+  label "Runs the customer-provided initialization script on the Postgres VM.", def run_init_script
     hop_configure_walg_credentials unless resource.init_script
     case vm.sshable.d_check("run_init_script")
     when "Succeeded"
@@ -174,14 +174,14 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
     nap 5
   end
 
-  label def configure_walg_credentials
+  label "Attaches the S3 IAM policy and refreshes WAL-G backup credentials.", def configure_walg_credentials
     postgres_server.attach_s3_policy_if_needed
     postgres_server.refresh_walg_credentials
     hop_initialize_empty_database if postgres_server.primary?
     hop_initialize_database_from_backup
   end
 
-  label def initialize_empty_database
+  label "Initializes a fresh empty Postgres cluster on a new primary server.", def initialize_empty_database
     case vm.sshable.d_check("initialize_empty_database")
     when "Succeeded"
       hop_refresh_certificates
@@ -193,7 +193,7 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
     nap 5
   end
 
-  label def initialize_database_from_backup
+  label "Restores the Postgres database from an S3 backup (used for standbys and PITR restores).", def initialize_database_from_backup
     case vm.sshable.d_check("initialize_database_from_backup")
     when "Succeeded"
       Page.from_tag_parts("PGInitializeDatabaseFromBackupFailed", postgres_server.id)&.incr_resolve
@@ -230,7 +230,7 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
     nap 5
   end
 
-  label def refresh_certificates
+  label "Pushes updated TLS certificates to the VM.", def refresh_certificates
     decr_refresh_certificates
 
     nap 5 if resource.server_cert.nil?
@@ -265,7 +265,7 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
     hop_wait
   end
 
-  label def configure_metrics
+  label "Configures Prometheus, node exporter, postgres exporter, and metrics collection on the VM.", def configure_metrics
     web_config = <<CONFIG
 tls_server_config:
   cert_file: /etc/ssl/certs/server.crt
@@ -391,7 +391,7 @@ TIMER
     hop_wait
   end
 
-  label def setup_cloudwatch
+  label "Configures AWS CloudWatch to ship Postgres and auth logs for this VM.", def setup_cloudwatch
     filepath = "/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.d"
     filename = "001-ubicloud-config.json"
     config = <<CONFIG
@@ -424,7 +424,7 @@ CONFIG
     hop_setup_hugepages
   end
 
-  label def setup_hugepages
+  label "Configures Linux huge pages to optimize Postgres shared memory performance.", def setup_hugepages
     case vm.sshable.d_check("setup_hugepages")
     when "Succeeded"
       vm.sshable.d_clean("setup_hugepages")
@@ -436,7 +436,7 @@ CONFIG
     nap 5
   end
 
-  label def configure
+  label "Applies Postgres configuration (postgresql.conf, pg_hba.conf) and reloads the server.", def configure
     case vm.sshable.d_check("configure_postgres")
     when "Succeeded"
       vm.sshable.d_clean("configure_postgres")
@@ -469,7 +469,7 @@ CONFIG
     nap 5
   end
 
-  label def update_superuser_password
+  label "Updates the Postgres superuser password and installs any required extensions.", def update_superuser_password
     decr_update_superuser_password
 
     encrypted_password = DB.synchronize do |conn|
@@ -501,7 +501,7 @@ CMD
     hop_wait
   end
 
-  label def run_post_installation_script
+  label "Runs the post-installation script to finalize extensions and database setup.", def run_post_installation_script
     case vm.sshable.d_check("post_installation_script")
     when "Succeeded"
       if postgres_server.paradedb_and_primary?
@@ -521,7 +521,7 @@ SQL
     nap 1
   end
 
-  label def wait_catch_up
+  label "Waits for the standby to replicate WAL until within 80MB of the primary's LSN.", def wait_catch_up
     unless postgres_server.lsn_caught_up
       current_lsn = postgres_server.current_lsn
       previous_lsn = strand.stack.first["current_lsn"]
@@ -541,7 +541,7 @@ SQL
     hop_wait
   end
 
-  label def wait_synchronization
+  label "Waits for the standby to be promoted to synchronous replication mode by the primary.", def wait_synchronization
     query = DB["SELECT sync_state FROM pg_stat_replication WHERE application_name = :ubid", ubid: postgres_server.ubid]
     sync_state = resource.representative_server.run_query(query).chomp
     hop_wait if ["quorum", "sync"].include?(sync_state)
@@ -549,7 +549,7 @@ SQL
     nap 30
   end
 
-  label def wait_recovery_completion
+  label "Waits for the Postgres instance to finish crash recovery and exit recovery mode.", def wait_recovery_completion
     is_in_recovery = begin
       postgres_server.run_query("SELECT pg_is_in_recovery()").chomp == "t"
     rescue => ex
@@ -575,7 +575,7 @@ SQL
     nap 5
   end
 
-  label def wait
+  label "Steady state: server is healthy and polling for operational semaphores (reconfigure, failover, certificate refresh, etc).", def wait
     decr_initial_provisioning
 
     when_fence_set? do
@@ -678,7 +678,7 @@ SQL
     nap 6 * 60 * 60
   end
 
-  label def unavailable
+  label "Server failed its availability check; attempts failover or waits for Postgres to recover.", def unavailable
     when_lockout_set? do
       hop_lockout
     end
@@ -702,7 +702,7 @@ SQL
     nap 5
   end
 
-  label def fence
+  label "Runs pre-failover checkpoints and stops Postgres to safely isolate the old primary.", def fence
     decr_fence
 
     when_lockout_set? do
@@ -736,7 +736,7 @@ SQL
     hop_wait_in_fence
   end
 
-  label def wait_in_fence
+  label "Server is fenced (stopped) and waits for the new primary to signal it can be unfenced.", def wait_in_fence
     when_unfence_set? do
       decr_unfence
       postgres_server.incr_configure
@@ -747,7 +747,7 @@ SQL
     nap 60
   end
 
-  label def prepare_for_unplanned_take_over
+  label "Initiates unplanned failover: signals the current primary to lock itself out.", def prepare_for_unplanned_take_over
     decr_unplanned_take_over
 
     resource.representative_server.incr_lockout
@@ -755,13 +755,13 @@ SQL
     hop_wait_representative_lockout
   end
 
-  label def wait_representative_lockout
+  label "Waits for the current primary to reach the locked-out state before this standby takes over.", def wait_representative_lockout
     hop_taking_over if resource.representative_server.strand.label == "wait_locked_out"
 
     nap 1
   end
 
-  label def lockout
+  label "Blocks all connections to Postgres via pg_stop, HBA rules, and host routing.", def lockout
     decr_lockout
 
     bud Prog::Postgres::PostgresLockout, {"mechanism" => "pg_stop"}
@@ -773,7 +773,7 @@ SQL
     hop_wait_lockout_attempt
   end
 
-  label def wait_lockout_attempt
+  label "Waits for all lockout mechanisms (pg_stop, HBA, routing) to complete.", def wait_lockout_attempt
     reaper = lambda do |child|
       if child.exitval == "lockout_succeeded"
         update_stack({"lockout_succeeded" => true})
@@ -786,18 +786,18 @@ SQL
     nap 0.5
   end
 
-  label def wait_locked_out
+  label "The primary is fully locked out; waits for the promoted standby to take over.", def wait_locked_out
     nap 24 * 60 * 60
   end
 
-  label def prepare_for_planned_take_over
+  label "Initiates planned failover: requests the current primary to fence itself.", def prepare_for_planned_take_over
     decr_planned_take_over
 
     resource.representative_server.incr_fence
     hop_wait_fencing_of_old_primary
   end
 
-  label def wait_fencing_of_old_primary
+  label "Waits for the current primary to reach the fenced state before this standby promotes.", def wait_fencing_of_old_primary
     representative_server = resource.representative_server
     hop_taking_over if representative_server.strand.label == "wait_in_fence"
 
@@ -809,7 +809,7 @@ SQL
     nap 1
   end
 
-  label def promote_read_replica
+  label "Promotes this read replica to a standalone primary via the Postgres promote sequence.", def promote_read_replica
     case vm.sshable.d_check("promote_postgres")
     when "Succeeded"
       vm.sshable.d_clean("promote_postgres")
@@ -823,7 +823,7 @@ SQL
     nap 5
   end
 
-  label def taking_over
+  label "Promotes this server to primary and updates DNS, replication topology, and peer configuration.", def taking_over
     if postgres_server.read_replica?
       resource.representative_server.update(is_representative: false)
       postgres_server.reload.update(is_representative: true, synchronization_status: "ready")
@@ -855,17 +855,17 @@ SQL
     nap 5
   end
 
-  label def destroy
+  label "Signals child strands to destroy themselves before removing this Postgres server.", def destroy
     decr_destroy
     Semaphore.incr(strand.children_dataset.exclude(prog: "Postgres::PostgresServerNexus").select(:id), "destroy")
     hop_wait_children_destroy
   end
 
-  label def wait_children_destroy
+  label "Waits for all child strands to exit before tearing down the VM.", def wait_children_destroy
     reap(:destroy_vm_and_pg, nap: 30)
   end
 
-  label def destroy_vm_and_pg
+  label "Destroys the VM and all associated Postgres server resources.", def destroy_vm_and_pg
     vm.incr_destroy
     representative_server = resource&.representative_server
     postgres_server.destroy

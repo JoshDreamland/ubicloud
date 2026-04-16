@@ -5,7 +5,7 @@ require_relative "../../lib/util"
 class Prog::Postgres::ConvergePostgresResource < Prog::Base
   subject_is :postgres_resource
 
-  label def start
+  label "Checks prerequisites are met, then initiates server provisioning.", def start
     nap 60 if postgres_resource.read_replica? && !postgres_resource.parent.ready_for_read_replica?
 
     register_deadline("wait_for_maintenance_window", 10 * 60)
@@ -13,7 +13,7 @@ class Prog::Postgres::ConvergePostgresResource < Prog::Base
     hop_provision_servers
   end
 
-  label def provision_servers
+  label "Provisions new standby servers until the resource has enough fresh instances.", def provision_servers
     hop_wait_servers_to_be_ready if postgres_resource.has_enough_fresh_servers?
 
     if postgres_resource.servers.all? { it.vm.vm_host } || postgres_resource.location.aws?
@@ -23,7 +23,7 @@ class Prog::Postgres::ConvergePostgresResource < Prog::Base
     nap 5
   end
 
-  label def wait_servers_to_be_ready
+  label "Waits for newly provisioned standby servers to finish restoring from backup and replicate WAL.", def wait_servers_to_be_ready
     hop_provision_servers unless postgres_resource.has_enough_fresh_servers?
     hop_wait_for_maintenance_window if postgres_resource.has_enough_ready_servers?
 
@@ -51,7 +51,7 @@ class Prog::Postgres::ConvergePostgresResource < Prog::Base
     nap 60
   end
 
-  label def wait_for_maintenance_window
+  label "Waits for the customer-configured maintenance window before applying version upgrades or recycling servers.", def wait_for_maintenance_window
     nap 10 * 60 unless postgres_resource.in_maintenance_window?
 
     hop_provision_servers unless postgres_resource.has_enough_fresh_servers?
@@ -67,13 +67,13 @@ class Prog::Postgres::ConvergePostgresResource < Prog::Base
     hop_recycle_representative_server
   end
 
-  label def wait_fence_primary
+  label "Waits for the primary server to reach the fenced state before upgrading the standby.", def wait_fence_primary
     hop_upgrade_standby if postgres_resource.representative_server.strand.label == "wait_in_fence"
 
     nap 5
   end
 
-  label def upgrade_standby
+  label "Runs the in-place Postgres version upgrade script on the upgrade candidate standby.", def upgrade_standby
     case upgrade_candidate.vm.sshable.d_check("upgrade_postgres")
     when "Succeeded"
       upgrade_candidate.vm.sshable.d_clean("upgrade_postgres")
@@ -87,7 +87,7 @@ class Prog::Postgres::ConvergePostgresResource < Prog::Base
     nap 5
   end
 
-  label def update_metadata
+  label "Updates the server's version metadata and triggers a configure and restart after a successful upgrade.", def update_metadata
     upgrade_candidate.update(version: postgres_resource.target_version)
     upgrade_candidate.switch_to_new_timeline(parent_id: nil)
     upgrade_candidate.incr_configure
@@ -96,13 +96,13 @@ class Prog::Postgres::ConvergePostgresResource < Prog::Base
     hop_wait_upgrade_candidate
   end
 
-  label def wait_upgrade_candidate
+  label "Waits for the upgraded standby to restart and reach steady state before recycling the primary.", def wait_upgrade_candidate
     nap 5 if upgrade_candidate.restart_set? || upgrade_candidate.strand.label != "wait"
 
     hop_recycle_representative_server
   end
 
-  label def upgrade_failed
+  label "Postgres version upgrade failed; logs have been emitted and a page has been fired. Unfences primary if needed.", def upgrade_failed
     if upgrade_candidate && !upgrade_candidate.destroy_set?
       logs = upgrade_candidate.vm.sshable.cmd("sudo journalctl -u upgrade_postgres")
       logs.split("\n").each { |line| Clog.emit("Postgres resource upgrade failed", {resource_id: postgres_resource.id, log: line}) }
@@ -114,7 +114,7 @@ class Prog::Postgres::ConvergePostgresResource < Prog::Base
     nap 6 * 60 * 60
   end
 
-  label def recycle_representative_server
+  label "Triggers a planned failover to recycle the representative server onto fresh infrastructure.", def recycle_representative_server
     unless postgres_resource.ongoing_failover?
       hop_prune_servers unless postgres_resource.representative_server.needs_recycling?
       hop_prune_servers if postgres_resource.storage_auto_scale_canceled_set?
@@ -131,7 +131,7 @@ class Prog::Postgres::ConvergePostgresResource < Prog::Base
     nap 60
   end
 
-  label def prune_servers
+  label "Destroys excess or outdated standby servers and reconfigures the survivors.", def prune_servers
     postgres_resource.decr_storage_auto_scale_not_cancellable
 
     # Below we only keep servers that does not need recycling or are of the
@@ -151,7 +151,7 @@ class Prog::Postgres::ConvergePostgresResource < Prog::Base
     hop_wait_prune_servers
   end
 
-  label def wait_prune_servers
+  label "Waits for excess servers to finish destroying before marking the resource as converged.", def wait_prune_servers
     nap 30 unless PostgresServer.where(id: frame["servers_to_destroy"]).empty?
 
     pop "postgres resource is converged"

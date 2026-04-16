@@ -31,7 +31,7 @@ class Prog::Postgres::PostgresTimelineNexus < Prog::Base
     end
   end
 
-  label def start
+  label "Sets up blob storage credentials and bucket, then waits for a primary server to attach.", def start
     if postgres_timeline.blob_storage
       setup_blob_storage
       hop_setup_bucket
@@ -40,7 +40,7 @@ class Prog::Postgres::PostgresTimelineNexus < Prog::Base
     hop_wait_leader
   end
 
-  label def setup_bucket
+  label "Creates the S3 or MinIO bucket and applies the lifecycle policy for WAL archiving.", def setup_bucket
     nap 1 if postgres_timeline.aws? && !Config.aws_postgres_iam_access && !aws_access_key_is_available?
 
     # Create bucket for the timeline
@@ -49,12 +49,12 @@ class Prog::Postgres::PostgresTimelineNexus < Prog::Base
     hop_wait_leader
   end
 
-  label def wait_leader
+  label "Waits for a primary Postgres server to attach to this timeline and reach steady state.", def wait_leader
     nap 5 if postgres_timeline.leader.nil? || postgres_timeline.leader.strand.label != "wait"
     hop_wait
   end
 
-  label def wait
+  label "Steady state: monitors backup freshness and triggers backups on schedule.", def wait
     dependent = PostgresServer[timeline_id: postgres_timeline.id]
     backups = postgres_timeline.backups
     if dependent.nil? && backups.empty? && Time.now - postgres_timeline.created_at > 10 * 24 * 60 * 60
@@ -81,7 +81,7 @@ class Prog::Postgres::PostgresTimelineNexus < Prog::Base
     nap 20 * 60
   end
 
-  label def take_backup
+  label "Initiates a WAL-G base backup from the primary server to blob storage.", def take_backup
     # It is possible that we already started backup but crashed before saving
     # the state to database. Since backup taking is an expensive operation,
     # we check if backup is truly needed.
@@ -95,7 +95,7 @@ class Prog::Postgres::PostgresTimelineNexus < Prog::Base
     hop_wait
   end
 
-  label def destroy
+  label "Deletes the blob storage bucket, credentials, and IAM policy, then removes the timeline record.", def destroy
     decr_destroy
     destroy_blob_storage if postgres_timeline.blob_storage
     postgres_timeline.destroy
