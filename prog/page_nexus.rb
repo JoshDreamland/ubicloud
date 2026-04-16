@@ -8,8 +8,8 @@ class Prog::PageNexus < Prog::Base
   VALID_IMPACT_TIMELINES = %w[UNLIKELY EVENTUALLY SOON NOW].freeze
   VALID_CUSTOMER_IMPACTS = %w[NONE VISIBILITY DEGRADE OUTAGE].freeze
 
-  EscalationInfo = Data.define(:urgency, :owner, :blast_radius, :impact_timeline, :customer_impact, :service_ubid, :customer_actionable, :oncall_mitigable) do
-    def initialize(urgency:, owner:, blast_radius:, impact_timeline:, customer_impact:, service_ubid: nil, customer_actionable: false, oncall_mitigable: false)
+  EscalationInfo = Data.define(:urgency, :owner, :blast_radius, :impact_timeline, :customer_impact, :customer_actionable, :oncall_mitigable) do
+    def initialize(urgency:, owner:, blast_radius:, impact_timeline:, customer_impact:, customer_actionable: false, oncall_mitigable: false)
       raise ArgumentError, "invalid urgency: #{urgency}" unless Prog::PageNexus::VALID_URGENCIES.include?(urgency)
       raise ArgumentError, "invalid blast_radius: #{blast_radius}" unless Prog::PageNexus::VALID_BLAST_RADII.include?(blast_radius)
       raise ArgumentError, "invalid impact_timeline: #{impact_timeline}" unless Prog::PageNexus::VALID_IMPACT_TIMELINES.include?(impact_timeline)
@@ -24,7 +24,6 @@ class Prog::PageNexus < Prog::Base
         "blast_radius" => blast_radius,
         "impact_timeline" => impact_timeline,
         "customer_impact" => customer_impact,
-        "service_ubid" => service_ubid,
         "customer_actionable" => customer_actionable,
         "oncall_mitigable" => oncall_mitigable
       }.compact

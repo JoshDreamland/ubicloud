@@ -219,7 +219,6 @@ SQL
             blast_radius: "SINGLE",
             impact_timeline: "SOON",
             customer_impact: "DEGRADE",
-            service_ubid: sbj.resource&.ubid
           )
         when PostgresResource
           Prog::PageNexus::EscalationInfo.new(
@@ -227,8 +226,7 @@ SQL
             owner: "ubicloud",
             blast_radius: "SINGLE",
             impact_timeline: "SOON",
-            customer_impact: "DEGRADE",
-            service_ubid: sbj.ubid
+            customer_impact: "DEGRADE"
           )
         when PostgresTimeline
           Prog::PageNexus::EscalationInfo.new(
@@ -236,8 +234,7 @@ SQL
             owner: "ubicloud",
             blast_radius: "SINGLE",
             impact_timeline: "EVENTUALLY",
-            customer_impact: "NONE",
-            service_ubid: sbj.leader&.resource&.ubid
+            customer_impact: "NONE"
           )
         end
         Prog::PageNexus.assemble("#{ubid} has an expired deadline! #{effective_prog}.#{label} did not reach #{frame["deadline_target"]} on time", ["Deadline", id, effective_prog, frame["deadline_target"]], ubid, extra_data:, escalation:)

@@ -114,7 +114,6 @@ class Prog::Postgres::ConvergePostgresResource < Prog::Base
           blast_radius: "SINGLE",
           impact_timeline: "SOON",
           customer_impact: "DEGRADE",
-          service_ubid: postgres_resource.ubid
         ))
     end
 

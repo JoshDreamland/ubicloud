@@ -221,7 +221,6 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
             blast_radius: "SINGLE",
             impact_timeline: "SOON",
             customer_impact: "DEGRADE",
-            service_ubid: resource.ubid
           ))
       end
       update_stack({"initialize_database_from_backup_try_count" => previous_try_count + 1})

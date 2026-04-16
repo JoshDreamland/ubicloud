@@ -300,7 +300,6 @@ class PostgresResource < Sequel::Model
           blast_radius: "SINGLE",
           impact_timeline: "SOON",
           customer_impact: "OUTAGE",
-          service_ubid: ubid,
           customer_actionable: true,
           oncall_mitigable: true
         ))
@@ -314,7 +313,6 @@ class PostgresResource < Sequel::Model
           blast_radius: "SINGLE",
           impact_timeline: "SOON",
           customer_impact: "OUTAGE",
-          service_ubid: ubid,
           customer_actionable: true,
           oncall_mitigable: true
         ))
@@ -401,7 +399,6 @@ class PostgresResource < Sequel::Model
           blast_radius: "SINGLE",
           impact_timeline: "EVENTUALLY",
           customer_impact: "NONE",
-          service_ubid: ubid,
           customer_actionable: true
         ))
 

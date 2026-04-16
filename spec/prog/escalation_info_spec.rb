@@ -10,10 +10,8 @@ RSpec.describe Prog::PageNexus::EscalationInfo do
       blast_radius: "SINGLE",
       impact_timeline: "SOON",
       customer_impact: "DEGRADE",
-      service_ubid: "pgrsc123"
     )
     expect(info.urgency).to eq("PAGE")
-    expect(info.service_ubid).to eq("pgrsc123")
   end
 
   it "defaults optional fields" do
@@ -24,7 +22,6 @@ RSpec.describe Prog::PageNexus::EscalationInfo do
       impact_timeline: "UNLIKELY",
       customer_impact: "NONE"
     )
-    expect(info.service_ubid).to be_nil
     expect(info.customer_actionable).to be false
     expect(info.oncall_mitigable).to be false
   end
@@ -83,7 +80,6 @@ RSpec.describe Prog::PageNexus::EscalationInfo do
       "impact_timeline" => "EVENTUALLY",
       "customer_impact" => "VISIBILITY"
     })
-    expect(h).not_to have_key("service_ubid")
     expect(h["customer_actionable"]).to be false
     expect(h["oncall_mitigable"]).to be false
   end
@@ -103,15 +99,4 @@ RSpec.describe Prog::PageNexus::EscalationInfo do
     expect(h["oncall_mitigable"]).to be true
   end
 
-  it "includes service_ubid in hash when present" do
-    info = described_class.new(
-      urgency: "PAGE",
-      owner: "ubicloud",
-      blast_radius: "SINGLE",
-      impact_timeline: "NOW",
-      customer_impact: "OUTAGE",
-      service_ubid: "pgrsc456"
-    )
-    expect(info.to_h["service_ubid"]).to eq("pgrsc456")
-  end
 end

@@ -451,7 +451,6 @@ class PostgresServer < Sequel::Model
             blast_radius: "SINGLE",
             impact_timeline: "SOON",
             customer_impact: "DEGRADE",
-            service_ubid: resource&.ubid,
             oncall_mitigable: true
           ))
       end
@@ -513,7 +512,6 @@ class PostgresServer < Sequel::Model
           blast_radius: "SINGLE",
           impact_timeline: "UNLIKELY",
           customer_impact: "NONE",
-          service_ubid: resource&.ubid
         ))
     elsif metrics_backlog * metrics_interval < METRICS_BACKLOG_THRESHOLD_SECONDS * 0.8
       Page.from_tag_parts("PGMetricsBacklogHigh", id)&.incr_resolve
@@ -540,8 +538,7 @@ class PostgresServer < Sequel::Model
             owner: "ubicloud",
             blast_radius: "SINGLE",
             impact_timeline: "EVENTUALLY",
-            customer_impact: "DEGRADE",
-            service_ubid: resource&.ubid
+            customer_impact: "DEGRADE"
           ))
       else
         Page.from_tag_parts("PGIOThrottleStale", id)&.incr_resolve
@@ -566,7 +563,6 @@ class PostgresServer < Sequel::Model
           blast_radius: "SINGLE",
           impact_timeline: "EVENTUALLY",
           customer_impact: "NONE",
-          service_ubid: resource&.ubid,
           customer_actionable: true
         ))
     else
@@ -587,7 +583,6 @@ class PostgresServer < Sequel::Model
           blast_radius: "SINGLE",
           impact_timeline: primary? ? "SOON" : "EVENTUALLY",
           customer_impact: primary? ? "DEGRADE" : "NONE",
-          service_ubid: resource&.ubid,
           oncall_mitigable: primary?
         ))
     else

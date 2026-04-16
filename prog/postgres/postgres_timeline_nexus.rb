@@ -76,7 +76,6 @@ class Prog::Postgres::PostgresTimelineNexus < Prog::Base
           blast_radius: "SINGLE",
           impact_timeline: "EVENTUALLY",
           customer_impact: "NONE",
-          service_ubid: postgres_timeline.leader&.resource&.ubid,
           oncall_mitigable: true
         ))
     else
