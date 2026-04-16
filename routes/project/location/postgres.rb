@@ -587,6 +587,102 @@ class Clover
         }
       end
 
+      r.get api?, "status" do
+        authorize("Postgres:view", pg)
+        response.headers["cache-control"] = "no-store"
+
+        # Collect server info from DB
+        servers = pg.servers(eager: [:strand, :semaphores, :vm])
+        primary = servers.find(&:primary?)
+        standbys = servers.reject(&:primary?)
+
+        # Query VictoriaMetrics for live metrics (best-effort)
+        metrics = {}
+        if (tsdb_client = PostgresServer.victoria_metrics_client)
+          metric_queries = {
+            load_1m: "sum(node_load1{ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"})",
+            load_5m: "sum(node_load5{ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"})",
+            load_15m: "sum(node_load15{ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"})",
+            memory_used_percent: "sum((1 - (node_memory_MemAvailable_bytes{ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"} / node_memory_MemTotal_bytes{ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"})) * 100)",
+            disk_used_percent: "100 - (sum(node_filesystem_avail_bytes{mountpoint=\"/dat\", ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"} / node_filesystem_size_bytes{mountpoint=\"/dat\", ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"}) * 100)",
+            connections_active: "sum(pg_stat_activity_count{state=\"active\", ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"})",
+            connections_total: "sum(pg_stat_activity_count{ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"})",
+          }
+
+          metric_queries.each do |key, query|
+            result = begin
+              tsdb_client.query(query:).first
+            rescue
+              nil
+            end
+            metrics[key] = result&.dig("value", 1)&.to_f
+          end
+        end
+
+        # Backup info from timeline
+        backups = pg.timeline&.backups || []
+        latest_backup = backups.map(&:last_modified).max
+
+        # Build primary section
+        primary_status = if primary
+          effective_max_conn = (pg.user_config["max_connections"] || primary.configure_hash["max_connections"]).to_i
+          reserved_conn = (pg.user_config["superuser_reserved_connections"] || primary.configure_hash["superuser_reserved_connections"]).to_i
+          {
+            ubid: primary.ubid,
+            state: primary.display_state,
+            load: {
+              "1m" => metrics[:load_1m],
+              "5m" => metrics[:load_5m],
+              "15m" => metrics[:load_15m],
+            },
+            memory_used_percent: metrics[:memory_used_percent],
+            connections: {
+              active: metrics[:connections_active]&.to_i,
+              total: metrics[:connections_total]&.to_i,
+              max_connections: effective_max_conn,
+              reserved_connections: reserved_conn,
+            },
+            disk_used_percent: metrics[:disk_used_percent],
+          }
+        end
+
+        # Build standby sections — WAL lag computed from lsn_monitor table
+        standby_statuses = standbys.map do |s|
+          wal_lag_bytes = begin
+            s.compute_lsn_lag_bytes
+          rescue
+            nil
+          end
+          {
+            ubid: s.ubid,
+            state: s.display_state,
+            synchronization_status: s.synchronization_status,
+            wal_lag_bytes: wal_lag_bytes,
+          }
+        end
+
+        {
+          service: {
+            ubid: pg.ubid,
+            name: pg.name,
+            state: pg.display_state,
+            ha_type: pg.ha_type,
+            version: pg.version,
+            vm_size: pg.vm_size,
+            storage_size_gib: pg.storage_size_gib,
+            location: pg.location.display_name,
+            latest_backup_at: latest_backup&.utc&.iso8601,
+          },
+          primary: primary_status,
+          standbys: standby_statuses,
+          connectivity: {
+            hostname: pg.hostname,
+            port: 5432,
+            connection_string: pg.connection_string,
+          },
+        }
+      end
+
       r.get "metrics", r.accepts_json? do
         authorize("Postgres:view", pg)
 
