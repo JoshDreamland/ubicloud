@@ -219,8 +219,8 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
             urgency: "PAGE",
             owner: "ubicloud",
             blast_radius: "SINGLE",
-            impact_timeline: "NOW",
-            customer_impact: "OUTAGE",
+            impact_timeline: "SOON",
+            customer_impact: "DEGRADE",
             service_ubid: resource.ubid
           ))
       end

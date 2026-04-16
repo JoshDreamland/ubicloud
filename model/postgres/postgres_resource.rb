@@ -300,7 +300,9 @@ class PostgresResource < Sequel::Model
           blast_radius: "SINGLE",
           impact_timeline: "SOON",
           customer_impact: "OUTAGE",
-          service_ubid: ubid
+          service_ubid: ubid,
+          customer_actionable: true,
+          oncall_mitigable: true
         ))
       :at_max_size
     elsif !project.quota_available?("PostgresVCpu", vcpu_delta(next_option))
@@ -312,7 +314,9 @@ class PostgresResource < Sequel::Model
           blast_radius: "SINGLE",
           impact_timeline: "SOON",
           customer_impact: "OUTAGE",
-          service_ubid: ubid
+          service_ubid: ubid,
+          customer_actionable: true,
+          oncall_mitigable: true
         ))
       :quota_insufficient
     end
@@ -397,7 +401,8 @@ class PostgresResource < Sequel::Model
           blast_radius: "SINGLE",
           impact_timeline: "EVENTUALLY",
           customer_impact: "NONE",
-          service_ubid: ubid
+          service_ubid: ubid,
+          customer_actionable: true
         ))
 
       send_storage_auto_scale_canceled_notification

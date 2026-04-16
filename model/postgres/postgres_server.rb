@@ -451,7 +451,8 @@ class PostgresServer < Sequel::Model
             blast_radius: "SINGLE",
             impact_timeline: "SOON",
             customer_impact: "DEGRADE",
-            service_ubid: resource&.ubid
+            service_ubid: resource&.ubid,
+            oncall_mitigable: true
           ))
       end
     elsif archival_backlog < archival_backlog_threshold * 0.8
@@ -560,12 +561,13 @@ class PostgresServer < Sequel::Model
       Prog::PageNexus.assemble("High disk usage on non-primary PG server (#{disk_usage_percent}%)", ["PGDiskUsageHigh", id], ubid,
         severity: "warning", extra_data: {disk_usage_percent:},
         escalation: Prog::PageNexus::EscalationInfo.new(
-          urgency: "TICKET",
+          urgency: "NOTIFY",
           owner: "ubicloud",
           blast_radius: "SINGLE",
           impact_timeline: "EVENTUALLY",
           customer_impact: "NONE",
-          service_ubid: resource&.ubid
+          service_ubid: resource&.ubid,
+          customer_actionable: true
         ))
     else
       Page.from_tag_parts("PGDiskUsageHigh", id)&.incr_resolve
@@ -585,7 +587,8 @@ class PostgresServer < Sequel::Model
           blast_radius: "SINGLE",
           impact_timeline: primary? ? "SOON" : "EVENTUALLY",
           customer_impact: primary? ? "DEGRADE" : "NONE",
-          service_ubid: resource&.ubid
+          service_ubid: resource&.ubid,
+          oncall_mitigable: primary?
         ))
     else
       Page.from_tag_parts("PGRootDiskUsageHigh", id)&.incr_resolve
