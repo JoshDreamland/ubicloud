@@ -145,9 +145,11 @@ SQL
     echo "    Copying identity tables from $from_db..."
     # Find the source PG's psql (may be a different version than our PG 17)
     SRC_PSQL=$(command -v psql 2>/dev/null || echo "$PG_BIN/psql")
+    DST_PSQL="$PG_BIN/psql -h localhost -p $port -U $(whoami) -d clover_development"
 
-    # Tables owned by clover user, in FK-safe order (parents before children).
-    CLOVER_TABLES=(
+    # Tables to copy, in FK-safe order (parents before children).
+    # Some of these are seeded by migrations, so we truncate-and-replace.
+    COPY_TABLES=(
       account_statuses
       accounts
       project
@@ -162,32 +164,27 @@ SQL
       applied_action_tag
       access_control_entry
       api_key
+      location
+      location_credential_aws
+      location_aws_az
     )
 
-    # Tables owned by clover_password user (separate role for security).
-    CLOVER_PW_TABLES=(
-      account_password_hashes
-    )
-
-    for tbl in "${CLOVER_TABLES[@]}"; do
-      if "$SRC_PSQL" "$from_db" -c "COPY $tbl TO STDOUT" 2>/dev/null \
-        | "$PG_BIN/psql" -h localhost -p "$port" -U "$(whoami)" -d clover_development -c "COPY $tbl FROM STDIN" 2>/dev/null; then
-        echo "      copied $tbl"
-      else
+    for tbl in "${COPY_TABLES[@]}"; do
+      # Truncate target first (CASCADE handles FK deps from seeded data)
+      $DST_PSQL -c "TRUNCATE $tbl CASCADE" >/dev/null 2>&1 || true
+      result=$("$SRC_PSQL" "$from_db" -c "COPY $tbl TO STDOUT" 2>/dev/null \
+        | $DST_PSQL -c "COPY $tbl FROM STDIN" 2>&1) && \
+        echo "      copied $tbl ($result)" || \
         echo "      skipped $tbl (not found or empty in source)"
-      fi
     done
 
-    # Password hashes need clover_password role to read from source
+    # account_password_hashes is owned by clover_password (security isolation)
     from_db_pw="${from_db/user=clover/user=clover_password}"
-    for tbl in "${CLOVER_PW_TABLES[@]}"; do
-      if "$SRC_PSQL" "$from_db_pw" -c "COPY $tbl TO STDOUT" 2>/dev/null \
-        | "$PG_BIN/psql" -h localhost -p "$port" -U "$(whoami)" -d clover_development -c "COPY $tbl FROM STDIN" 2>/dev/null; then
-        echo "      copied $tbl"
-      else
-        echo "      skipped $tbl (needs clover_password access or empty)"
-      fi
-    done
+    $DST_PSQL -c "TRUNCATE account_password_hashes CASCADE" >/dev/null 2>&1 || true
+    result=$("$SRC_PSQL" "$from_db_pw" -c "COPY account_password_hashes TO STDOUT" 2>/dev/null \
+      | $DST_PSQL -c "COPY account_password_hashes FROM STDIN" 2>&1) && \
+      echo "      copied account_password_hashes ($result)" || \
+      echo "      skipped account_password_hashes (needs clover_password access or empty)"
   else
     echo "    Seeding project and admin account..."
     CLOVER_DATABASE_URL="$db_url" RACK_ENV=development bundle exec ruby -r ./loader -e '
