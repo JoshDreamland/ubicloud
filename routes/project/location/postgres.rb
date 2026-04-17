@@ -619,14 +619,20 @@ class Clover
           end
         end
 
-        # Backup info from timeline
-        backups = pg.timeline&.backups || []
-        latest_backup = backups.map(&:last_modified).max
+        # Backup info from timeline (DB columns, no S3 access needed)
+        timeline = pg.timeline
+        latest_backup_at = timeline&.latest_backup_started_at
+        earliest_backup_at = timeline&.cached_earliest_backup_at
 
         # Build primary section
         primary_status = if primary
-          effective_max_conn = (pg.user_config["max_connections"] || primary.configure_hash["max_connections"]).to_i
-          reserved_conn = (pg.user_config["superuser_reserved_connections"] || primary.configure_hash["superuser_reserved_connections"]).to_i
+          default_config = begin
+            primary.configure_hash
+          rescue
+            {}
+          end
+          effective_max_conn = (pg.user_config["max_connections"] || default_config["max_connections"] || "500").to_i
+          reserved_conn = (pg.user_config["superuser_reserved_connections"] || default_config["superuser_reserved_connections"] || "3").to_i
           {
             ubid: primary.ubid,
             state: primary.display_state,
@@ -671,7 +677,11 @@ class Clover
             vm_size: pg.vm_size,
             storage_size_gib: pg.storage_size_gib,
             location: pg.location.display_name,
-            latest_backup_at: latest_backup&.utc&.iso8601,
+            backup: {
+              last_started_at: latest_backup_at&.utc&.iso8601,
+              earliest_at: earliest_backup_at&.utc&.iso8601,
+              configured_interval_hours: timeline&.backup_period_hours,
+            },
           },
           primary: primary_status,
           standbys: standby_statuses,

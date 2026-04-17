@@ -3295,10 +3295,20 @@ components:
               type: integer
             location:
               type: string
-            latest_backup_at:
-              type: string
-              format: date-time
-              nullable: true
+            backup:
+              type: object
+              properties:
+                last_started_at:
+                  type: string
+                  format: date-time
+                  nullable: true
+                earliest_at:
+                  type: string
+                  format: date-time
+                  nullable: true
+                configured_interval_hours:
+                  type: integer
+                  nullable: true
         primary:
           type: object
           nullable: true
