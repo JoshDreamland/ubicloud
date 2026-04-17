@@ -624,6 +624,19 @@ class Clover
         latest_backup_at = timeline&.latest_backup_started_at
         earliest_backup_at = timeline&.cached_earliest_backup_at
 
+        # Build server status with state duration
+        server_status = lambda do |s|
+          state = s.display_state
+          not_running = state != "running"
+          {
+            ubid: s.ubid,
+            state: state,
+            created_at: s.created_at.utc.iso8601,
+            age_seconds: (Time.now - s.created_at).to_i,
+            strand_label: not_running ? s.strand&.label : nil,
+          }.compact
+        end
+
         # Build primary section
         primary_status = if primary
           default_config = begin
@@ -633,9 +646,7 @@ class Clover
           end
           effective_max_conn = (pg.user_config["max_connections"] || default_config["max_connections"] || "500").to_i
           reserved_conn = (pg.user_config["superuser_reserved_connections"] || default_config["superuser_reserved_connections"] || "3").to_i
-          {
-            ubid: primary.ubid,
-            state: primary.display_state,
+          server_status.call(primary).merge(
             load: {
               "1m" => metrics[:load_1m],
               "5m" => metrics[:load_5m],
@@ -649,7 +660,7 @@ class Clover
               reserved_connections: reserved_conn,
             },
             disk_used_percent: metrics[:disk_used_percent],
-          }
+          )
         end
 
         # Build standby sections — WAL lag computed from lsn_monitor table
@@ -659,12 +670,10 @@ class Clover
           rescue
             nil
           end
-          {
-            ubid: s.ubid,
-            state: s.display_state,
+          server_status.call(s).merge(
             synchronization_status: s.synchronization_status,
             wal_lag_bytes: wal_lag_bytes,
-          }
+          )
         end
 
         {
