@@ -624,17 +624,28 @@ class Clover
         latest_backup_at = timeline&.latest_backup_started_at
         earliest_backup_at = timeline&.cached_earliest_backup_at
 
-        # Build server status with state duration
+        # Build server status with state duration and deadline info
         server_status = lambda do |s|
           state = s.display_state
           not_running = state != "running"
-          {
+          frame = s.strand&.stack&.first || {}
+          status = {
             ubid: s.ubid,
             state: state,
             created_at: s.created_at.utc.iso8601,
             age_seconds: (Time.now - s.created_at).to_i,
-            strand_label: not_running ? s.strand&.label : nil,
-          }.compact
+          }
+          if not_running
+            status[:strand_label] = s.strand&.label
+            if frame["deadline_target"]
+              status[:deadline] = {
+                target_label: frame["deadline_target"],
+                expires_at: frame["deadline_at"],
+                started_at: frame["deadline_start"],
+              }.compact
+            end
+          end
+          status
         end
 
         # Build primary section
