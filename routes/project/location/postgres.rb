@@ -624,26 +624,44 @@ class Clover
         latest_backup_at = timeline&.latest_backup_started_at
         earliest_backup_at = timeline&.cached_earliest_backup_at
 
-        # Build server status with state duration and deadline info
+        # Build server status with strand diagnostics nested cleanly
         server_status = lambda do |s|
           state = s.display_state
-          not_running = state != "running"
-          frame = s.strand&.stack&.first || {}
           status = {
             ubid: s.ubid,
             state: state,
             created_at: s.created_at.utc.iso8601,
             age_seconds: (Time.now - s.created_at).to_i,
           }
-          if not_running
-            status[:strand_label] = s.strand&.label
+          if state != "running" && s.strand
+            frame = s.strand.stack&.first || {}
+            strand_info = {
+              prog: s.strand.prog,
+              label: s.strand.label,
+            }
             if frame["deadline_target"]
-              status[:deadline] = {
+              strand_info[:deadline] = {
                 target_label: frame["deadline_target"],
                 expires_at: frame["deadline_at"],
                 started_at: frame["deadline_start"],
               }.compact
             end
+            children = s.strand.children.select { it.exitval.nil? }
+            unless children.empty?
+              strand_info[:children] = children.map do |c|
+                child = {prog: c.prog, label: c.label}
+                cf = c.stack&.first || {}
+                if cf["deadline_target"]
+                  child[:deadline] = {
+                    target_label: cf["deadline_target"],
+                    expires_at: cf["deadline_at"],
+                    started_at: cf["deadline_start"],
+                  }.compact
+                end
+                child
+              end
+            end
+            status[:strand] = strand_info
           end
           status
         end
