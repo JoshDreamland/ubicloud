@@ -1,0 +1,394 @@
+#!/usr/bin/env bash
+#
+# pgenv — manage isolated Postgres data directories for Ubicloud development.
+#
+# Usage:
+#   bin/pgenv create <name>                 Create a new PG isolate, seed project + admin
+#   bin/pgenv create <name> --from <dburl>  Create isolate, copy identity tables from existing DB
+#   bin/pgenv start <name>                  Start an existing PG isolate
+#   bin/pgenv stop [<name>]                 Stop a running isolate (or all if no name)
+#   bin/pgenv use <name>                    Print env vars to connect to an isolate
+#   bin/pgenv list                          List all isolates and their status
+#   bin/pgenv destroy <name>                Remove an isolate and its data
+#   bin/pgenv migrate <name>                Run dev_up migrations on an existing isolate
+#
+# Each isolate gets its own PGDATA directory under .pgdata/<name>/ and runs
+# on a unique port (starting at 54320). Uses mise's Postgres 17 binaries.
+
+set -euo pipefail
+
+PGENV_ROOT="${PGENV_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+PGDATA_BASE="$PGENV_ROOT/.pgdata"
+PORT_BASE=54320
+PG_VERSION="${PGENV_PG_VERSION:-17}"
+
+# Find mise PG binaries
+find_pg_bin() {
+  local pg_base="$HOME/.local/share/mise/installs/postgres"
+  local pg_dir
+  # Try exact version first, then prefix match
+  if [[ -d "$pg_base/$PG_VERSION" ]]; then
+    pg_dir="$pg_base/$PG_VERSION"
+  else
+    pg_dir=$(ls -d "$pg_base/$PG_VERSION"* 2>/dev/null | sort -V | tail -1)
+  fi
+  if [[ -z "$pg_dir" || ! -d "$pg_dir" ]]; then
+    echo "Error: Postgres $PG_VERSION not found in mise. Run: mise install postgres@$PG_VERSION" >&2
+    exit 1
+  fi
+  echo "$pg_dir/bin"
+}
+
+PG_BIN=$(find_pg_bin)
+
+# Derive a stable port from the isolate name
+port_for() {
+  local name="$1"
+  # Hash the name to a port offset (0-999), add to base
+  local hash
+  hash=$(echo -n "$name" | cksum | awk '{print $1}')
+  echo $(( PORT_BASE + (hash % 1000) ))
+}
+
+datadir_for() {
+  echo "$PGDATA_BASE/$1"
+}
+
+pid_for() {
+  local datadir
+  datadir=$(datadir_for "$1")
+  local pidfile="$datadir/postmaster.pid"
+  if [[ -f "$pidfile" ]]; then
+    head -1 "$pidfile"
+  fi
+}
+
+is_running() {
+  local pid
+  pid=$(pid_for "$1")
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+require_name() {
+  if [[ -z "${1:-}" ]]; then
+    echo "Error: isolate name required" >&2
+    echo "Usage: bin/pgenv $CMD <name>" >&2
+    exit 1
+  fi
+}
+
+cmd_create() {
+  require_name "${1:-}"
+  local name="$1"
+  local from_db=""
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --from) from_db="$2"; shift 2 ;;
+      *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+  done
+  local datadir
+  datadir=$(datadir_for "$name")
+  local port
+  port=$(port_for "$name")
+
+  if [[ -d "$datadir" ]]; then
+    echo "Error: isolate '$name' already exists at $datadir" >&2
+    echo "Use 'bin/pgenv destroy $name' first, or 'bin/pgenv start $name'" >&2
+    exit 1
+  fi
+
+  echo "==> Creating isolate '$name' (PG $PG_VERSION, port $port)"
+  mkdir -p "$datadir"
+
+  echo "    Initializing data directory..."
+  "$PG_BIN/initdb" -D "$datadir" --no-locale -E UTF8 -A trust >/dev/null 2>&1
+
+  # Configure for local dev
+  cat >> "$datadir/postgresql.conf" <<CONF
+port = $port
+unix_socket_directories = '$datadir'
+listen_addresses = 'localhost'
+log_destination = 'stderr'
+logging_collector = off
+CONF
+
+  echo "    Starting Postgres..."
+  "$PG_BIN/pg_ctl" -D "$datadir" -l "$datadir/server.log" -o "-k $datadir" start >/dev/null
+
+  # Wait for ready
+  for i in $(seq 1 30); do
+    if "$PG_BIN/pg_isready" -h localhost -p "$port" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.2
+  done
+
+  echo "    Creating database and roles..."
+  "$PG_BIN/psql" -h localhost -p "$port" -U "$(whoami)" -d postgres -q <<SQL
+CREATE ROLE clover LOGIN;
+CREATE ROLE clover_password LOGIN;
+CREATE DATABASE clover_development OWNER clover;
+\\c clover_development
+CREATE EXTENSION IF NOT EXISTS citext;
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+GRANT CREATE ON SCHEMA public TO clover;
+GRANT CREATE ON SCHEMA public TO clover_password;
+SQL
+
+  echo "    Running migrations..."
+  local db_url="postgres://localhost:$port/clover_development?user=clover"
+  CLOVER_DATABASE_URL="$db_url" bundle exec rake dev_up
+
+  if [[ -n "$from_db" ]]; then
+    echo "    Copying identity tables from $from_db..."
+    # Find the source PG's psql (may be a different version than our PG 17)
+    SRC_PSQL=$(command -v psql 2>/dev/null || echo "$PG_BIN/psql")
+
+    # Tables owned by clover user, in FK-safe order (parents before children).
+    CLOVER_TABLES=(
+      account_statuses
+      accounts
+      project
+      account_default_project
+      project_quota
+      access_tag
+      subject_tag
+      object_tag
+      action_tag
+      applied_subject_tag
+      applied_object_tag
+      applied_action_tag
+      access_control_entry
+      api_key
+    )
+
+    # Tables owned by clover_password user (separate role for security).
+    CLOVER_PW_TABLES=(
+      account_password_hashes
+    )
+
+    for tbl in "${CLOVER_TABLES[@]}"; do
+      if "$SRC_PSQL" "$from_db" -c "COPY $tbl TO STDOUT" 2>/dev/null \
+        | "$PG_BIN/psql" -h localhost -p "$port" -U "$(whoami)" -d clover_development -c "COPY $tbl FROM STDIN" 2>/dev/null; then
+        echo "      copied $tbl"
+      else
+        echo "      skipped $tbl (not found or empty in source)"
+      fi
+    done
+
+    # Password hashes need clover_password role to read from source
+    from_db_pw="${from_db/user=clover/user=clover_password}"
+    for tbl in "${CLOVER_PW_TABLES[@]}"; do
+      if "$SRC_PSQL" "$from_db_pw" -c "COPY $tbl TO STDOUT" 2>/dev/null \
+        | "$PG_BIN/psql" -h localhost -p "$port" -U "$(whoami)" -d clover_development -c "COPY $tbl FROM STDIN" 2>/dev/null; then
+        echo "      copied $tbl"
+      else
+        echo "      skipped $tbl (needs clover_password access or empty)"
+      fi
+    done
+  else
+    echo "    Seeding project and admin account..."
+    CLOVER_DATABASE_URL="$db_url" RACK_ENV=development bundle exec ruby -r ./loader -e '
+      # Create default project with private_locations
+      project = Project.first(name: "default")
+      if project
+        puts "    Project \"default\" already exists (id: #{project.id})"
+      else
+        project = Project.create(name: "default", feature_flags: {"private_locations" => true})
+        puts "    Created project \"default\" (id: #{project.id})"
+      end
+      project.set_ff_private_locations(true)
+
+      # Update POSTGRES_SERVICE_PROJECT_ID in .env.rb
+      env_rb = ".env.rb"
+      env_line = "ENV[\"POSTGRES_SERVICE_PROJECT_ID\"] = \"#{project.id}\""
+      content = File.exist?(env_rb) ? File.read(env_rb) : ""
+      if content.include?("POSTGRES_SERVICE_PROJECT_ID")
+        content.gsub!(/^ENV\["POSTGRES_SERVICE_PROJECT_ID"\].*$/, env_line)
+        File.write(env_rb, content)
+        puts "    Updated POSTGRES_SERVICE_PROJECT_ID in .env.rb"
+      end
+
+      # Create admin account
+      password = CloverAdmin.create_admin_account("admin")
+      puts "    Admin account created — user: admin, password: #{password}"
+      puts "    Admin UI: http://admin.localhost:3000"
+    '
+  fi
+
+  echo ""
+  echo "==> Isolate '$name' ready on port $port"
+  echo "    To use:  eval \$(bin/pgenv use $name)"
+  echo "    To stop: bin/pgenv stop $name"
+}
+
+cmd_start() {
+  require_name "${1:-}"
+  local name="$1"
+  local datadir
+  datadir=$(datadir_for "$name")
+  local port
+  port=$(port_for "$name")
+
+  if [[ ! -d "$datadir" ]]; then
+    echo "Error: isolate '$name' not found. Use 'bin/pgenv create $name'" >&2
+    exit 1
+  fi
+
+  if is_running "$name"; then
+    echo "Isolate '$name' is already running on port $port"
+    return 0
+  fi
+
+  echo "Starting isolate '$name' on port $port..."
+  "$PG_BIN/pg_ctl" -D "$datadir" -l "$datadir/server.log" -o "-k $datadir" start >/dev/null
+  echo "Started."
+}
+
+cmd_stop() {
+  local name="${1:-}"
+
+  if [[ -z "$name" ]]; then
+    # Stop all running isolates
+    local stopped=0
+    for dir in "$PGDATA_BASE"/*/; do
+      [[ -d "$dir" ]] || continue
+      local n
+      n=$(basename "$dir")
+      if is_running "$n"; then
+        echo "Stopping '$n'..."
+        "$PG_BIN/pg_ctl" -D "$(datadir_for "$n")" stop -m fast >/dev/null 2>&1 || true
+        ((stopped++))
+      fi
+    done
+    echo "Stopped $stopped isolate(s)."
+    return 0
+  fi
+
+  local datadir
+  datadir=$(datadir_for "$name")
+  if [[ ! -d "$datadir" ]]; then
+    echo "Error: isolate '$name' not found." >&2
+    exit 1
+  fi
+
+  if ! is_running "$name"; then
+    echo "Isolate '$name' is not running."
+    return 0
+  fi
+
+  echo "Stopping '$name'..."
+  "$PG_BIN/pg_ctl" -D "$datadir" stop -m fast >/dev/null
+  echo "Stopped."
+}
+
+cmd_use() {
+  require_name "${1:-}"
+  local name="$1"
+  local datadir
+  datadir=$(datadir_for "$name")
+  local port
+  port=$(port_for "$name")
+
+  if [[ ! -d "$datadir" ]]; then
+    echo "Error: isolate '$name' not found." >&2
+    exit 1
+  fi
+
+  if ! is_running "$name"; then
+    echo "# Warning: isolate '$name' is not running. Start it with: bin/pgenv start $name" >&2
+  fi
+
+  echo "export CLOVER_DATABASE_URL='postgres://localhost:$port/clover_development?user=clover'"
+  echo "# Isolate: $name (port $port)"
+}
+
+cmd_list() {
+  if [[ ! -d "$PGDATA_BASE" ]] || [[ -z "$(ls -A "$PGDATA_BASE" 2>/dev/null)" ]]; then
+    echo "No isolates found. Create one with: bin/pgenv create <name>"
+    return 0
+  fi
+
+  printf "%-20s %-8s %-10s %s\n" "NAME" "PORT" "STATUS" "DATABASE URL"
+  printf "%-20s %-8s %-10s %s\n" "----" "----" "------" "------------"
+  for dir in "$PGDATA_BASE"/*/; do
+    [[ -d "$dir" ]] || continue
+    local name
+    name=$(basename "$dir")
+    local port
+    port=$(port_for "$name")
+    local status="stopped"
+    if is_running "$name"; then
+      status="running"
+    fi
+    printf "%-20s %-8s %-10s %s\n" "$name" "$port" "$status" "postgres://localhost:$port/clover_development?user=clover"
+  done
+}
+
+cmd_destroy() {
+  require_name "${1:-}"
+  local name="$1"
+  local datadir
+  datadir=$(datadir_for "$name")
+
+  if [[ ! -d "$datadir" ]]; then
+    echo "Error: isolate '$name' not found." >&2
+    exit 1
+  fi
+
+  if is_running "$name"; then
+    echo "Stopping '$name' first..."
+    "$PG_BIN/pg_ctl" -D "$datadir" stop -m fast >/dev/null 2>&1 || true
+  fi
+
+  echo "Removing isolate '$name'..."
+  rm -rf "$datadir"
+  echo "Destroyed."
+}
+
+cmd_migrate() {
+  require_name "${1:-}"
+  local name="$1"
+  local datadir
+  datadir=$(datadir_for "$name")
+  local port
+  port=$(port_for "$name")
+
+  if [[ ! -d "$datadir" ]]; then
+    echo "Error: isolate '$name' not found." >&2
+    exit 1
+  fi
+
+  if ! is_running "$name"; then
+    echo "Error: isolate '$name' is not running. Start it first." >&2
+    exit 1
+  fi
+
+  echo "Running migrations on isolate '$name'..."
+  CLOVER_DATABASE_URL="postgres://localhost:$port/clover_development?user=clover" bundle exec rake dev_up
+  echo "Done."
+}
+
+# Main dispatch
+CMD="${1:-help}"
+shift || true
+
+case "$CMD" in
+  create)  cmd_create "$@" ;;
+  start)   cmd_start "$@" ;;
+  stop)    cmd_stop "$@" ;;
+  use)     cmd_use "$@" ;;
+  list|ls) cmd_list ;;
+  destroy) cmd_destroy "$@" ;;
+  migrate) cmd_migrate "$@" ;;
+  help|-h|--help)
+    sed -n '2,/^$/{ s/^# \?//; p }' "$0"
+    ;;
+  *)
+    echo "Unknown command: $CMD" >&2
+    echo "Run 'bin/pgenv help' for usage." >&2
+    exit 1
+    ;;
+esac
