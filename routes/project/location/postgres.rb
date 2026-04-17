@@ -626,35 +626,28 @@ class Clover
           info
         end
 
-        # Build unified server status — same schema for primary and standbys
-        server_status = lambda do |s|
+        # Build base server status (shared between primary and standbys)
+        server_base = lambda do |s|
           role = s.primary? ? "primary" : "standby"
           state = s.display_state
           rid = pg.ubid
 
-          # Metrics (queried per-server by role label)
           status = {
             ubid: s.ubid,
-            role: role,
             state: state,
             created_at: s.created_at.utc.iso8601,
             age_seconds: (Time.now - s.created_at).to_i,
-            synchronization_status: s.synchronization_status,
-            vm_metrics: {
+            resources: {
               load_1m: vm_query.call("sum(node_load1{ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"})"),
               load_5m: vm_query.call("sum(node_load5{ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"})"),
               load_15m: vm_query.call("sum(node_load15{ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"})"),
               memory_used_percent: vm_query.call("sum((1 - (node_memory_MemAvailable_bytes{ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"} / node_memory_MemTotal_bytes{ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"})) * 100)"),
               disk_used_percent: vm_query.call("100 - (sum(node_filesystem_avail_bytes{mountpoint=\"/dat\", ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"} / node_filesystem_size_bytes{mountpoint=\"/dat\", ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"}) * 100)"),
-            },
-            pg_metrics: {
               connections_active: vm_query.call("sum(pg_stat_activity_count{state=\"active\", ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"})")&.to_i,
               connections_total: vm_query.call("sum(pg_stat_activity_count{ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"})")&.to_i,
-              wal_lag_bytes: s.primary? ? nil : (s.compute_lsn_lag_bytes rescue nil),
             },
           }
 
-          # Strand diagnostics for non-running servers
           if state != "running" && s.strand
             status[:strand] = strand_diagnostics.call(s.strand)
           end
@@ -674,6 +667,27 @@ class Clover
         # Backup info from timeline (DB columns, no S3 access needed)
         timeline = pg.timeline
 
+        # Build primary with wal_archival
+        primary_status = if primary
+          rid = pg.ubid
+          server_base.call(primary).merge(
+            wal_archival: {
+              backlog_count: vm_query.call("pg_archival_backlog_count{ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"primary\"}")&.to_i,
+              metrics_backlog_count: vm_query.call("pg_metrics_backlog_count{ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"primary\"}")&.to_i,
+            },
+          )
+        end
+
+        # Build standbys with replication
+        standby_statuses = standbys.map do |s|
+          server_base.call(s).merge(
+            replication: {
+              synchronization_status: s.synchronization_status,
+              wal_lag_bytes: (s.compute_lsn_lag_bytes rescue nil),
+            },
+          )
+        end
+
         {
           service: {
             ubid: pg.ubid,
@@ -690,7 +704,8 @@ class Clover
               configured_interval_hours: timeline&.backup_period_hours,
             },
           },
-          servers: servers.map { |s| server_status.call(s) },
+          primary: primary_status,
+          standbys: standby_statuses,
           connectivity: {
             hostname: pg.hostname,
             port: 5432,

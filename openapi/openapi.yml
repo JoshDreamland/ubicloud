@@ -3293,14 +3293,11 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/PostgresStrandDiagnostics'
-    PostgresServerStatus:
+    PostgresServerBase:
       type: object
       properties:
         ubid:
           type: string
-        role:
-          type: string
-          enum: [primary, standby]
         state:
           type: string
         created_at:
@@ -3308,9 +3305,7 @@ components:
           format: date-time
         age_seconds:
           type: integer
-        synchronization_status:
-          type: string
-        vm_metrics:
+        resources:
           type: object
           properties:
             load_1m:
@@ -3328,20 +3323,43 @@ components:
             disk_used_percent:
               type: number
               nullable: true
-        pg_metrics:
-          type: object
-          properties:
             connections_active:
               type: integer
               nullable: true
             connections_total:
               type: integer
               nullable: true
-            wal_lag_bytes:
-              type: integer
-              nullable: true
         strand:
           $ref: '#/components/schemas/PostgresStrandDiagnostics'
+    PostgresPrimaryStatus:
+      allOf:
+        - $ref: '#/components/schemas/PostgresServerBase'
+        - type: object
+          properties:
+            wal_archival:
+              type: object
+              properties:
+                backlog_count:
+                  type: integer
+                  nullable: true
+                  description: Number of 16MB WAL segments pending archival
+                metrics_backlog_count:
+                  type: integer
+                  nullable: true
+                  description: Number of unsent metrics scrape files
+    PostgresStandbyStatus:
+      allOf:
+        - $ref: '#/components/schemas/PostgresServerBase'
+        - type: object
+          properties:
+            replication:
+              type: object
+              properties:
+                synchronization_status:
+                  type: string
+                wal_lag_bytes:
+                  type: integer
+                  nullable: true
     PostgresStatus:
       type: object
       properties:
@@ -3378,10 +3396,12 @@ components:
                 configured_interval_hours:
                   type: integer
                   nullable: true
-        servers:
+        primary:
+          $ref: '#/components/schemas/PostgresPrimaryStatus'
+        standbys:
           type: array
           items:
-            $ref: '#/components/schemas/PostgresServerStatus'
+            $ref: '#/components/schemas/PostgresStandbyStatus'
         connectivity:
           type: object
           properties:
