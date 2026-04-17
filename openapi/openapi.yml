@@ -3273,6 +3273,75 @@ components:
       required:
         - key
         - last_modified
+    PostgresStrandDiagnostics:
+      type: object
+      properties:
+        prog:
+          type: string
+        label:
+          type: string
+        deadline:
+          type: object
+          properties:
+            target_label:
+              type: string
+            expires_at:
+              type: string
+            started_at:
+              type: string
+        children:
+          type: array
+          items:
+            $ref: '#/components/schemas/PostgresStrandDiagnostics'
+    PostgresServerStatus:
+      type: object
+      properties:
+        ubid:
+          type: string
+        role:
+          type: string
+          enum: [primary, standby]
+        state:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        age_seconds:
+          type: integer
+        synchronization_status:
+          type: string
+        vm_metrics:
+          type: object
+          properties:
+            load_1m:
+              type: number
+              nullable: true
+            load_5m:
+              type: number
+              nullable: true
+            load_15m:
+              type: number
+              nullable: true
+            memory_used_percent:
+              type: number
+              nullable: true
+            disk_used_percent:
+              type: number
+              nullable: true
+        pg_metrics:
+          type: object
+          properties:
+            connections_active:
+              type: integer
+              nullable: true
+            connections_total:
+              type: integer
+              nullable: true
+            wal_lag_bytes:
+              type: integer
+              nullable: true
+        strand:
+          $ref: '#/components/schemas/PostgresStrandDiagnostics'
     PostgresStatus:
       type: object
       properties:
@@ -3309,65 +3378,20 @@ components:
                 configured_interval_hours:
                   type: integer
                   nullable: true
-        primary:
-          type: object
-          nullable: true
-          properties:
-            ubid:
-              type: string
-            state:
-              type: string
-            load:
-              type: object
-              properties:
-                1m:
-                  type: number
-                  nullable: true
-                5m:
-                  type: number
-                  nullable: true
-                15m:
-                  type: number
-                  nullable: true
-            memory_used_percent:
-              type: number
-              nullable: true
-            connections:
-              type: object
-              properties:
-                active:
-                  type: integer
-                  nullable: true
-                total:
-                  type: integer
-                  nullable: true
-                max_connections:
-                  type: integer
-                reserved_connections:
-                  type: integer
-            disk_used_percent:
-              type: number
-              nullable: true
-        standbys:
+        servers:
           type: array
           items:
-            type: object
-            properties:
-              ubid:
-                type: string
-              state:
-                type: string
-              synchronization_status:
-                type: string
-              wal_lag_bytes:
-                type: integer
-                nullable: true
+            $ref: '#/components/schemas/PostgresServerStatus'
         connectivity:
           type: object
           properties:
             hostname:
               type: string
             port:
+              type: integer
+            max_connections:
+              type: integer
+            reserved_connections:
               type: integer
             connection_string:
               type: string

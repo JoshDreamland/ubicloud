@@ -596,114 +596,83 @@ class Clover
         primary = servers.find(&:primary?)
         standbys = servers.reject(&:primary?)
 
-        # Query VictoriaMetrics for live metrics (best-effort)
-        metrics = {}
-        if (tsdb_client = PostgresServer.victoria_metrics_client)
-          metric_queries = {
-            load_1m: "sum(node_load1{ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"})",
-            load_5m: "sum(node_load5{ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"})",
-            load_15m: "sum(node_load15{ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"})",
-            memory_used_percent: "sum((1 - (node_memory_MemAvailable_bytes{ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"} / node_memory_MemTotal_bytes{ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"})) * 100)",
-            disk_used_percent: "100 - (sum(node_filesystem_avail_bytes{mountpoint=\"/dat\", ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"} / node_filesystem_size_bytes{mountpoint=\"/dat\", ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"}) * 100)",
-            connections_active: "sum(pg_stat_activity_count{state=\"active\", ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"})",
-            connections_total: "sum(pg_stat_activity_count{ubicloud_resource_id=\"#{pg.ubid}\", ubicloud_resource_role=\"primary\"})",
-          }
+        tsdb_client = PostgresServer.victoria_metrics_client
 
-          metric_queries.each do |key, query|
-            result = begin
-              tsdb_client.query(query:).first
-            rescue
-              nil
-            end
-            metrics[key] = result&.dig("value", 1)&.to_f
-          end
-        end
-
-        # Backup info from timeline (DB columns, no S3 access needed)
-        timeline = pg.timeline
-        latest_backup_at = timeline&.latest_backup_started_at
-        earliest_backup_at = timeline&.cached_earliest_backup_at
-
-        # Build server status with strand diagnostics nested cleanly
-        server_status = lambda do |s|
-          state = s.display_state
-          status = {
-            ubid: s.ubid,
-            state: state,
-            created_at: s.created_at.utc.iso8601,
-            age_seconds: (Time.now - s.created_at).to_i,
-          }
-          if state != "running" && s.strand
-            frame = s.strand.stack&.first || {}
-            strand_info = {
-              prog: s.strand.prog,
-              label: s.strand.label,
-            }
-            if frame["deadline_target"]
-              strand_info[:deadline] = {
-                target_label: frame["deadline_target"],
-                expires_at: frame["deadline_at"],
-                started_at: frame["deadline_start"],
-              }.compact
-            end
-            children = s.strand.children.select { it.exitval.nil? }
-            unless children.empty?
-              strand_info[:children] = children.map do |c|
-                child = {prog: c.prog, label: c.label}
-                cf = c.stack&.first || {}
-                if cf["deadline_target"]
-                  child[:deadline] = {
-                    target_label: cf["deadline_target"],
-                    expires_at: cf["deadline_at"],
-                    started_at: cf["deadline_start"],
-                  }.compact
-                end
-                child
-              end
-            end
-            status[:strand] = strand_info
-          end
-          status
-        end
-
-        # Build primary section
-        primary_status = if primary
-          default_config = begin
-            primary.configure_hash
-          rescue
-            {}
-          end
-          effective_max_conn = (pg.user_config["max_connections"] || default_config["max_connections"] || "500").to_i
-          reserved_conn = (pg.user_config["superuser_reserved_connections"] || default_config["superuser_reserved_connections"] || "3").to_i
-          server_status.call(primary).merge(
-            load: {
-              "1m" => metrics[:load_1m],
-              "5m" => metrics[:load_5m],
-              "15m" => metrics[:load_15m],
-            },
-            memory_used_percent: metrics[:memory_used_percent],
-            connections: {
-              active: metrics[:connections_active]&.to_i,
-              total: metrics[:connections_total]&.to_i,
-              max_connections: effective_max_conn,
-              reserved_connections: reserved_conn,
-            },
-            disk_used_percent: metrics[:disk_used_percent],
-          )
-        end
-
-        # Build standby sections — WAL lag computed from lsn_monitor table
-        standby_statuses = standbys.map do |s|
-          wal_lag_bytes = begin
-            s.compute_lsn_lag_bytes
+        # Query a single instant metric from VictoriaMetrics (best-effort)
+        vm_query = lambda do |query|
+          return nil unless tsdb_client
+          begin
+            tsdb_client.query(query:).first&.dig("value", 1)&.to_f
           rescue
             nil
           end
-          server_status.call(s).merge(
-            synchronization_status: s.synchronization_status,
-            wal_lag_bytes: wal_lag_bytes,
-          )
         end
+
+        # Build strand diagnostics for a non-running server
+        strand_diagnostics = lambda do |st|
+          frame = st.stack&.first || {}
+          info = {prog: st.prog, label: st.label}
+          if frame["deadline_target"]
+            info[:deadline] = {
+              target_label: frame["deadline_target"],
+              expires_at: frame["deadline_at"],
+              started_at: frame["deadline_start"],
+            }.compact
+          end
+          children = st.children.select { it.exitval.nil? }
+          unless children.empty?
+            info[:children] = children.map { |c| strand_diagnostics.call(c) }
+          end
+          info
+        end
+
+        # Build unified server status — same schema for primary and standbys
+        server_status = lambda do |s|
+          role = s.primary? ? "primary" : "standby"
+          state = s.display_state
+          rid = pg.ubid
+
+          # Metrics (queried per-server by role label)
+          status = {
+            ubid: s.ubid,
+            role: role,
+            state: state,
+            created_at: s.created_at.utc.iso8601,
+            age_seconds: (Time.now - s.created_at).to_i,
+            synchronization_status: s.synchronization_status,
+            vm_metrics: {
+              load_1m: vm_query.call("sum(node_load1{ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"})"),
+              load_5m: vm_query.call("sum(node_load5{ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"})"),
+              load_15m: vm_query.call("sum(node_load15{ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"})"),
+              memory_used_percent: vm_query.call("sum((1 - (node_memory_MemAvailable_bytes{ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"} / node_memory_MemTotal_bytes{ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"})) * 100)"),
+              disk_used_percent: vm_query.call("100 - (sum(node_filesystem_avail_bytes{mountpoint=\"/dat\", ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"} / node_filesystem_size_bytes{mountpoint=\"/dat\", ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"}) * 100)"),
+            },
+            pg_metrics: {
+              connections_active: vm_query.call("sum(pg_stat_activity_count{state=\"active\", ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"})")&.to_i,
+              connections_total: vm_query.call("sum(pg_stat_activity_count{ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"})")&.to_i,
+              wal_lag_bytes: s.primary? ? nil : (s.compute_lsn_lag_bytes rescue nil),
+            },
+          }
+
+          # Strand diagnostics for non-running servers
+          if state != "running" && s.strand
+            status[:strand] = strand_diagnostics.call(s.strand)
+          end
+
+          status
+        end
+
+        # Connection config from primary
+        default_config = begin
+          primary&.configure_hash || {}
+        rescue
+          {}
+        end
+        effective_max_conn = (pg.user_config["max_connections"] || default_config["max_connections"] || "500").to_i
+        reserved_conn = (pg.user_config["superuser_reserved_connections"] || default_config["superuser_reserved_connections"] || "3").to_i
+
+        # Backup info from timeline (DB columns, no S3 access needed)
+        timeline = pg.timeline
 
         {
           service: {
@@ -716,16 +685,17 @@ class Clover
             storage_size_gib: pg.storage_size_gib,
             location: pg.location.display_name,
             backup: {
-              last_started_at: latest_backup_at&.utc&.iso8601,
-              earliest_at: earliest_backup_at&.utc&.iso8601,
+              last_started_at: timeline&.latest_backup_started_at&.utc&.iso8601,
+              earliest_at: timeline&.cached_earliest_backup_at&.utc&.iso8601,
               configured_interval_hours: timeline&.backup_period_hours,
             },
           },
-          primary: primary_status,
-          standbys: standby_statuses,
+          servers: servers.map { |s| server_status.call(s) },
           connectivity: {
             hostname: pg.hostname,
             port: 5432,
+            max_connections: effective_max_conn,
+            reserved_connections: reserved_conn,
             connection_string: pg.connection_string,
           },
         }
