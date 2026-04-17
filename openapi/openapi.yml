@@ -1140,6 +1140,25 @@ paths:
           $ref: '#/components/responses/Error'
       tags:
         - Postgres Database
+  '/project/{project_id}/location/{location}/postgres/{postgres_database_reference}/status':
+    parameters:
+      - $ref: '#/components/parameters/project_id'
+      - $ref: '#/components/parameters/location'
+      - $ref: '#/components/parameters/postgres_database_reference'
+    get:
+      operationId: getPostgresDatabaseStatus
+      summary: Get live status and metrics for a PostgreSQL database
+      responses:
+        '200':
+          description: Live status including service metadata, primary/standby stats, and connectivity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostgresStatus'
+        default:
+          $ref: '#/components/responses/Error'
+      tags:
+        - Postgres Database
   '/project/{project_id}/location/{location}/postgres/{postgres_database_reference}/ca-certificates':
     parameters:
       - $ref: '#/components/parameters/project_id'
@@ -3254,6 +3273,94 @@ components:
       required:
         - key
         - last_modified
+    PostgresStatus:
+      type: object
+      properties:
+        service:
+          type: object
+          properties:
+            ubid:
+              type: string
+            name:
+              type: string
+            state:
+              type: string
+            ha_type:
+              type: string
+            version:
+              type: string
+            vm_size:
+              type: string
+            storage_size_gib:
+              type: integer
+            location:
+              type: string
+            latest_backup_at:
+              type: string
+              format: date-time
+              nullable: true
+        primary:
+          type: object
+          nullable: true
+          properties:
+            ubid:
+              type: string
+            state:
+              type: string
+            load:
+              type: object
+              properties:
+                1m:
+                  type: number
+                  nullable: true
+                5m:
+                  type: number
+                  nullable: true
+                15m:
+                  type: number
+                  nullable: true
+            memory_used_percent:
+              type: number
+              nullable: true
+            connections:
+              type: object
+              properties:
+                active:
+                  type: integer
+                  nullable: true
+                total:
+                  type: integer
+                  nullable: true
+                max_connections:
+                  type: integer
+                reserved_connections:
+                  type: integer
+            disk_used_percent:
+              type: number
+              nullable: true
+        standbys:
+          type: array
+          items:
+            type: object
+            properties:
+              ubid:
+                type: string
+              state:
+                type: string
+              synchronization_status:
+                type: string
+              wal_lag_bytes:
+                type: integer
+                nullable: true
+        connectivity:
+          type: object
+          properties:
+            hostname:
+              type: string
+            port:
+              type: integer
+            connection_string:
+              type: string
     PostgresFirewallRule:
       type: object
       properties:
