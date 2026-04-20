@@ -130,6 +130,124 @@ class Clover
     end
   end
 
+  def postgres_status(pg)
+    servers = pg.servers(eager: [:strand, :semaphores, :vm])
+    primary = servers.find(&:primary?)
+    standbys = servers.reject(&:primary?)
+    tsdb_client = PostgresServer.victoria_metrics_client
+
+    {
+      service: service_status(pg),
+      primary: primary && primary_status(pg, primary, tsdb_client),
+      standbys: standbys.map { |s| standby_status(pg, s, tsdb_client) },
+      connectivity: connectivity_status(pg, primary),
+    }
+  end
+
+  def service_status(pg)
+    timeline = pg.timeline
+    {
+      ubid: pg.ubid,
+      name: pg.name,
+      state: pg.display_state,
+      ha_type: pg.ha_type,
+      version: pg.version,
+      vm_size: pg.vm_size,
+      storage_size_gib: pg.storage_size_gib,
+      location: pg.location.display_name,
+      backup: {
+        last_started_at: timeline&.latest_backup_started_at&.utc&.iso8601,
+        earliest_at: timeline&.cached_earliest_backup_at&.utc&.iso8601,
+        configured_interval_hours: timeline&.backup_period_hours,
+      },
+    }
+  end
+
+  def primary_status(pg, server, tsdb_client)
+    server_status(pg, server, tsdb_client).merge(
+      wal_archival: {
+        backlog_count: query_server_metric(tsdb_client, "pg_archival_backlog_count", pg.ubid, "primary")&.to_i,
+        metrics_backlog_count: query_server_metric(tsdb_client, "pg_metrics_backlog_count", pg.ubid, "primary")&.to_i,
+      }
+    )
+  end
+
+  def standby_status(pg, server, tsdb_client)
+    server_status(pg, server, tsdb_client).merge(
+      replication: {
+        synchronization_status: server.synchronization_status,
+        wal_lag_bytes: (server.compute_lsn_lag_bytes rescue nil),
+      }
+    )
+  end
+
+  def server_status(pg, server, tsdb_client)
+    role = server.primary? ? "primary" : "standby"
+    state = server.display_state
+    status = {
+      ubid: server.ubid,
+      state: state,
+      created_at: server.created_at.utc.iso8601,
+      age_seconds: (Time.now - server.created_at).to_i,
+      resources: server_resources(tsdb_client, pg.ubid, role),
+    }
+    status[:strand] = strand_diagnostics(server.strand) if state != "running" && server.strand
+    status
+  end
+
+  def server_resources(tsdb_client, rid, role)
+    {
+      load_1m: query_server_metric(tsdb_client, "node_load1", rid, role),
+      load_5m: query_server_metric(tsdb_client, "node_load5", rid, role),
+      load_15m: query_server_metric(tsdb_client, "node_load15", rid, role),
+      memory_used_percent: query_metric(tsdb_client, "sum((1 - (node_memory_MemAvailable_bytes{ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"} / node_memory_MemTotal_bytes{ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"})) * 100)"),
+      disk_used_percent: query_metric(tsdb_client, "100 - (sum(node_filesystem_avail_bytes{mountpoint=\"/dat\", ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"} / node_filesystem_size_bytes{mountpoint=\"/dat\", ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\"}) * 100)"),
+      connections_active: query_server_metric(tsdb_client, "pg_stat_activity_count", rid, role, extra_labels: "state=\"active\"")&.to_i,
+      connections_total: query_server_metric(tsdb_client, "pg_stat_activity_count", rid, role)&.to_i,
+    }
+  end
+
+  def connectivity_status(pg, primary)
+    default_config = begin
+      primary&.configure_hash || {}
+    rescue
+      {}
+    end
+    {
+      hostname: pg.hostname,
+      port: 5432,
+      max_connections: (pg.user_config["max_connections"] || default_config["max_connections"] || "500").to_i,
+      reserved_connections: (pg.user_config["superuser_reserved_connections"] || default_config["superuser_reserved_connections"] || "3").to_i,
+      connection_string: pg.connection_string,
+    }
+  end
+
+  def strand_diagnostics(strand)
+    frame = strand.stack&.first || {}
+    info = {prog: strand.prog, label: strand.label}
+    if frame["deadline_target"]
+      info[:deadline] = {
+        target_label: frame["deadline_target"],
+        expires_at: frame["deadline_at"],
+        started_at: frame["deadline_start"],
+      }.compact
+    end
+    children = strand.children.select { it.exitval.nil? }
+    info[:children] = children.map { |c| strand_diagnostics(c) } unless children.empty?
+    info
+  end
+
+  def query_metric(tsdb_client, query)
+    return nil unless tsdb_client
+    tsdb_client.query(query:).first&.dig("value", 1)&.to_f rescue nil
+  end
+
+  def query_server_metric(tsdb_client, metric, rid, role, extra_labels: nil)
+    labels = "ubicloud_resource_id=\"#{rid}\", ubicloud_resource_role=\"#{role}\""
+    labels = "#{extra_labels}, #{labels}" if extra_labels
+    query_metric(tsdb_client, "sum(#{metric}{#{labels}})")
+  end
+
   def validate_postgres_input(name, postgres_params)
     Validation.validate_name(name)
 
