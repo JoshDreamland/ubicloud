@@ -64,6 +64,16 @@ class Prog::Postgres::PostgresTimelineNexus < Prog::Base
       Page.from_tag_parts("MissingBackup", postgres_timeline.id)&.incr_resolve
     end
 
+    # Emit a completion event each wait cycle while at least one backup
+    # exists. `completed_at` is the S3 last_modified of the latest backup
+    # sentinel, so re-emits across cycles carry the same timestamp and
+    # are dedupable at query time. Failed backups leave no sentinel and
+    # are not visible here; the 2-day missing-backup pager above covers
+    # extended failure.
+    if backups.any?
+      Clog.emit("Postgres backup completed", [{completed_at: latest_backup_completed_at}, postgres_timeline])
+    end
+
     if postgres_timeline.need_backup?
       hop_take_backup
     end
