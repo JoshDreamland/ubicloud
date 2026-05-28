@@ -340,7 +340,7 @@ RSpec.describe Prog::Postgres::PostgresTimelineNexus do
       mock_minio_client(list_objects: [backup])
 
       expect(nx.postgres_timeline.leader.vm.sshable).to receive(:_cmd).with("common/bin/daemonizer --check take_postgres_backup").and_return("NotStarted")
-      expect(Clog).to receive(:emit).with("Postgres backup completed", [hash_including(completed_at: backup.last_modified), postgres_timeline])
+      expect(Clog).to receive(:emit).with("Postgres backup completed", [hash_including(completed_at: backup.last_modified, resource_id: resource.ubid), postgres_timeline])
 
       expect { nx.wait }.to hop("take_backup")
     end
@@ -356,7 +356,7 @@ RSpec.describe Prog::Postgres::PostgresTimelineNexus do
       mock_minio_client(list_objects: [backup])
 
       expect(nx.postgres_timeline.leader.vm.sshable).to receive(:_cmd).with("common/bin/daemonizer --check take_postgres_backup").and_return("Succeeded")
-      expect(Clog).to receive(:emit).with("Postgres backup completed", [hash_including(completed_at: backup.last_modified), postgres_timeline])
+      expect(Clog).to receive(:emit).with("Postgres backup completed", [hash_including(completed_at: backup.last_modified, resource_id: resource.ubid), postgres_timeline])
 
       expect { nx.wait }.to nap(20 * 60)
       expect(Page.active.count).to eq(1)
@@ -373,7 +373,7 @@ RSpec.describe Prog::Postgres::PostgresTimelineNexus do
       mock_minio_client(list_objects: [backup])
 
       expect(nx.postgres_timeline.leader.vm.sshable).to receive(:_cmd).with("common/bin/daemonizer --check take_postgres_backup").and_return("Succeeded")
-      expect(Clog).to receive(:emit).with("Postgres backup completed", [hash_including(completed_at: backup.last_modified), postgres_timeline])
+      expect(Clog).to receive(:emit).with("Postgres backup completed", [hash_including(completed_at: backup.last_modified, resource_id: resource.ubid), postgres_timeline])
 
       # Create a real Page with the "MissingBackup" tag and its Strand (needed for semaphores)
       page = Page.create(tag: Page.generate_tag(["MissingBackup", postgres_timeline.id]), summary: "Missing backup")
@@ -394,7 +394,7 @@ RSpec.describe Prog::Postgres::PostgresTimelineNexus do
       mock_minio_client(list_objects: [backup])
 
       expect(nx.postgres_timeline.leader.vm.sshable).to receive(:_cmd).with("common/bin/daemonizer --check take_postgres_backup").and_return("Succeeded")
-      expect(Clog).to receive(:emit).with("Postgres backup completed", [hash_including(completed_at: backup.last_modified), postgres_timeline])
+      expect(Clog).to receive(:emit).with("Postgres backup completed", [hash_including(completed_at: backup.last_modified, resource_id: resource.ubid), postgres_timeline])
 
       expect { nx.wait }.to nap(20 * 60)
     end

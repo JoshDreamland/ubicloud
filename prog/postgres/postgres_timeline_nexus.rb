@@ -69,9 +69,11 @@ class Prog::Postgres::PostgresTimelineNexus < Prog::Base
     # sentinel, so re-emits across cycles carry the same timestamp and
     # are dedupable at query time. Failed backups leave no sentinel and
     # are not visible here; the 2-day missing-backup pager above covers
-    # extended failure.
+    # extended failure. `dependent` is any server on this timeline (not
+    # filtered to leader), so the resource UBID is still emitted while a
+    # primary is being replaced.
     if backups.any?
-      Clog.emit("Postgres backup completed", [{completed_at: latest_backup_completed_at}, postgres_timeline])
+      Clog.emit("Postgres backup completed", [{completed_at: latest_backup_completed_at, resource_id: dependent&.resource&.ubid}, postgres_timeline])
     end
 
     if postgres_timeline.need_backup?
