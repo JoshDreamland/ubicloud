@@ -124,7 +124,12 @@ class Prog::Postgres::PostgresTimelineNexus < Prog::Base
   def emit_backup_completion(status)
     started = postgres_timeline.latest_backup_started_at
     duration_seconds = started ? Time.now - started : nil
-    Clog.emit("Postgres backup completed", [{status:, duration_seconds:}, postgres_timeline])
+    # await_backup is only entered immediately after take_backup, which
+    # requires postgres_timeline.leader to be present. The &. is defensive
+    # against teardown races (leader removed between take_backup and our
+    # first poll); a nil resource_id is preferable to a NoMethodError.
+    resource_id = postgres_timeline.leader&.resource&.ubid
+    Clog.emit("Postgres backup completed", [{status:, duration_seconds:, resource_id:}, postgres_timeline])
   end
 
   label def destroy
