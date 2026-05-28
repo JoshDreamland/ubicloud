@@ -423,8 +423,55 @@ RSpec.describe Prog::Postgres::PostgresTimelineNexus do
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer --check take_postgres_backup").and_return("NotStarted").ordered
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer sudo\\ postgres/bin/take-backup\\ 17 take_postgres_backup").ordered
 
-      expect { nx.take_backup }.to hop("wait")
+      expect { nx.take_backup }.to hop("await_backup")
       expect(postgres_timeline.reload.latest_backup_started_at).not_to be_nil
+    end
+  end
+
+  describe "#await_backup" do
+    let(:minio_cluster) { create_minio_cluster }
+    let(:resource) { create_postgres_resource(project:, location_id:) }
+    let(:server) { create_postgres_server(resource:, timeline: postgres_timeline).tap { it.strand.update(label: "wait") } }
+
+    before do
+      minio_cluster
+      server
+      postgres_timeline.update(latest_backup_started_at: Time.now - 120)
+    end
+
+    it "naps while the backup is still running" do
+      expect(nx.postgres_timeline.leader.vm.sshable).to receive(:_cmd).with("common/bin/daemonizer --check take_postgres_backup").and_return("InProgress")
+      expect { nx.await_backup }.to nap(30)
+    end
+
+    it "naps if daemonizer reports NotStarted (race after take_backup launched it)" do
+      expect(nx.postgres_timeline.leader.vm.sshable).to receive(:_cmd).with("common/bin/daemonizer --check take_postgres_backup").and_return("NotStarted")
+      expect { nx.await_backup }.to nap(30)
+    end
+
+    it "emits a completion log and hops to wait when the backup succeeds" do
+      expect(nx.postgres_timeline.leader.vm.sshable).to receive(:_cmd).with("common/bin/daemonizer --check take_postgres_backup").and_return("Succeeded")
+      expect(Clog).to receive(:emit).with("Postgres backup completed", [hash_including(status: "Succeeded", duration_seconds: be_within(5).of(120)), postgres_timeline])
+      expect { nx.await_backup }.to hop("wait")
+    end
+
+    it "emits a completion log and hops to wait when the backup fails" do
+      expect(nx.postgres_timeline.leader.vm.sshable).to receive(:_cmd).with("common/bin/daemonizer --check take_postgres_backup").and_return("Failed")
+      expect(Clog).to receive(:emit).with("Postgres backup completed", [hash_including(status: "Failed"), postgres_timeline])
+      expect { nx.await_backup }.to hop("wait")
+    end
+
+    it "emits an Unknown-status log and hops to wait if daemonizer returns something unexpected" do
+      expect(nx.postgres_timeline.leader.vm.sshable).to receive(:_cmd).with("common/bin/daemonizer --check take_postgres_backup").and_return("Banana")
+      expect(Clog).to receive(:emit).with("Postgres backup completed", [hash_including(status: "Unknown"), postgres_timeline])
+      expect { nx.await_backup }.to hop("wait")
+    end
+
+    it "still emits the log with nil duration if latest_backup_started_at is missing" do
+      postgres_timeline.update(latest_backup_started_at: nil)
+      expect(nx.postgres_timeline.leader.vm.sshable).to receive(:_cmd).with("common/bin/daemonizer --check take_postgres_backup").and_return("Succeeded")
+      expect(Clog).to receive(:emit).with("Postgres backup completed", [hash_including(status: "Succeeded", duration_seconds: nil), postgres_timeline])
+      expect { nx.await_backup }.to hop("wait")
     end
   end
 

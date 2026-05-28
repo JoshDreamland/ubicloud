@@ -80,9 +80,32 @@ class Prog::Postgres::PostgresTimelineNexus < Prog::Base
       postgres_timeline.leader.vm.sshable.cmd("common/bin/daemonizer :d_command take_postgres_backup", d_command:)
       postgres_timeline.latest_backup_started_at = Time.now
       postgres_timeline.save_changes
+      hop_await_backup
     end
 
     hop_wait
+  end
+
+  label def await_backup
+    case postgres_timeline.leader.vm.sshable.cmd("common/bin/daemonizer --check take_postgres_backup")
+    when "Succeeded"
+      emit_backup_completion("Succeeded")
+      hop_wait
+    when "Failed"
+      emit_backup_completion("Failed")
+      hop_wait
+    when "InProgress", "NotStarted"
+      nap 30
+    else
+      emit_backup_completion("Unknown")
+      hop_wait
+    end
+  end
+
+  def emit_backup_completion(status)
+    started = postgres_timeline.latest_backup_started_at
+    duration_seconds = started ? Time.now - started : nil
+    Clog.emit("Postgres backup completed", [{status:, duration_seconds:}, postgres_timeline])
   end
 
   label def destroy
