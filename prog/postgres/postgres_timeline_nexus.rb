@@ -80,12 +80,31 @@ class Prog::Postgres::PostgresTimelineNexus < Prog::Base
       postgres_timeline.leader.vm.sshable.cmd("common/bin/daemonizer :d_command take_postgres_backup", d_command:)
       postgres_timeline.latest_backup_started_at = Time.now
       postgres_timeline.save_changes
+      # Hop into await_backup so we can emit a structured completion event
+      # (including failures) once the daemonizer reaches a terminal state.
       hop_await_backup
     end
 
     hop_wait
   end
 
+  # Polls the backup daemonizer until it reaches a terminal state, then
+  # emits one "Postgres backup completed" Clog event and hops back to wait.
+  #
+  # Tradeoffs versus emitting completion events from wait:
+  # - For the duration of the backup, the strand sits in this label and
+  #   does not run wait's other per-cycle reconciliation (missing-backup
+  #   page handling, self-destruct check, etc.). The 2-day missing-backup
+  #   pager is unaffected because latest_backup_started_at is fresh, but
+  #   any other work added to wait would be paused while a backup runs.
+  # - SSH check cadence on the leader rises from once per ~20 min (wait's
+  #   nap interval) to once per 30 s for the duration of the backup.
+  # - The strand is not synchronously blocked: the daemonizer call remains
+  #   fire-and-forget and we yield between polls via `nap`.
+  #
+  # Benefit over the wait-side alternative: this label can observe Failed
+  # status explicitly. A failed backup leaves no S3 sentinel, so wait-side
+  # observation can only emit on success.
   label def await_backup
     case postgres_timeline.leader.vm.sshable.cmd("common/bin/daemonizer --check take_postgres_backup")
     when "Succeeded"
