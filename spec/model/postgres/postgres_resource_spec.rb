@@ -1396,4 +1396,18 @@ RSpec.describe PostgresResource do
       expect(postgres_resource.parseable_password).to eq("test-parseable-pass")
     end
   end
+
+  describe ".available_families_and_sizes" do
+    let(:aws_location) { instance_double(Location, name: "us-east-1") }
+
+    it "excludes families that aren't postgres families" do
+      allow(OptionTreeFilter).to receive(:filter).and_return([
+        {family: "m7i", size: "m7i.large"}, # in AWS_FAMILY_OPTIONS, not a postgres family
+        {family: "i8g", size: "i8g.large"},
+      ])
+      result = PostgresResource::Aws.available_families_and_sizes(aws_location, project)
+      expect(result).not_to include(["m7i", "m7i.large"])
+      expect(result).to include(["i8g", "i8g.large"])
+    end
+  end
 end
