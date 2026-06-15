@@ -564,10 +564,13 @@ class CloverAdmin < Roda
     ["Project", :postgres_resources] => "project",
     ["Project", :invoices] => "project",
     ["PostgresResource", :servers] => "resource",
+    ["Strand", :children] => "parent",
     ["VmHost", :boot_images] => "vm_host",
+    ["VmHost", :vms] => "vm_host",
   }.freeze
 
   ROLLOUT_PROGS = %w[
+    RolloutBootImage
     RolloutRhizome
     RolloutSemaphore
   ].freeze
@@ -630,6 +633,8 @@ class CloverAdmin < Roda
         column_grep.call(ds, :created_at, value)
       when :project
         ubid_uuid_grep.call(ds, :project_id, value)
+      when :vm_host
+        ubid_uuid_grep.call(ds, :vm_host_id, value)
       end
     end
 
@@ -665,7 +670,7 @@ class CloverAdmin < Roda
     end
 
     model BillingInfo do
-      order Sequel.desc(:created_at)
+      order Sequel.desc(Sequel[:billing_info][:created_at])
       eager_graph [:project]
       columns do |type_symbol, request|
         cs = [:stripe_id, :project, :valid_vat, :created_at]
@@ -866,12 +871,19 @@ class CloverAdmin < Roda
       order Sequel.desc(:try)
       columns do |type_symbol, request|
         if type_symbol == :search_form
-          [:prog, :label, :try]
+          [:prog, :label, :try, :parent]
         else
           [:ubid, :prog, :label, :schedule, :try]
         end
       end
-      column_options try: {type: "number", value: nil}
+      column_options try: {type: "number", value: nil},
+        parent: ubid_input.call("Parent")
+
+      column_search_filter do |ds, column, value|
+        if column == :parent
+          ubid_uuid_grep.call(ds, :parent_id, value)
+        end
+      end
     end
 
     model Vm do
@@ -885,7 +897,8 @@ class CloverAdmin < Roda
         family: {type: "select", options: Option::VmFamilies.map(&:name), add_blank: true},
         vcpus: {type: "number"},
         created_at: {type: "text"},
-        project: ubid_input.call("Project")
+        project: ubid_input.call("Project"),
+        vm_host: ubid_input.call("VmHost")
     end
 
     model BootImage do
@@ -898,8 +911,6 @@ class CloverAdmin < Roda
 
       column_search_filter do |ds, column, value|
         case column
-        when :vm_host
-          ubid_uuid_grep.call(ds, :vm_host_id, value)
         when :activated_at
           column_grep.call(ds, :activated_at, value)
         else
@@ -1183,6 +1194,30 @@ class CloverAdmin < Roda
             r.redirect "/rollouts"
           end
           Prog.const_get(prog).assemble(semaphore:, ids: klass.select_map(:id), gap:, increment:)
+        elsif prog == "RolloutBootImage"
+          image_name, version, arch = typecast_params.nonempty_str!(%w[image_name version arch])
+          concurrency = typecast_params.pos_int!("concurrency")
+          exclude_minio_hosts = typecast_params.bool("exclude_minio_hosts")
+          pause_stages = typecast_params.bool("pause_stages")
+
+          unless Prog::DownloadBootImage::BOOT_IMAGE_SHA256.dig(image_name, arch, version)
+            flash["error"] = "invalid version for boot image"
+            r.redirect "/rollouts"
+          end
+
+          exclude_vm_host_ids = typecast_params.str("exclude_vm_host_ids").to_s.split(",").filter_map do |id|
+            id = id.strip
+            next if id.empty?
+            uuid = UUID_REGEXP.match?(id) ? id : UBID.to_uuid(id)
+            unless uuid
+              flash["error"] = "invalid vm host id: #{id}"
+              r.redirect "/rollouts"
+            end
+            uuid
+          end
+
+          Prog.const_get(prog).assemble(image_name:, version:, arch:, concurrency:,
+            exclude_minio_hosts:, exclude_vm_host_ids:, pause_stages:)
         else
           Prog.const_get(prog).assemble
         end
@@ -1192,7 +1227,7 @@ class CloverAdmin < Roda
       end
 
       strand_semaphore_action(strand_ds, ROLLOUT_PROGS,
-        additional_semaphores: {"RolloutRhizome" => %w[github_runners_work]})
+        additional_semaphores: {"RolloutRhizome" => %w[github_runners_work], "RolloutBootImage" => %w[rollback]})
     end
 
     r.on "local-e2e" do
