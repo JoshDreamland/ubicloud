@@ -445,7 +445,10 @@ jobs:
             --query "Buckets[?CreationDate<'${CUTOFF}'].Name" --output text 2>/dev/null || true); do
             [[ "$bucket" =~ ^pt[a-tv-z0-9]{24}$ ]] || continue
             echo "Emptying and deleting bucket: $bucket"
-            aws s3 rb "s3://$bucket" --force --region $REGION 2>/dev/null || true
+            # --only-show-errors: empty (batched DeleteObjects) + delete the bucket
+            # without logging a line per object. S3 has no delete-non-empty-bucket
+            # API, so emptying first is unavoidable.
+            aws s3 rb "s3://$bucket" --force --region $REGION --only-show-errors || true
           done
 
           echo "=== Deleting stale Postgres timeline IAM policies ==="
