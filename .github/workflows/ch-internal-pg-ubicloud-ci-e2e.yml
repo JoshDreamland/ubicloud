@@ -435,6 +435,42 @@ jobs:
             done
             aws ec2 delete-vpc --vpc-id $vpc_id --region $REGION 2>/dev/null || true
           done
+
+          # Postgres timeline blob storage. Buckets and IAM policies are named
+          # after the timeline ubid (pt + 24 base32 chars) and are intentionally
+          # retained after the database is dropped, so the EC2 sweep above never
+          # touches them. Force-delete the stale ones here.
+          echo "=== Deleting stale Postgres timeline S3 buckets ==="
+          for bucket in $(aws s3api list-buckets \
+            --query "Buckets[?CreationDate<'${CUTOFF}'].Name" --output text 2>/dev/null || true); do
+            [[ "$bucket" =~ ^pt[a-tv-z0-9]{24}$ ]] || continue
+            echo "Emptying and deleting bucket: $bucket"
+            aws s3 rb "s3://$bucket" --force --region $REGION 2>/dev/null || true
+          done
+
+          echo "=== Deleting stale Postgres timeline IAM policies ==="
+          for arn in $(aws iam list-policies --scope Local \
+            --query "Policies[?CreateDate<'${CUTOFF}'].Arn" --output text 2>/dev/null || true); do
+            name="${arn##*/}"
+            [[ "$name" =~ ^pt[a-tv-z0-9]{24}$ ]] || continue
+            echo "Deleting IAM policy: $arn"
+            # Detach from any principals (non-iam-access mode attaches to a user)
+            # and remove non-default versions before delete-policy can succeed.
+            for u in $(aws iam list-entities-for-policy --policy-arn "$arn" --query 'PolicyUsers[].UserName' --output text 2>/dev/null || true); do
+              aws iam detach-user-policy --user-name "$u" --policy-arn "$arn" 2>/dev/null || true
+            done
+            for r in $(aws iam list-entities-for-policy --policy-arn "$arn" --query 'PolicyRoles[].RoleName' --output text 2>/dev/null || true); do
+              aws iam detach-role-policy --role-name "$r" --policy-arn "$arn" 2>/dev/null || true
+            done
+            for g in $(aws iam list-entities-for-policy --policy-arn "$arn" --query 'PolicyGroups[].GroupName' --output text 2>/dev/null || true); do
+              aws iam detach-group-policy --group-name "$g" --policy-arn "$arn" 2>/dev/null || true
+            done
+            for ver in $(aws iam list-policy-versions --policy-arn "$arn" --query 'Versions[?IsDefaultVersion==`false`].VersionId' --output text 2>/dev/null || true); do
+              aws iam delete-policy-version --policy-arn "$arn" --version-id "$ver" 2>/dev/null || true
+            done
+            aws iam delete-policy --policy-arn "$arn" 2>/dev/null || true
+          done
+
           echo "=== Stale resource cleanup complete ==="
 
       - name: Upload logs
