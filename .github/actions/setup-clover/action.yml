@@ -13,7 +13,6 @@ runs:
     - name: Setup tool cache directory
       shell: bash
       run: |
-<<<<<<< HEAD
         sudo mkdir -p /opt/hostedtoolcache && sudo chown -R "$(whoami)":"$(whoami)" /opt/hostedtoolcache
 
     - name: Install system dependencies
@@ -32,16 +31,13 @@ runs:
         LANG: en_US.UTF-8
         LC_ALL: en_US.UTF-8
       run: |
-=======
         # Stop the default PostgreSQL cluster on the runner if it exists
         sudo -u postgres pg_dropcluster 16 main --stop || true
->>>>>>> 9de40ce2bd10f51caa47fdac4c976e201a79efb9
         # Install PostgreSQL
         sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
         wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
         sudo apt-get update
         sudo apt-get install -y postgresql-17 postgresql-client-17
-<<<<<<< HEAD
 
         # Initialize a fresh data directory
         export PGDATA="$HOME/pgdata"
@@ -69,15 +65,6 @@ runs:
 
         # Make PGHOST available to subsequent steps
         echo "PGHOST=$HOME" >> $GITHUB_ENV
-=======
-        # Allow runner user to access PostgreSQL
-        echo 'runner_map runner postgres
-        runner_map runner clover
-        runner_map runner clover_password' | sudo tee -a /etc/postgresql/17/main/pg_ident.conf > /dev/null
-        sudo sed -i '1i local   all   all   peer map=runner_map' /etc/postgresql/17/main/pg_hba.conf
-        sudo systemctl restart postgresql
-        until pg_isready -q; do sleep 1; done
->>>>>>> 9de40ce2bd10f51caa47fdac4c976e201a79efb9
 
     - name: Set up Ruby
       uses: ruby/setup-ruby@afeafc3d1ab54a631816aba4c914a0081c12ff2f # v1.310.0
