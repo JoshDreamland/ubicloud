@@ -459,11 +459,10 @@ class Prog::Vnet::Gcp::SubnetNexus < Prog::Base
     raise unless e.status_code == 409
     lookup.call || raise("#{label} #{short_name} conflict but not found on lookup")
   rescue CrmOperationError => e
-    # google.rpc.Code 6 = ALREADY_EXISTS. The CRM LRO can surface a
-    # conflict via the operation's error Status instead of an HTTP 409,
-    # typically on retries that create the same tag key/value concurrently.
-    raise unless e.code == 6
-    lookup.call || raise("#{label} #{short_name} conflict but not found on lookup")
+    name = crm_op_conflict_name(e, label:, short_name:) do
+      lookup.call || raise("#{label} #{short_name} conflict but not found on lookup")
+    end
+    name || nap(5)
   end
 
   def lookup_tag_value_name(parent_tag_key_name, short_name)
