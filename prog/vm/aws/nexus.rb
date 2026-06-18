@@ -58,6 +58,11 @@ class Prog::Vm::Aws::Nexus < Prog::Base
             "arn:aws:logs:*:*:log-group:/#{vm.name}/postgresql:*",
           ],
         },
+        {
+          Effect: "Allow",
+          Action: "guardduty:SendSecurityTelemetry",
+          Resource: "*",
+        },
       ],
     }.to_json
 
@@ -362,6 +367,15 @@ class Prog::Vm::Aws::Nexus < Prog::Base
           ignore_invalid_entity do
             iam_client.detach_role_policy(role_name:, policy_arn: policy.policy_arn)
           end
+        end
+      end
+    end
+
+    # Inline policies block delete_role, so drop them before deleting the role.
+    ignore_invalid_entity do
+      iam_client.list_role_policies(role_name:).policy_names.each do |policy_name|
+        ignore_invalid_entity do
+          iam_client.delete_role_policy(role_name:, policy_name:)
         end
       end
     end
