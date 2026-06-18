@@ -49,6 +49,12 @@ class Prog::Postgres::PostgresResourceNexus
       decr_billing_deactivate
       register_deadline("destroy", BILLING_DEACTIVATE_DEADLINE_SECONDS)
 
+      # Close out billing here. The flow hops straight into `destroy` via
+      # hop_destroy below (no `destroy` semaphore set), so the finalize in
+      # PostgresResourceNexus#before_run won't fire and the resource would
+      # keep accruing charges past tear-down.
+      postgres_resource.active_billing_records.each(&:finalize)
+
       # Resources that share their parent's timeline must not run the full
       # flow — backup/lifecycle mutations on the shared bucket would touch
       # the parent's data. This covers:

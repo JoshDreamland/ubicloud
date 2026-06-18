@@ -151,6 +151,31 @@ RSpec.describe Prog::Postgres::PostgresResourceNexus::PrependMethods do # ruboco
       expect { nx.billing_deactivate_suspend }.to hop("billing_deactivate_wait_backup")
     end
 
+    it "finalizes active billing records so charges stop the moment deactivate fires (before_run does not finalize on hop_destroy path)" do
+      primary = mock_server(is_representative: true)
+      timeline = nx.postgres_resource.timeline
+      allow(nx.postgres_resource).to receive_messages(servers: [primary], timeline:)
+      allow(timeline).to receive(:incr_take_backup_for_converge)
+      br1 = instance_double(BillingRecord)
+      br2 = instance_double(BillingRecord)
+      allow(nx.postgres_resource).to receive(:active_billing_records).and_return([br1, br2])
+
+      expect(br1).to receive(:finalize)
+      expect(br2).to receive(:finalize)
+      expect { nx.billing_deactivate_suspend }.to hop("billing_deactivate_wait_backup")
+    end
+
+    it "finalizes active billing records on the shared-parent-timeline short-circuit path too" do
+      shared_timeline = instance_double(PostgresTimeline, id: "shared-timeline-id")
+      parent = instance_double(PostgresResource, timeline: shared_timeline)
+      allow(nx.postgres_resource).to receive_messages(parent:, timeline: shared_timeline)
+      br = instance_double(BillingRecord)
+      allow(nx.postgres_resource).to receive(:active_billing_records).and_return([br])
+
+      expect(br).to receive(:finalize)
+      expect { nx.billing_deactivate_suspend }.to hop("destroy")
+    end
+
     it "cascades billing_deactivate to each read replica so they are not orphaned when the parent is destroyed" do
       primary = mock_server(is_representative: true)
       timeline = nx.postgres_resource.timeline
