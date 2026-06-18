@@ -176,7 +176,7 @@ module Config
   override :spdk_version, "v23.09-ubi-0.3", string
 
   # Vhost Block Backend
-  override :vhost_block_backend_version, "v0.2.2", string
+  override :vhost_block_backend_version, "v0.4.2", string
 
   # Boot Images
   override :default_boot_image_name, "ubuntu-noble", string
@@ -258,6 +258,7 @@ module Config
   # Load Balancer
   optional :load_balancer_service_project_id, uuid
   optional :load_balancer_service_hostname, string
+  override :load_balancer_service_hostname_v2, Config.load_balancer_service_hostname, string
 
   # ACME
   # The following are optional because they are only needed in production.

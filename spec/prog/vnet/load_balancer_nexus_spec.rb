@@ -22,7 +22,11 @@ RSpec.describe Prog::Vnet::LoadBalancerNexus do
   }
 
   before do
-    allow(Config).to receive_messages(load_balancer_service_hostname: "lb.ubicloud.com", load_balancer_service_project_id: ps.project_id)
+    allow(Config).to receive_messages(
+      load_balancer_service_hostname: "lb.ubicloud.com",
+      load_balancer_service_hostname_v2: "lb2.ubicloud.com",
+      load_balancer_service_project_id: ps.project_id,
+    )
   end
 
   def create_vm_with_ips(name:, private_ipv4:, private_ipv6:, public_ipv4: nil, public_ipv6: nil)
@@ -52,6 +56,40 @@ RSpec.describe Prog::Vnet::LoadBalancerNexus do
       expect(LoadBalancer.count).to eq 1
       expect(lb.project).to eq ps.project
       expect(lb.hostname).to eq "test-lb2.#{ps.ubid[-5...]}.lb.ubicloud.com"
+      expect(lb.hostname_version).to eq 1
+    end
+
+    it "supports hostname_version" do
+      lb = described_class.assemble(ps.id, name: "test-lb2", src_port: 80, dst_port: 8080, hostname_version: 2).subject
+      expect(LoadBalancer.count).to eq 1
+      expect(lb.project).to eq ps.project
+      expect(lb.hostname).to eq "test-lb2.#{lb.ubid}.lb2.ubicloud.com"
+      expect(lb.hostname_version).to eq 2
+    end
+
+    it "uses presigned cert if available for hostname version 2 and cert enabled" do
+      st = Strand.create_with_id(Prog::Vnet::MaintainPresignedLoadBalancerCerts::STRAND_ID, prog: "Vnet::MaintainPresignedLoadBalancerCerts", label: "wait", schedule: Time.now - 100)
+      load_balancer_id = LoadBalancer.generate_uuid
+      cert = Cert.create(hostname: "*.#{UBID.to_ubid(load_balancer_id)}.lb2.ubicloud.com")
+      DB[:presigned_load_balancer_cert].insert(load_balancer_id:, cert_id: cert.id)
+      lb = described_class.assemble(ps.id, name: "test-lb2", src_port: 80, dst_port: 8080, hostname_version: 2, cert_enabled: true).subject
+      expect(LoadBalancer.count).to eq 1
+      expect(lb.id).to eq load_balancer_id
+      expect(lb.project).to eq ps.project
+      expect(lb.hostname).to eq "test-lb2.#{UBID.to_ubid(load_balancer_id)}.lb2.ubicloud.com"
+      expect(lb.hostname_version).to eq 2
+      expect(DB[:presigned_load_balancer_cert].count).to eq 0
+      expect(DB[:certs_load_balancers].where(load_balancer_id:, cert_id: cert.id).count).to eq 1
+      expect(st.reload.schedule).to be_within(5).of(Time.now)
+    end
+
+    it "handles case where presigned cert isn't available for hostname version 2 and cert enabled" do
+      lb = described_class.assemble(ps.id, name: "test-lb2", src_port: 80, dst_port: 8080, hostname_version: 2, cert_enabled: true).subject
+      expect(LoadBalancer.count).to eq 1
+      expect(lb.project).to eq ps.project
+      expect(lb.hostname).to eq "test-lb2.#{lb.ubid}.lb2.ubicloud.com"
+      expect(lb.hostname_version).to eq 2
+      expect(DB[:certs_load_balancers].count).to eq 0
     end
 
     it "creates a new load balancer with custom hostname" do
@@ -350,6 +388,21 @@ RSpec.describe Prog::Vnet::LoadBalancerNexus do
       100.times { expect { nx.rewrite_dns_records }.to hop("wait") }
 
       expect(dns_zone.reload.records.count).to eq(804) # 4 records to tombstone the previous ones and 4 records to add
+    end
+
+    it "writes public records to the custom zone and private records to the service zone" do
+      dns_zone
+      custom_zone = DnsZone.create(project_id: ps.project_id, name: "k8s.ubicloud.com")
+      lb = described_class.assemble(ps.id, name: "custom-lb", src_port: 80, dst_port: 8080,
+        custom_hostname_prefix: "apiserver", custom_hostname_dns_zone_id: custom_zone.id).subject
+      custom_nx = described_class.new(lb.strand)
+      vm = create_vm_with_ips(name: "cvm", private_ipv4: "10.0.0.5/32", private_ipv6: "fd10:9b0b:6b4b:8fb2::/64", public_ipv4: "203.0.113.5/32", public_ipv6: "2001:db8:9::/64")
+      lb.add_vm(vm)
+
+      expect { custom_nx.rewrite_dns_records }.to hop("wait")
+
+      expect(custom_zone.reload.records.map(&:name).uniq).to eq(["apiserver.k8s.ubicloud.com."])
+      expect(dns_zone.reload.records.map(&:name).uniq).to eq(["#{lb.private_hostname}."])
     end
   end
 end

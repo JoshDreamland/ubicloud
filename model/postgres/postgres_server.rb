@@ -18,7 +18,7 @@ class PostgresServer < Sequel::Model
     :restart, :configure, :fence, :unfence, :planned_take_over, :unplanned_take_over, :configure_metrics,
     :destroy, :recycle, :recycle_lagging_read_replica, :recycle_unavailable_server, :recycle_by_user_request,
     :promote_read_replica, :refresh_walg_credentials, :configure_s3_new_timeline, :lockout, :use_physical_slot,
-    :configure_logs, :ignore_instance_size_mismatch
+    :configure_logs, :ignore_instance_size_mismatch, :install_rhizome
   include HealthMonitorMethods
   include MetricsTargetMethods
 
@@ -51,7 +51,7 @@ class PostgresServer < Sequel::Model
       "max_parallel_workers_per_gather" => "2",
       "max_parallel_maintenance_workers" => "2",
       "min_wal_size" => "80MB",
-      "max_wal_size" => "5GB",
+      "max_wal_size" => "#{(storage_size_gib * 4 / 100).clamp(5, 256)}GB",
       "wal_keep_size" => "96MB",
       "wal_compression" => "lz4",
       "default_toast_compression" => "lz4",
