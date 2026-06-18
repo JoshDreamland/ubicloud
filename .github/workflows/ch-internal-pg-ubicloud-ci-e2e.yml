@@ -75,7 +75,7 @@ jobs:
         with:
           project: ${{ vars.DEPOT_PROJECT_ID }}
           context: data-plane-application
-          file: data-plane-application/stresshouse/tests/experimental/postgres/Dockerfile
+          file: data-plane-application/stresshouse/tests/stable/postgres/Dockerfile
           load: true
           tags: ${{ env.STRESSHOUSE_IMAGE }}
           build-args: GOPRIVATE=go.clickhouse.com/*
@@ -259,7 +259,7 @@ jobs:
         run: |
           PROMPT=$(cat <<'EOF'
           You are debugging a failed test in the Ubicloud CI pipeline.
-          The test source is in data-plane-application/stresshouse/tests/experimental/postgres/.
+          The test source is in data-plane-application/stresshouse/tests/stable/postgres/.
           Read the test code to understand what it does before investigating.
 
           ## Available tools
