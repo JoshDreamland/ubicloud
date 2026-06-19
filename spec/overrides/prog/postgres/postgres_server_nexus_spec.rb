@@ -76,6 +76,16 @@ RSpec.describe Prog::Postgres::PostgresServerNexus::PrependMethods do # rubocop:
     end
   end
 
+  describe "#setup_override_metrics" do
+    it "writes the write-availability units and enables the timer" do
+      expect(sshable).to receive(:write_file).with("/etc/systemd/system/pg-write-availability.service", match(/collect-pg-write-availability/))
+      expect(sshable).to receive(:write_file).with("/etc/systemd/system/pg-write-availability.timer", match(/OnUnitActiveSec/))
+      expect(sshable).to receive(:_cmd).with("sudo systemctl daemon-reload")
+      expect(sshable).to receive(:_cmd).with("sudo systemctl enable --now pg-write-availability.timer")
+      nx.setup_override_metrics
+    end
+  end
+
   describe "#setup_otel" do
     before do
       allow(sshable).to receive(:write_file).with("/home/otelcol/otel-config.yaml", anything, user: "otelcol")

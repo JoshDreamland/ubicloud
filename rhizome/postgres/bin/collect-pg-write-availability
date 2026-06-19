@@ -1,0 +1,65 @@
+#!/bin/env ruby
+# frozen_string_literal: true
+
+require_relative "../../common/lib/util"
+
+# Write-availability probe (systemd timer -> node_exporter textfile). Detects write
+# outages and advances the replication LSN with a heartbeat write.
+
+output_path = "/var/lib/node_exporter/pg_write_availability.prom"
+
+# Bounds the write; kept well under the timer interval.
+PROBE_TIMEOUT = "3s"
+TIMEOUT_EXIT = 124 # timeout(1) exit code when the deadline fires.
+
+# monitor.write_probe_check() (from the migration) gates and writes in one round-trip,
+# returning "applicable|xid". timeout(1) bounds the commit, since a synchronous-commit
+# wait cannot be cancelled from SQL. Outcomes:
+#   non-empty row    -> parse applicable, and xid if it committed.
+#   empty (exit 124) -> deadline fired mid-write: applicable, did not commit.
+#   raises           -> Postgres down/unreachable: not applicable.
+applicable = false
+succeeded = false
+xid = nil
+
+begin
+  # Connect as the low-privilege monitoring user; its peer pg_hba rule survives lockout.
+  row = r(
+    "sudo", "-u", "ubi_monitoring", "timeout", PROBE_TIMEOUT,
+    "psql", "-d", "ubi_admin", "-q", "-t", "-A", "-X",
+    "-c", "SELECT applicable, xid FROM monitor.write_probe_check()",
+    expect: [0, TIMEOUT_EXIT],
+  ).strip
+
+  if row.empty?
+    applicable = true
+  else
+    applicable_field, xid_field = row.split("|", 2)
+    applicable = applicable_field == "t"
+    if applicable && xid_field && !xid_field.empty?
+      succeeded = true
+      xid = xid_field
+    end
+  end
+rescue CommandFail
+  # Postgres down/unreachable: leave applicable=false.
+end
+
+lines = []
+lines << "# HELP pg_write_availability_applicable 1 on a writable primary with >=1 replication slot (where the write probe applies); 0 on a standby, a read-only server, or a primary with no slots\n"
+lines << "# TYPE pg_write_availability_applicable gauge\n"
+lines << "pg_write_availability_applicable #{applicable ? 1 : 0}\n"
+
+if applicable
+  lines << "# HELP pg_write_availability_succeeded 1 if the heartbeat write committed within #{PROBE_TIMEOUT}; 0 if it timed out/failed (e.g. a synchronous standby is down)\n"
+  lines << "# TYPE pg_write_availability_succeeded gauge\n"
+  lines << "pg_write_availability_succeeded #{succeeded ? 1 : 0}\n"
+
+  if succeeded
+    lines << "# HELP pg_write_availability_xid Transaction id of the heartbeat write; advances each cycle, feeding the replication stream\n"
+    lines << "# TYPE pg_write_availability_xid gauge\n"
+    lines << "pg_write_availability_xid #{xid}\n"
+  end
+end
+
+safe_write_to_file(output_path, lines.join)

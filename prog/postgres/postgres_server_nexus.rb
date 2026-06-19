@@ -377,6 +377,7 @@ WantedBy=timers.target
 TIMER
     vm.sshable.write_file("/etc/systemd/system/pg-collect-metrics.timer", pg_metrics_timer)
 
+    setup_override_metrics
     setup_otel if Config.postgres_otel_otlp_export_enabled
     vm.sshable.cmd("sudo systemctl daemon-reload")
 

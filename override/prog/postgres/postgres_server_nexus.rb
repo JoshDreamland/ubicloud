@@ -36,6 +36,41 @@ class Prog::Postgres::PostgresServerNexus
       hop_bootstrap_rhizome
     end
 
+    # Clickhouse override metrics collectors.
+    def setup_override_metrics
+      write_availability_service = <<SERVICE
+[Unit]
+Description=Postgres Write-Availability Probe
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=ubi
+TimeoutStartSec=9s
+ExecStart=/home/ubi/postgres/bin/collect-pg-write-availability
+StandardOutput=journal
+StandardError=journal
+SERVICE
+      vm.sshable.write_file("/etc/systemd/system/pg-write-availability.service", write_availability_service)
+
+      write_availability_timer = <<TIMER
+[Unit]
+Description=Run Postgres Write-Availability Probe periodically
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=10s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+TIMER
+      vm.sshable.write_file("/etc/systemd/system/pg-write-availability.timer", write_availability_timer)
+
+      vm.sshable.cmd("sudo systemctl daemon-reload")
+      vm.sshable.cmd("sudo systemctl enable --now pg-write-availability.timer")
+    end
+
     def setup_otel
       tag_attributes = postgres_server.resource.tags.filter { |tag| tag["key"].start_with? "chc_" }.map { |tag|
         safe_key = tag["key"].gsub(/[^a-zA-Z0-9_]/, "_")

@@ -667,6 +667,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       nx.incr_initial_provisioning
       allow(Config).to receive(:postgres_otel_otlp_export_enabled).and_return(true)
       expect(nx).to receive(:setup_otel)
+      expect(nx).to receive(:setup_override_metrics)
       expect(sshable).to receive(:_cmd).with("sudo mkdir -p /usr/local/share/postgresql")
       expect(sshable).to receive(:_cmd).with("sudo tee /usr/local/share/postgresql/postgres_exporter_queries.yaml > /dev/null", stdin: anything)
       expect(sshable).to receive(:_cmd).with("sudo -u prometheus tee /home/prometheus/web-config.yml > /dev/null", stdin: anything)
@@ -698,6 +699,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       nx.incr_initial_provisioning
       allow(Config).to receive(:postgres_otel_otlp_export_enabled).and_return(false)
       expect(nx).not_to receive(:setup_otel)
+      expect(nx).to receive(:setup_override_metrics)
 
       expect(sshable).to receive(:_cmd).with("sudo mkdir -p /usr/local/share/postgresql")
       expect(sshable).to receive(:_cmd).with("sudo tee /usr/local/share/postgresql/postgres_exporter_queries.yaml > /dev/null", stdin: anything)
@@ -740,6 +742,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       nx.incr_initial_provisioning
       allow(Config).to receive(:postgres_otel_otlp_export_enabled).and_return(true)
       expect(nx).to receive(:setup_otel)
+      expect(nx).to receive(:setup_override_metrics)
       expect(nx.postgres_server.resource).to receive(:use_old_walg_command_set?).and_return(false)
       expect(sshable).to receive(:_cmd).with("sudo mkdir -p /usr/local/share/postgresql")
       expect(sshable).to receive(:_cmd).with("sudo tee /usr/local/share/postgresql/postgres_exporter_queries.yaml > /dev/null", stdin: anything)
@@ -778,6 +781,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       standby_sshable = standby_server.vm.sshable
       allow(Config).to receive(:postgres_otel_otlp_export_enabled).and_return(true)
       expect(standby_nx).to receive(:setup_otel)
+      expect(standby_nx).to receive(:setup_override_metrics)
 
       # Prometheus expectations
       expect(standby_sshable).to receive(:_cmd).with("sudo mkdir -p /usr/local/share/postgresql")
@@ -812,6 +816,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       standby_server = standby_nx.postgres_server
       standby_sshable = standby_server.vm.sshable
       allow(Config).to receive(:postgres_otel_otlp_export_enabled).and_return(false)
+      expect(standby_nx).to receive(:setup_override_metrics)
 
       expect(standby_sshable).to receive(:_cmd).with("sudo mkdir -p /usr/local/share/postgresql")
       expect(standby_sshable).to receive(:_cmd).with("sudo tee /usr/local/share/postgresql/postgres_exporter_queries.yaml > /dev/null", stdin: anything)
@@ -845,6 +850,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       standby_sshable = standby_server.vm.sshable
       allow(Config).to receive(:postgres_otel_otlp_export_enabled).and_return(true)
       expect(standby_nx).to receive(:setup_otel)
+      expect(standby_nx).to receive(:setup_override_metrics)
 
       # Prometheus expectations
       expect(standby_sshable).to receive(:_cmd).with("sudo mkdir -p /usr/local/share/postgresql")
@@ -888,6 +894,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       standby_sshable = standby_server.vm.sshable
       allow(Config).to receive(:postgres_otel_otlp_export_enabled).and_return(true)
       expect(standby_nx).to receive(:setup_otel)
+      expect(standby_nx).to receive(:setup_override_metrics)
 
       # Prometheus expectations
       expect(standby_sshable).to receive(:_cmd).with("sudo mkdir -p /usr/local/share/postgresql")
@@ -930,6 +937,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       standby_sshable = standby_server.vm.sshable
       allow(Config).to receive(:postgres_otel_otlp_export_enabled).and_return(true)
       expect(standby_nx).to receive(:setup_otel)
+      expect(standby_nx).to receive(:setup_override_metrics)
 
       # Prometheus expectations - should contain authorization block, not basic_auth
       expect(standby_sshable).to receive(:_cmd).with("sudo mkdir -p /usr/local/share/postgresql")
