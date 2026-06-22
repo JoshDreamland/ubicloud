@@ -42,7 +42,21 @@ class Prog::Postgres::PostgresResourceNexus
       when_billing_deactivate_set? do
         hop_billing_deactivate_suspend
       end
+      when_mark_billing_deactivated_set? do
+        mark_billing_deactivated
+      end
       super
+    end
+
+    # Soft deactivate: finalize billing, tag the row, cascade to replicas.
+    # Resource stays fully reachable; eventual destroy comes from the
+    # standard incr_destroy path when billing calls DELETE.
+    def mark_billing_deactivated
+      decr_mark_billing_deactivated
+      postgres_resource.active_billing_records.each(&:finalize)
+      tags = (postgres_resource.tags || []).reject { it["key"] == "chc_state" } + [{"key" => "chc_state", "value" => "deactivated"}]
+      postgres_resource.update(tags: Sequel.pg_jsonb(tags))
+      postgres_resource.read_replicas.each(&:incr_mark_billing_deactivated)
     end
 
     def billing_deactivate_suspend

@@ -60,6 +60,51 @@ RSpec.describe Prog::Postgres::PostgresResourceNexus::PrependMethods do # ruboco
       # Sanity: super's wait naps at the end when no other hop fires.
       expect { nx.wait }.to nap(30)
     end
+
+    it "runs mark_billing_deactivated when mark_billing_deactivated semaphore is set, then delegates to super" do
+      nx.incr_mark_billing_deactivated
+      expect(nx).to receive(:mark_billing_deactivated).and_call_original
+      allow(nx.postgres_resource).to receive_messages(read_replicas: [], active_billing_records: [])
+      expect { nx.wait }.to nap(30)
+    end
+  end
+
+  describe "#mark_billing_deactivated" do
+    before { postgres_server }
+
+    it "decrements the semaphore, finalizes billing, sets chc_state tag, and cascades to read replicas" do
+      replica = instance_double(PostgresResource)
+      br = instance_double(BillingRecord)
+      allow(nx.postgres_resource).to receive_messages(active_billing_records: [br], read_replicas: [replica])
+
+      expect(nx).to receive(:decr_mark_billing_deactivated)
+      expect(br).to receive(:finalize)
+      expect(replica).to receive(:incr_mark_billing_deactivated)
+
+      nx.mark_billing_deactivated
+      expect(nx.postgres_resource.reload.tags).to include({"key" => "chc_state", "value" => "deactivated"})
+    end
+
+    it "replaces any pre-existing chc_state tag (idempotent) and preserves unrelated tags" do
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "env", "value" => "prod"}, {"key" => "chc_state", "value" => "deactivated"}]))
+      allow(nx.postgres_resource).to receive_messages(active_billing_records: [], read_replicas: [])
+
+      nx.mark_billing_deactivated
+
+      tags = nx.postgres_resource.reload.tags
+      expect(tags.count { it["key"] == "chc_state" }).to eq(1)
+      expect(tags).to include({"key" => "env", "value" => "prod"})
+      expect(tags).to include({"key" => "chc_state", "value" => "deactivated"})
+    end
+
+    it "writes a single chc_state tag when none existed before" do
+      postgres_resource.update(tags: Sequel.pg_jsonb([]))
+      allow(nx.postgres_resource).to receive_messages(active_billing_records: [], read_replicas: [])
+
+      nx.mark_billing_deactivated
+
+      expect(nx.postgres_resource.reload.tags).to eq([{"key" => "chc_state", "value" => "deactivated"}])
+    end
   end
 
   describe "#billing_deactivate_suspend" do

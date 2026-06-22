@@ -86,8 +86,8 @@ class Clover
         # signals the strand — subsequent calls are status checks and shouldn't
         # spam the audit log or pile up dead semaphore rows on the strand.
         in_deactivate_phase = BILLING_DEACTIVATE_PHASE_BY_LABEL.key?(pg.strand.label)
-        if !in_deactivate_phase && !pg.billing_deactivate_set?
-          pg.incr_billing_deactivate
+        if !in_deactivate_phase && !pg.mark_billing_deactivated_set?
+          pg.incr_mark_billing_deactivated
           audit_log(pg, "billing_deactivate_requested")
         else
           no_audit_log
