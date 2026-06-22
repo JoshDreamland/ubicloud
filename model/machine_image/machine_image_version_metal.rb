@@ -10,6 +10,12 @@ class MachineImageVersionMetal < Sequel::Model
   one_to_many :active_billing_records, class: :BillingRecord, key: :resource_id, read_only: true, &:active
 
   plugin ResourceMethods, referencing: UBID::TYPE_MACHINE_IMAGE_VERSION
+  plugin SemaphoreMethods, :destroy
+
+  def display_state
+    return "destroying" if destroy_set? || destroying_set?
+    status
+  end
 
   def create_billing_record
     miv = machine_image_version
@@ -38,7 +44,7 @@ end
 #  machine_image_version_metal_pkey | PRIMARY KEY btree (id)
 # Check constraints:
 #  archive_size_set_if_status_ready         | (status <> 'ready'::text OR archive_size_mib IS NOT NULL)
-#  machine_image_version_metal_status_check | (status = ANY (ARRAY['creating'::text, 'ready'::text, 'destroying'::text]))
+#  machine_image_version_metal_status_check | (status = ANY (ARRAY['creating'::text, 'ready'::text, 'destroying'::text, 'failed'::text]))
 # Foreign key constraints:
 #  machine_image_version_metal_archive_kek_id_fkey | (archive_kek_id) REFERENCES storage_key_encryption_key(id)
 #  machine_image_version_metal_id_fkey             | (id) REFERENCES machine_image_version(id)
