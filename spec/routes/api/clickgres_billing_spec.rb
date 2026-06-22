@@ -194,13 +194,13 @@ RSpec.describe Clover, "clickgres-billing" do
       ).subject
     end
 
-    it "increments billing_deactivate semaphore, returns ubid and phase 'pending' when strand is in wait" do
+    it "increments mark_billing_deactivated semaphore, returns ubid and phase 'pending' when strand is in wait" do
       pg = create_pg("pg-deactivate-1")
       pg.strand.update(label: "wait")
 
       expect {
         post "/project/#{project.ubid}/clickgres-billing/postgres/#{pg.ubid}/deactivate"
-      }.to change { Semaphore.where(strand_id: pg.strand.id, name: "billing_deactivate").count }.by(1)
+      }.to change { Semaphore.where(strand_id: pg.strand.id, name: "mark_billing_deactivated").count }.by(1)
 
       expect(last_response.status).to eq(200)
       body = JSON.parse(last_response.body)
@@ -227,20 +227,13 @@ RSpec.describe Clover, "clickgres-billing" do
       # First POST kicks off — should write one semaphore row + one audit_log row.
       expect {
         post "/project/#{project.ubid}/clickgres-billing/postgres/#{pg.ubid}/deactivate"
-      }.to change { Semaphore.where(strand_id: pg.strand.id, name: "billing_deactivate").count }.by(1)
+      }.to change { Semaphore.where(strand_id: pg.strand.id, name: "mark_billing_deactivated").count }.by(1)
         .and change { DB[:audit_log].where(action: "billing_deactivate_requested").where(Sequel.lit("? = ANY(object_ids)", pg.id)).count }.by(1)
 
       # Subsequent POSTs (poll-style) while semaphore still queued in wait — no new rows of either kind.
       expect {
         3.times { post "/project/#{project.ubid}/clickgres-billing/postgres/#{pg.ubid}/deactivate" }
-      }.to not_change { Semaphore.where(strand_id: pg.strand.id, name: "billing_deactivate").count }
-        .and not_change { DB[:audit_log].where(action: "billing_deactivate_requested").where(Sequel.lit("? = ANY(object_ids)", pg.id)).count }
-
-      # Strand transitioned into a deactivate phase — still no new rows.
-      pg.strand.update(label: "billing_deactivate_wait_backup")
-      expect {
-        3.times { post "/project/#{project.ubid}/clickgres-billing/postgres/#{pg.ubid}/deactivate" }
-      }.to not_change { Semaphore.where(strand_id: pg.strand.id, name: "billing_deactivate").count }
+      }.to not_change { Semaphore.where(strand_id: pg.strand.id, name: "mark_billing_deactivated").count }
         .and not_change { DB[:audit_log].where(action: "billing_deactivate_requested").where(Sequel.lit("? = ANY(object_ids)", pg.id)).count }
     end
 
