@@ -46,6 +46,7 @@ RSpec.describe PostgresServer::PrependMethods do # rubocop:disable RSpec/SpecFil
         "instance_ubid" => resource.ubid,
         "server_ubid" => postgres_server.ubid,
         "server_role" => "primary",
+        "read_replica_type" => "none",
         "region" => location.name,
       )
       expect(pairs).to have_key("host_id")
@@ -60,6 +61,12 @@ RSpec.describe PostgresServer::PrependMethods do # rubocop:disable RSpec/SpecFil
       aws_instance = instance_double(AwsInstance, instance_id: "i-0abcd1234ef567890")
       expect(postgres_server.vm).to receive(:aws_instance).and_return(aws_instance).at_least(:once)
       expect(postgres_server.pg_stat_ch_extra_attributes).to include("host_id:i-0abcd1234ef567890")
+    end
+
+    it "marks read_replica_type regional when the resource has a parent" do
+      parent = create_postgres_resource(project:, location_id: location.id)
+      resource.update(parent_id: parent.id)
+      expect(postgres_server.pg_stat_ch_extra_attributes).to include("read_replica_type:regional")
     end
   end
 

@@ -224,8 +224,8 @@ processors:
       - key: ubi.postgres_server_role
         value: '#{(postgres_server.id == postgres_server.resource.representative_server.id) ? "primary" : "standby"}'
         action: upsert
-      - key: ubi.postgres_resource_read_replica
-        value: '#{postgres_server.read_replica?}'
+      - key: ubi.postgres_resource_read_replica_type
+        value: '#{postgres_server.read_replica_type}'
         action: upsert
       - key: ubi.postgres_resource_ha_type
         value: '#{postgres_server.resource.ha_type}'

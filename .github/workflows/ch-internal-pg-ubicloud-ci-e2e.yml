@@ -320,43 +320,11 @@ jobs:
       - name: Cleanup Postgres resources
         if: always()
         run: |
+          # Parallel teardown of all Postgres resources + retained timelines, waiting for terminal state.
           docker compose \
             -f .devcontainer/docker-compose.yml \
             -f .devcontainer/docker-compose.ci.yml \
-            exec -T app bash -c '
-              TOKEN=$(.devcontainer/scripts/get-pat-token.sh 2>/dev/null) || exit 0
-              API="http://localhost:3100"
-              PROJECT_ID=$(curl -sf -H "Authorization: Bearer $TOKEN" "$API/project" | jq -r ".items[0].id") || exit 0
-
-              echo "=== Deleting all Postgres resources ==="
-              NAMES=$(curl -sf -H "Authorization: Bearer $TOKEN" \
-                "$API/project/${PROJECT_ID}/location/us-west-2-cell-0/postgres" \
-                | jq -r ".items[]?.name // empty")
-
-              if [ -z "$NAMES" ]; then
-                echo "No Postgres resources to delete"
-                exit 0
-              fi
-
-              for name in $NAMES; do
-                echo "Deleting: $name"
-                curl -sf -X DELETE \
-                  -H "Authorization: Bearer $TOKEN" \
-                  "$API/project/${PROJECT_ID}/location/us-west-2-cell-0/postgres/${name}" || true
-              done
-              echo "Waiting for Ubicloud to finish teardown..."
-              for i in $(seq 1 60); do
-                REMAINING=$(curl -sf -H "Authorization: Bearer $TOKEN" \
-                  "$API/project/${PROJECT_ID}/location/us-west-2-cell-0/postgres" \
-                  | jq -r ".items[]?.name // empty")
-                if [ -z "$REMAINING" ]; then
-                  echo "All resources deleted"
-                  break
-                fi
-                echo "Still deleting: $REMAINING"
-                sleep 5
-              done
-            ' 2>&1 || true
+            exec -T app .devcontainer/scripts/cleanup-all-resources.sh 2>&1 || true
 
       - name: Cleanup stale AWS resources (2+ hours old)
         if: always()
@@ -381,19 +349,20 @@ jobs:
             echo "No stale instances"
           fi
 
-          echo "=== Releasing unattached EIPs ==="
-          for alloc in $(aws ec2 describe-addresses --region $REGION \
-            --query 'Addresses[?AssociationId==null].AllocationId' --output text 2>/dev/null || true); do
-            echo "Releasing unattached EIP: $alloc"
-            aws ec2 release-address --allocation-id $alloc --region $REGION 2>/dev/null || true
-          done
-
+          # Delete orphaned ENIs before releasing EIPs, so an EIP stranded on a detached ENI gets reclaimed.
           echo "=== Deleting orphaned ENIs ==="
           for eni in $(aws ec2 describe-network-interfaces --region $REGION \
             --filters "Name=status,Values=available" \
             --query 'NetworkInterfaces[].NetworkInterfaceId' --output text 2>/dev/null); do
             echo "Deleting ENI: $eni"
             aws ec2 delete-network-interface --network-interface-id $eni --region $REGION 2>/dev/null || true
+          done
+
+          echo "=== Releasing unattached EIPs ==="
+          for alloc in $(aws ec2 describe-addresses --region $REGION \
+            --query 'Addresses[?AssociationId==null].AllocationId' --output text 2>/dev/null || true); do
+            echo "Releasing unattached EIP: $alloc"
+            aws ec2 release-address --allocation-id $alloc --region $REGION 2>/dev/null || true
           done
 
           echo "=== Deleting empty VPCs (no running instances) ==="

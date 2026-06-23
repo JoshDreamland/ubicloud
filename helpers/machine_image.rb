@@ -17,13 +17,15 @@ class Clover
   end
 
   # Resolves the image store for @location, reads destroy_source, and kicks
-  # off CreateVersionMetal. Returns the new MachineImageVersion.
+  # off VersionMetalNexus. Returns the new MachineImageVersion.
   def assemble_machine_image_version(mi, version, source_vm)
     store = @project.machine_image_store_for(@location.id)
     raise CloverError.new(400, "InvalidRequest", "No machine image store configured for this location") unless store
     destroy_source = typecast_params.bool("destroy_source")
     authorize("Vm:delete", source_vm) if destroy_source
-    Prog::MachineImage::CreateVersionMetal.assemble(mi, version, source_vm, store, destroy_source_after: !!destroy_source).subject
+    Prog::MachineImage::VersionMetalNexus
+      .assemble_from_vm(mi, version, source_vm, store, destroy_source_after: !!destroy_source)
+      .subject
   end
 
   def stopped_vms_for_machine_image(location_id: nil, arch: nil)
@@ -102,7 +104,7 @@ class Clover
       # FOR SHARE conflicts with destroy_version's UPDATE on the metal row, so
       # the status check below is consistent with what destroy_version commits.
       metal = miv.metal(&:for_share)
-      raise CloverError.new(400, "InvalidRequest", "Version #{new_label} is not ready") unless metal&.status == "ready"
+      raise CloverError.new(400, "InvalidRequest", "Version #{new_label} is not ready") unless metal&.display_state == "ready"
       mi.update(latest_version_id: miv.id)
       audit_log(mi, "update_latest_version", [miv])
     end
@@ -143,7 +145,7 @@ class Clover
       Serializers::MachineImage.serialize(mi)
     else
       flash["notice"] = "'#{name}' is being created"
-      request.redirect mi
+      request.redirect mi, "/versions"
     end
   end
 end
