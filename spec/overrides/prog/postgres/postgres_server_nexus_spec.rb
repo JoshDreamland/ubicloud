@@ -104,10 +104,21 @@ RSpec.describe Prog::Postgres::PostgresServerNexus::PrependMethods do # rubocop:
         expect(content).to include("ubi.postgres_resource_ubid")
         expect(content).to include("ubi.postgres_resource_uuid")
         expect(content).to include("ubi.postgres_server_role")
-        expect(content).to include("ubi.postgres_resource_read_replica")
+        expect(content).to include("ubi.postgres_resource_read_replica_type")
         expect(content).to include("ubi.postgres_resource_ha_type")
         expect(content).to include("ubi.postgres_resource_target_standby_count")
         expect(content).to include("ubi.postgres_resource_target_server_count")
+      end
+
+      nx.setup_otel
+    end
+
+    it "stamps read_replica_type=regional for a read replica" do
+      postgres_resource.update(parent_id: create_postgres_resource(project:, location_id:).id)
+      OtelOtlpDestination.create_with_id(postgres_server.resource.location, otlp_data_endpoint: "https://otel.example.com:4317", otlp_arrow_endpoint: "https://otel.example.com:4317", logs_endpoint: "https://otel.example.com:4317", metrics_endpoint: "https://otel.example.com:4317", auth_audience: "https://otel.example.com:4317")
+      expect(sshable).to receive(:write_file).with("/home/otelcol/otel-config-override.yaml", anything, user: "otelcol") do |_, content, _|
+        expect(content).to include("ubi.postgres_resource_read_replica_type")
+        expect(content).to include("value: 'regional'")
       end
 
       nx.setup_otel

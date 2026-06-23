@@ -18,11 +18,16 @@ class PostgresServer
       result.merge(configs: result[:configs].merge(extra_configs))
     end
 
+    def read_replica_type
+      resource.read_replica_type
+    end
+
     def pg_stat_ch_extra_attributes
       [
         "instance_ubid:#{resource.ubid}",
         "server_ubid:#{ubid}",
         "server_role:#{primary? ? "primary" : "standby"}",
+        "read_replica_type:#{read_replica_type}",
         "region:#{resource.location.name}",
         "host_id:#{vm.aws_instance&.instance_id || vm.vm_host_id}",
       ].join(";")
