@@ -304,7 +304,7 @@ module UbicloudSetup
   OtelOtlpDestinationConfig = Struct.new(:otlp_data_endpoint, :otlp_arrow_endpoint, :logs_endpoint, :metrics_endpoint, :auth_audience)
   # Standing AWS capacity reservation (ODCR) config for a location. `enabled` defaults to
   # false, so a location only gets a Prog::CapacityReservation strand when opted in.
-  CapacityReservationConfig = Struct.new(:enabled, :instance_families, :additional_capacity, :enable_all_families, :allowed_capacity_decrease, :reconcile_interval, :remove_orphaned_reservations, :min_available_az_insufficient_action, keyword_init: true)
+  CapacityReservationConfig = Struct.new(:enabled, :instance_families, :additional_capacity, :enable_all_families, :allowed_capacity_decrease, :reconcile_interval, :remove_orphaned_reservations, :min_available_az_insufficient_action)
   # pg_amis will look like
   # pg_amis:
   #   us-east-2:
@@ -328,12 +328,12 @@ module UbicloudSetup
   #       arch_x64: ami-ixxxx
   #       arch_arm64: ami-iyyyy
 
-  PgAmiArchConfig = Struct.new(:arch_x64, :arch_arm64, keyword_init: true)
-  DnsAmiArchConfig = Struct.new(:arch_x64, :arch_arm64, keyword_init: true)
-  BotAccountConfig = Struct.new(:email, :password, keyword_init: true)
-  OidcProviderConfig = Struct.new(:display_name, :url, :client_id, :client_secret, keyword_init: true)
+  PgAmiArchConfig = Struct.new(:arch_x64, :arch_arm64)
+  DnsAmiArchConfig = Struct.new(:arch_x64, :arch_arm64)
+  BotAccountConfig = Struct.new(:email, :password)
+  OidcProviderConfig = Struct.new(:display_name, :url, :client_id, :client_secret)
 
-  SetupConfig = Struct.new(:enabled, :cleanup_default_locations, :email, :password, :project_name, :project_uuid, :locations, :pg_amis, :dns_server_amis, :bot_accounts, :oidc_providers, keyword_init: true)
+  SetupConfig = Struct.new(:enabled, :cleanup_default_locations, :email, :password, :project_name, :project_uuid, :locations, :pg_amis, :dns_server_amis, :bot_accounts, :oidc_providers)
 
   def self.run_ch_ubi
     ubicloud_setup_yaml_path = ENV["UBICLOUD_SETUP_YAML_PATH"]
