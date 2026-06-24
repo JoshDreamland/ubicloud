@@ -195,6 +195,7 @@ module Config
 
   # Postgres
   optional :postgres_service_project_id, uuid
+  override :postgres_boot_disk_size_gib, 16, int
   override :postgres_service_hostname, "postgres.ubicloud.com", string
   override :postgres_monitor_database_url, Config.clover_database_url, string
   optional :postgres_monitor_database_root_certs, string
