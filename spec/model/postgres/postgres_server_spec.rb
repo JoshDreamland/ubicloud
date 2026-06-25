@@ -1559,7 +1559,7 @@ RSpec.describe PostgresServer do
       expect(labels).to include("pg_tags_label_chc_team_name" => "backend")
       expect(labels).to include("pg_tags_label_chc_region_id" => "us-west-2")
       expect(labels.keys).not_to include("pg_tags_label_owner")
-      expect(labels.keys).not_to include(match(/-/))
+      expect(labels.keys).not_to include(include("-"))
     end
   end
 

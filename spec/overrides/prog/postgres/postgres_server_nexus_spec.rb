@@ -69,7 +69,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus::PrependMethods do # rubocop:
       OtelOtlpDestination.create_with_id(postgres_server.resource.location, otlp_data_endpoint: "https://otel.example.com:4317", otlp_arrow_endpoint: "https://otel.example.com:4317", logs_endpoint: "https://otel.example.com:4317", metrics_endpoint: "https://otel.example.com:4317", auth_audience: "https://otel.example.com:4317")
       expect(sshable).to receive(:write_file).with("/home/otelcol/otel-config-override.yaml", anything, user: "otelcol")
       expect(sshable).to receive(:write_file).with("/home/otelcol/otel-config.yaml", anything, user: "otelcol")
-      expect(sshable).to receive(:write_file).with("/var/lib/node_exporter/vm_sku.prom", match(/node_memory_sku_total_bytes/))
+      expect(sshable).to receive(:write_file).with("/var/lib/node_exporter/vm_sku.prom", include("node_memory_sku_total_bytes"))
       expect(sshable).to receive(:_cmd).with("sudo systemctl enable --now otelcol-contrib")
       expect(sshable).to receive(:_cmd).with("sudo systemctl reload otelcol-contrib || sudo systemctl restart otelcol-contrib")
       expect { nx.setup_otel_collector }.to hop("bootstrap_rhizome")
@@ -78,8 +78,8 @@ RSpec.describe Prog::Postgres::PostgresServerNexus::PrependMethods do # rubocop:
 
   describe "#setup_override_metrics" do
     it "writes the write-availability units and enables the timer" do
-      expect(sshable).to receive(:write_file).with("/etc/systemd/system/pg-write-availability.service", match(/collect-pg-write-availability/))
-      expect(sshable).to receive(:write_file).with("/etc/systemd/system/pg-write-availability.timer", match(/OnUnitActiveSec/))
+      expect(sshable).to receive(:write_file).with("/etc/systemd/system/pg-write-availability.service", include("collect-pg-write-availability"))
+      expect(sshable).to receive(:write_file).with("/etc/systemd/system/pg-write-availability.timer", include("OnUnitActiveSec"))
       expect(sshable).to receive(:_cmd).with("sudo systemctl daemon-reload")
       expect(sshable).to receive(:_cmd).with("sudo systemctl enable --now pg-write-availability.timer")
       nx.setup_override_metrics
@@ -89,7 +89,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus::PrependMethods do # rubocop:
   describe "#setup_otel" do
     before do
       allow(sshable).to receive(:write_file).with("/home/otelcol/otel-config.yaml", anything, user: "otelcol")
-      allow(sshable).to receive(:write_file).with("/var/lib/node_exporter/vm_sku.prom", match(/node_memory_sku_total_bytes/))
+      allow(sshable).to receive(:write_file).with("/var/lib/node_exporter/vm_sku.prom", include("node_memory_sku_total_bytes"))
     end
 
     it "writes the SKU memory as a node exporter prom file" do
@@ -225,7 +225,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus::PrependMethods do # rubocop:
           expect(content).to include("value: 'standby'")
         end
         expect(standby_sshable).to receive(:write_file).with("/home/otelcol/otel-config.yaml", anything, user: "otelcol")
-        expect(standby_sshable).to receive(:write_file).with("/var/lib/node_exporter/vm_sku.prom", match(/node_memory_sku_total_bytes/))
+        expect(standby_sshable).to receive(:write_file).with("/var/lib/node_exporter/vm_sku.prom", include("node_memory_sku_total_bytes"))
         expect(standby_nx).to receive(:write_otel_token)
 
         standby_nx.setup_otel
