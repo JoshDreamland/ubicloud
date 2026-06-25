@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../../common/lib/util"
+require_relative "walg_hardening"
 require "logger"
 
 class PostgresSetup
@@ -61,6 +62,7 @@ class PostgresSetup
         Environment=GOMEMLIMIT=#{gomemlimit}
       OVERRIDE
     end
+    WalgHardening.apply
     r "systemctl daemon-reload"
     # Apply cap so without restarting. Slice= and GOMEMLIMIT are load-time directives,
     # so only restart services not yet in slice.
