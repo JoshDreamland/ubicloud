@@ -14,7 +14,7 @@ can_edit = has_permission?("KubernetesCluster:edit", @kc)
     .all
     .flat_map do |np|
       # A node is only retirable once its nodepool's strand is back in "wait" (every
-      # ProvisionKubernetesNode bud finished bootstrapping) and the pool has more than one
+      # ProvisionKubernetesNode bud has finished bootstrapping) and the pool has more than one
       # node, since a nodepool must always keep at least one node.
       node_retirable = np.strand.label == "wait" && np.node_count > 1
       np.nodes.map do |node|
