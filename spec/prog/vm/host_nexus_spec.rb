@@ -263,13 +263,38 @@ RSpec.describe Prog::Vm::HostNexus do
   end
 
   describe "#wait_download_boot_images" do
-    it "hops to prep_reboot if all tasks are done" do
-      expect { nx.wait_download_boot_images }.to hop("prep_reboot")
+    it "hops to patch if all tasks are done" do
+      expect { nx.wait_download_boot_images }.to hop("patch")
     end
 
     it "donates its time if child strands are still running" do
       Strand.create(parent_id: st.id, prog: "DownloadBootImage", label: "start", lease: Time.now + 10)
       expect { nx.wait_download_boot_images }.to nap(120)
+    end
+  end
+
+  describe "#patch" do
+    it "runs apply_patches if not running" do
+      expect(nx.vm_host.sshable).to receive(:d_check).with("apply_patches").and_return("NotStarted")
+      expect(nx.vm_host.sshable).to receive(:d_run).with("apply_patches", "sudo", "bash", "-c", "apt update && apt full-upgrade -y")
+      expect { nx.patch }.to nap(60)
+    end
+
+    it "runs apply_patches if failed" do
+      expect(nx.vm_host.sshable).to receive(:d_check).with("apply_patches").and_return("Failed")
+      expect(nx.vm_host.sshable).to receive(:d_run).with("apply_patches", "sudo", "bash", "-c", "apt update && apt full-upgrade -y")
+      expect { nx.patch }.to nap(60)
+    end
+
+    it "naps if in progress" do
+      expect(nx.vm_host.sshable).to receive(:d_check).with("apply_patches").and_return("InProgress")
+      expect { nx.patch }.to nap(60)
+    end
+
+    it "hops to prep_reboot if apply_patches succeeds" do
+      expect(nx.vm_host.sshable).to receive(:d_check).with("apply_patches").and_return("Succeeded")
+      expect(nx.vm_host.sshable).to receive(:d_clean).with("apply_patches")
+      expect { nx.patch }.to hop("prep_reboot")
     end
   end
 
@@ -306,6 +331,45 @@ RSpec.describe Prog::Vm::HostNexus do
       nx.incr_checkup
       expect(nx).to receive(:available?).and_return(true)
       expect { nx.wait }.to nap(6 * 60 * 60)
+    end
+
+    context "when patch set" do
+      before { nx.incr_patch }
+
+      it "hops to patch if there are no VMs" do
+        expect { nx.wait }.to hop("patch")
+          .and change { nx.vm_host.allocation_state }.from("unprepared").to("draining")
+          .and change { nx.graceful_reboot_set? }.from(false).to(true)
+      end
+
+      it "naps if there are VMs" do
+        create_vm(vm_host_id: nx.vm_host.id)
+
+        expect { nx.wait }.to nap(60)
+          .and change { nx.strand.stack[0]["accepting_before_patch"] }.from(nil).to(true)
+          .and change { nx.vm_host.allocation_state }.from("unprepared").to("draining")
+      end
+
+      it "does not set graceful_reboot if host is already draining" do
+        nx.vm_host.allocation_state = "draining"
+
+        expect { nx.wait }.to hop("patch")
+          .and not_change { nx.graceful_reboot_set? }
+          .and change { nx.patch_set? }.from(true).to(false)
+          .and change { nx.strand.stack[0]["deadline_target"] }.from(nil).to("prep_reboot")
+        expect(Time.parse(nx.strand.stack[0]["deadline_at"])).to be_within(5).of(Time.now + 600)
+      end
+
+      it "sets graceful_restart semaphore if host was in accepting before patch" do
+        nx.vm_host.allocation_state = "draining"
+        refresh_frame(nx, new_values: {"accepting_before_patch" => true})
+
+        expect { nx.wait }.to hop("patch")
+          .and change { nx.patch_set? }.from(true).to(false)
+          .and change { nx.graceful_reboot_set? }.from(false).to(true)
+          .and change { nx.strand.stack[0]["deadline_target"] }.from(nil).to("prep_reboot")
+        expect(Time.parse(nx.strand.stack[0]["deadline_at"])).to be_within(5).of(Time.now + 600)
+      end
     end
   end
 
@@ -489,6 +553,17 @@ RSpec.describe Prog::Vm::HostNexus do
       Strand.create(id: vm.id, prog: "Vm::Nexus", label: "wait")
       expect { nx.start_vms }.to hop("configure_metrics")
       expect(vm_host.reload.allocation_state).to eq("accepting")
+    end
+
+    it "start_vms starts vms & hops to configure_metrics if was draining and in graceful reboot and not in patch" do
+      vm_host.update(allocation_state: "draining")
+      nx.incr_graceful_reboot
+      nx.incr_patch
+      vm = create_vm(vm_host_id: vm_host.id)
+      Strand.create(id: vm.id, prog: "Vm::Nexus", label: "wait")
+      expect { nx.start_vms }.to hop("configure_metrics")
+      expect(vm_host.reload.allocation_state).to eq("draining")
+      expect(vm_host.graceful_reboot_set?).to be true
     end
 
     it "start_vms starts vms & raises if not in draining and in graceful reboot" do

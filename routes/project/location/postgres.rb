@@ -132,7 +132,7 @@ class Clover
 
       r.rename pg, perm: "Postgres:edit", serializer: Serializers::Postgres, template_prefix: "postgres" do
         pg.incr_refresh_dns_record
-        pg.incr_refresh_certificates
+        pg.incr_refresh_certificates unless pg.hostname_version == "v3"
       end
 
       show_actions = if pg.read_replica?
@@ -169,6 +169,8 @@ class Clover
 
         DB.transaction do
           pg.dns_zone.insert_record(record_name: pg.hostname, type: "AAAA", ttl: 10, data: pg.representative_server.vm.ip6_string)
+          pg.dns_zone.delete_record(record_name: pg.private_hostname, type: "AAAA")
+          pg.dns_zone.insert_record(record_name: pg.private_hostname, type: "AAAA", ttl: 10, data: pg.representative_server.vm.private_ipv6_string)
           pg.incr_refresh_dns_record
           audit_log(pg, "add_aaaa_record")
         end

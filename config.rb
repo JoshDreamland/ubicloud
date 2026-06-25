@@ -197,6 +197,7 @@ module Config
   optional :postgres_service_project_id, uuid
   override :postgres_boot_disk_size_gib, 16, int
   override :postgres_service_hostname, "postgres.ubicloud.com", string
+  override :postgres_service_hostname_v3, "pg.ubicloud.app", string
   override :postgres_monitor_database_url, Config.clover_database_url, string
   optional :postgres_monitor_database_root_certs, string
   optional :postgres_paradedb_notification_email, string
@@ -214,7 +215,14 @@ module Config
   optional :database_logger_level, string
   optional :ingest_key, string, clear: true
   optional :otel_exporter_otlp_endpoint, string
-  override :pry_logger_truncate_limit, 500, int
+
+  # Pry audit archive (S3 Object Lock, Compliance mode)
+  optional :pry_audit_bucket, string
+  optional :pry_audit_region, string
+  optional :pry_audit_endpoint, string
+  optional :pry_audit_access_key, string, clear: true
+  optional :pry_audit_secret_key, string, clear: true
+  override :pry_audit_retention_years, 6, int
 
   # Ubicloud Images (Minio)
   override :ubicloud_images_bucket_name, "ubicloud-images", string
@@ -231,8 +239,10 @@ module Config
 
   override :github_ubuntu_2204_x64_aws_ami_version, "ami-027521b1fcdfb2d1d", string
   override :github_ubuntu_2404_x64_aws_ami_version, "ami-00053ab2c8f2e7a3f", string
+  override :github_ubuntu_2604_x64_aws_ami_version, "ami-05a5aaba660346f42", string
   override :github_ubuntu_2204_arm64_aws_ami_version, "ami-057b1610e577ebfa5", string
   override :github_ubuntu_2404_arm64_aws_ami_version, "ami-005e84aaf5eab2384", string
+  override :github_ubuntu_2604_arm64_aws_ami_version, "ami-0695161c7269e474e", string
   override :postgres_gce_image_gcp_project_id, "ubicloud-images", string
 
   # Allocator

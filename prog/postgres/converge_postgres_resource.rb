@@ -40,8 +40,8 @@ class Prog::Postgres::ConvergePostgresResource < Prog::Base
 
     total_lsn = waiting_servers.sum { |s| s.last_known_lsn ? s.lsn2int(s.last_known_lsn) : 0 }
 
-    previous_total_disk_usage = strand.stack.first["total_disk_usage"] || 0
-    previous_total_lsn = strand.stack.first["total_lsn"] || 0
+    previous_total_disk_usage = self.total_disk_usage || 0
+    previous_total_lsn = self.total_lsn || 0
     if total_disk_usage > previous_total_disk_usage || total_lsn > previous_total_lsn
       self.total_disk_usage = [total_disk_usage, previous_total_disk_usage].max
       self.total_lsn = [total_lsn, previous_total_lsn].max
@@ -52,6 +52,8 @@ class Prog::Postgres::ConvergePostgresResource < Prog::Base
   end
 
   label def wait_for_maintenance_window
+    hop_provision_servers unless postgres_resource.has_enough_fresh_servers?
+
     unless postgres_resource.in_maintenance_window? || postgres_resource.bypass_maintenance_window_set?
       ignore_window = begin
         postgres_resource.representative_server.disk_usage_percent >= 95
@@ -61,8 +63,6 @@ class Prog::Postgres::ConvergePostgresResource < Prog::Base
       end
       nap 10 * 60 unless ignore_window
     end
-
-    hop_provision_servers unless postgres_resource.has_enough_fresh_servers?
 
     # Read replicas skip the in-place upgrade process and directly
     # recycle servers, which are provisioned at the target version instead of

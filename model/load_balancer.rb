@@ -151,7 +151,7 @@ class LoadBalancer < Sequel::Model
       DB.ignore_duplicate_queries do
         vm_ports_dataset.where(Sequel[:load_balancer_vm_port][:id] => vm_port.id).destroy
       end
-      if vm_ports_dataset.where(load_balancer_vm_id: vm_port.load_balancer_vm_id).count.zero?
+      if vm_ports_dataset.where(load_balancer_vm_id: vm_port.load_balancer_vm_id).empty?
         load_balancer_vms_dataset[id: vm_port.load_balancer_vm_id].destroy
       end
       incr_rewrite_dns_records
@@ -175,14 +175,20 @@ class LoadBalancer < Sequel::Model
   end
 
   def cert_hostname
+    if (hostname = custom_hostname)
+      return hostname
+    end
+
     if hostname_version == 2
       "*.#{ubid}.#{domain}"
     else
-      hostname
+      self.hostname
     end
   end
 
   def private_hostname
+    return if custom_hostname
+
     if hostname_version == 2
       "#{name}.#{ubid}.private.#{domain}"
     else
@@ -191,6 +197,8 @@ class LoadBalancer < Sequel::Model
   end
 
   def cert_private_hostname
+    return if custom_hostname
+
     if hostname_version == 2
       "*.#{ubid}.private.#{domain}"
     else
