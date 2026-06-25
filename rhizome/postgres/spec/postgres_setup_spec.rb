@@ -108,6 +108,7 @@ RSpec.describe PostgresSetup do
           Environment=GOMEMLIMIT=#{lim}
         OVERRIDE
       end
+      expect(WalgHardening).to receive(:apply)
       expect(pg_setup).to receive(:r).with("systemctl daemon-reload")
       expect(pg_setup).to receive(:r).with("systemctl set-property system-go_services.slice MemoryHigh=2G MemoryMax=2560M")
 
