@@ -100,18 +100,8 @@ if PRY_LOGGER
 
       begin
         result = super
-<<<<<<< HEAD
-
-        # Log output
-        truncate_limit = Config.pry_logger_truncate_limit
-        output = result.inspect
-        output = "#{output[0..truncate_limit]}..." if output.length > truncate_limit
-        PRY_LOGGER.log(output, app: "pry", level: "info", type: "pry_output", counter: @counter)
-
-=======
         # Full, untruncated output: this is the compliance system of record.
         PRY_LOGGER.log(result.inspect, app: "pry", level: "info", type: "pry_output", counter: @counter, **PRY_SESSION)
->>>>>>> d3ad2e7379e092d9cf9db56cd49b369856590f91
         result
       rescue => e
         PRY_LOGGER.log("#{e.class}: #{e.message}\n#{e.backtrace.join("\n")}", app: "pry", level: "error", type: "eval_error", counter: @counter, **PRY_SESSION)
