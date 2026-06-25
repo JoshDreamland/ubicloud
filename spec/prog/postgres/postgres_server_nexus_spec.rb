@@ -609,6 +609,9 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
     it "waits for certificate creation by the parent resource" do
       server.resource.update(server_cert: nil)
       expect { nx.refresh_certificates }.to nap(5)
+
+      server.resource.update(server_cert: "1", client_root_cert_1: nil)
+      expect { nx.refresh_certificates }.to nap(5)
     end
 
     it "pushes certificates to vm and hops to configure_prometheus during initial provisioning" do
@@ -622,6 +625,25 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       expect(sshable).to receive(:_cmd).with("sudo tee /etc/ssl/certs/client.key > /dev/null", stdin: "client_cert_key")
       expect(sshable).to receive(:_cmd).with("sudo chgrp cert_readers /etc/ssl/certs/ca.crt && sudo chmod 640 /etc/ssl/certs/ca.crt")
       expect(sshable).to receive(:_cmd).with("sudo chgrp cert_readers /etc/ssl/certs/server-ca.crt && sudo chmod 640 /etc/ssl/certs/server-ca.crt")
+      expect(sshable).to receive(:_cmd).with("sudo chgrp cert_readers /etc/ssl/certs/server.crt && sudo chmod 640 /etc/ssl/certs/server.crt")
+      expect(sshable).to receive(:_cmd).with("sudo chgrp cert_readers /etc/ssl/certs/server.key && sudo chmod 640 /etc/ssl/certs/server.key")
+      expect(sshable).to receive(:_cmd).with("sudo chgrp cert_readers /etc/ssl/certs/client.crt && sudo chmod 640 /etc/ssl/certs/client.crt")
+      expect(sshable).to receive(:_cmd).with("sudo chgrp cert_readers /etc/ssl/certs/client.key && sudo chmod 640 /etc/ssl/certs/client.key")
+
+      expect(nx.postgres_server).to receive(:refresh_walg_credentials)
+
+      expect { nx.refresh_certificates }.to hop("configure_metrics")
+    end
+
+    it "skips server-ca.crt if there are no root certificates" do
+      nx.incr_initial_provisioning
+      nx.postgres_server.resource.update(trusted_ca_certs: nil, root_cert_1: nil, root_cert_2: nil)
+      expect(sshable).to receive(:_cmd).with("sudo tee /etc/ssl/certs/ca.crt > /dev/null", stdin: "client_root_cert_1\nclient_root_cert_2")
+      expect(sshable).to receive(:_cmd).with("sudo tee /etc/ssl/certs/server.crt > /dev/null", stdin: "server_cert")
+      expect(sshable).to receive(:_cmd).with("sudo tee /etc/ssl/certs/server.key > /dev/null", stdin: "server_cert_key")
+      expect(sshable).to receive(:_cmd).with("sudo tee /etc/ssl/certs/client.crt > /dev/null", stdin: "client_cert")
+      expect(sshable).to receive(:_cmd).with("sudo tee /etc/ssl/certs/client.key > /dev/null", stdin: "client_cert_key")
+      expect(sshable).to receive(:_cmd).with("sudo chgrp cert_readers /etc/ssl/certs/ca.crt && sudo chmod 640 /etc/ssl/certs/ca.crt")
       expect(sshable).to receive(:_cmd).with("sudo chgrp cert_readers /etc/ssl/certs/server.crt && sudo chmod 640 /etc/ssl/certs/server.crt")
       expect(sshable).to receive(:_cmd).with("sudo chgrp cert_readers /etc/ssl/certs/server.key && sudo chmod 640 /etc/ssl/certs/server.key")
       expect(sshable).to receive(:_cmd).with("sudo chgrp cert_readers /etc/ssl/certs/client.crt && sudo chmod 640 /etc/ssl/certs/client.crt")
@@ -1295,9 +1317,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
     end
 
     it "naps without extending deadline when lsn has not progressed" do
-      nx.strand.stack.first["previous_lsn"] = "0/1000000"
-      nx.strand.modified!(:stack)
-      nx.strand.save_changes
+      refresh_frame(nx, new_values: {"previous_lsn" => "0/1000000"})
       expect(server).to receive(:lsn_caught_up).and_return(false)
       expect(server).to receive(:last_known_lsn).and_return("0/1000000")
       expect(server).to receive(:lsn_diff).with("0/1000000", "0/1000000").and_return(0)
@@ -1315,9 +1335,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
     end
 
     it "naps without extending deadline when no lsn is available and disk has not grown" do
-      nx.strand.stack.first["previous_disk_usage"] = 1024
-      nx.strand.modified!(:stack)
-      nx.strand.save_changes
+      refresh_frame(nx, new_values: {"previous_disk_usage" => 1024})
       expect(server).to receive(:lsn_caught_up).and_return(false)
       expect(server).to receive(:last_known_lsn).and_return(nil)
       expect(server).to receive(:data_disk_usage).and_return(1024)
@@ -1809,7 +1827,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
 
     it "falls back to unplanned failover when deadline has passed" do
       postgres_server.strand.update(label: "fence")
-      @standby_nx.strand.update(stack: [{"deadline_at" => (Time.now - 1).to_s, "deadline_target" => "wait"}])
+      refresh_frame(@standby_nx, new_values: {"deadline_at" => (Time.now - 1).to_s, "deadline_target" => "wait"})
       expect { @standby_nx.wait_fencing_of_old_primary }.to hop("wait_representative_lockout")
       expect(Semaphore.where(strand_id: postgres_server.id, name: "lockout").count).to eq(1)
     end

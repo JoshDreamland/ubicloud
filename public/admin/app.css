@@ -325,3 +325,19 @@ code {
   flex: 1;
   min-width: 400px;
 }
+
+#start-semaphore-rollout {
+  #wait-label-wrapper {
+    display: none;
+  }
+  &:has(input[name=increment][value=increment]:checked) #wait-label-wrapper {
+    display: block;
+  }
+}
+
+#vm-host-usage-search {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1em;
+  align-items: flex-end;
+}

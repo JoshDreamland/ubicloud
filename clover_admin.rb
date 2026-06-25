@@ -1185,15 +1185,33 @@ class CloverAdmin < Roda
 
       r.post "start", ROLLOUT_PROGS do |prog|
         st = if prog == "RolloutSemaphore"
-          klass, semaphore = typecast_params.nonempty_str!(%w[class semaphore])
+          klass, semaphore, increment = typecast_params.nonempty_str!(%w[class semaphore increment])
           gap = typecast_params.pos_int!("gap")
-          increment = typecast_params.bool!("increment")
+          wait = typecast_params.nonempty_str("wait_label")
+          location_id = typecast_params.ubid_uuid("location_id")
+
           unless semaphore_classes.map(&:name).include?(klass) &&
               (klass = Object.const_get(klass)).semaphore_names.include?(semaphore.to_sym)
             flash["error"] = "invalid semaphore for class"
             r.redirect "/rollouts"
           end
-          Prog.const_get(prog).assemble(semaphore:, ids: klass.select_map(:id), gap:, increment:)
+
+          ds = klass
+          ds = ds.where(location_id:) if location_id && klass.columns.include?(:location_id)
+          ids = ds.select_map(:id)
+
+          case increment
+          when "increment-no-wait"
+            increment = true
+            wait = false
+          when "decrement"
+            increment = false
+          else
+            increment = true
+            wait ||= true
+          end
+
+          Prog.const_get(prog).assemble(semaphore:, ids:, gap:, increment:, wait:)
         elsif prog == "RolloutBootImage"
           image_name, version, arch = typecast_params.nonempty_str!(%w[image_name version arch])
           concurrency = typecast_params.pos_int!("concurrency")
@@ -1228,6 +1246,46 @@ class CloverAdmin < Roda
 
       strand_semaphore_action(strand_ds, ROLLOUT_PROGS,
         additional_semaphores: {"RolloutRhizome" => %w[github_runners_work], "RolloutBootImage" => %w[rollback]})
+    end
+
+    r.on "remove-boot-images" do
+      r.get true do
+        @groups = BootImage
+          .left_join(:vm_storage_volume, boot_image_id: Sequel[:boot_image][:id])
+          .select_group(Sequel[:boot_image][:name], Sequel[:boot_image][:version])
+          .select_append(
+            Sequel.function(:count, Sequel[:boot_image][:id]).distinct.as(:image_count),
+            Sequel.function(:count, Sequel[:vm_storage_volume][:id]).as(:volume_count),
+          )
+          .order(Sequel[:boot_image][:name], Sequel[:boot_image][:version])
+          .naked
+          .all
+        view("remove_boot_images")
+      end
+
+      r.is "confirm" do
+        @name, @version = typecast_params.nonempty_str!(%w[name version])
+
+        images_ds = BootImage.where(name: @name, version: @version)
+        # Only images with no active storage volumes (i.e. no active VM) can be removed.
+        removable_ds = images_ds.exclude(id: VmStorageVolume.exclude(boot_image_id: nil).select(:boot_image_id))
+
+        r.get do
+          @total_count = images_ds.count
+          @removable_count = removable_ds.count
+          view("remove_boot_images_confirm")
+        end
+
+        r.post do
+          image_ids = removable_ds.select_map(:id)
+          Strand.import(
+            [:id, :prog, :label, :stack],
+            image_ids.map { [Strand.generate_uuid, "RemoveBootImage", "start", Sequel.pg_jsonb_wrap([{subject_id: it}])] },
+          )
+          flash["notice"] = "Scheduled removal of #{image_ids.length} boot image(s) for #{@name} #{@version}"
+          r.redirect "/remove-boot-images"
+        end
+      end
     end
 
     r.on "local-e2e" do
@@ -1366,6 +1424,97 @@ class CloverAdmin < Roda
       view("github_runner_usage")
     end
 
+    r.get "vm-host-usage" do
+      @locations = Location.where(id: VmHost.select(:location_id)).select_order_map([:name, :id]).map { |name, id| [name, UBID.to_ubid(id)] }
+      @archs = %w[x64 arm64]
+      @core_counts = VmHost.exclude(total_cores: nil).distinct.select_order_map(:total_cores)
+      @states = %w[unprepared accepting draining]
+
+      @location_id = typecast_params.ubid("location_id")
+      @arch = typecast_params.nonempty_str("arch")
+      @cores = typecast_params.pos_int("cores")
+      @state = typecast_params.nonempty_str("state")
+
+      unless r.query_string.empty?
+        storage_agg = DB[:storage_device]
+          .select_group(:vm_host_id)
+          .select_append(
+            Sequel.function(:sum, :total_storage_gib).as(:total_storage),
+            Sequel.function(:sum, :available_storage_gib).as(:available_storage),
+          )
+
+        boot_agg = DB[:boot_image]
+          .select_group(:vm_host_id)
+          .select_append(Sequel.function(:count, :name).distinct.as(:image_types))
+
+        vm_agg = DB[:vm]
+          .select_group(:vm_host_id)
+          .select_append(Sequel.function(:count).*.as(:vm_count))
+
+        ip4_agg = DB[:ipv4_address]
+          .join(:address, [:cidr])
+          .left_join(:assigned_vm_address, Sequel[:assigned_vm_address][:ip] => Sequel[:ipv4_address][:ip])
+          .left_join(:assigned_host_address, Sequel[:assigned_host_address][:ip] => Sequel[:ipv4_address][:ip])
+          .select_group(Sequel[:address][:routed_to_host_id])
+          .select_append(
+            Sequel.function(:count).*.as(:total_ip4),
+            Sequel.function(:count).*.filter(Sequel[:assigned_vm_address][:ip] => nil, Sequel[:assigned_host_address][:ip] => nil).as(:available_ip4),
+          )
+
+        vmh = Sequel[:vm_host]
+        vm_host_id = vmh[:id]
+        ds = VmHost
+          .join(Sequel[:location], id: vmh[:location_id])
+          .left_join(storage_agg.as(:sd), vm_host_id:)
+          .left_join(boot_agg.as(:bi), vm_host_id:)
+          .left_join(ip4_agg.as(:ip), routed_to_host_id: vmh[:id])
+          .left_join(vm_agg.as(:vm), vm_host_id:)
+          .select(
+            vmh[:id],
+            Sequel[:location][:name].as(:location),
+            vmh[:allocation_state],
+            vmh[:data_center],
+            vmh[:family],
+            Sequel.function(:coalesce, Sequel[:vm][:vm_count], 0).as(:vm_count),
+            vmh[:used_cores],
+            vmh[:total_cores],
+            vmh[:used_hugepages_1g],
+            vmh[:total_hugepages_1g],
+            Sequel.function(:coalesce, Sequel[:sd][:available_storage], 0).as(:available_storage),
+            Sequel.function(:coalesce, Sequel[:sd][:total_storage], 0).as(:total_storage),
+            Sequel.function(:coalesce, Sequel[:bi][:image_types], 0).as(:image_types),
+            Sequel.function(:coalesce, Sequel[:ip][:available_ip4], 0).as(:available_ip4),
+            Sequel.function(:coalesce, Sequel[:ip][:total_ip4], 0).as(:total_ip4),
+          )
+          .order(Sequel[:location][:name], vmh[:data_center], vmh[:family], vmh[:id])
+
+        ds = ds.where(vmh[:location_id] => UBID.parse(@location_id).to_uuid) if @location_id
+        ds = ds.where(vmh[:arch] => @arch) if @arch
+        ds = ds.where(vmh[:total_cores] => @cores) if @cores
+        ds = ds.where(vmh[:allocation_state] => @state) if @state
+
+        @data = ds.map do |row|
+          used_storage = row[:total_storage] - row[:available_storage]
+          used_ip4 = row[:total_ip4] - row[:available_ip4]
+          {
+            ubid: UBID.to_ubid(row[:id]),
+            location: row[:location],
+            state: row[:allocation_state],
+            datacenter: row[:data_center],
+            family: row[:family],
+            vms: row[:vm_count],
+            cores: "#{row[:used_cores]} / #{row[:total_cores]}",
+            hugepages: "#{row[:used_hugepages_1g]} / #{row[:total_hugepages_1g]}",
+            storage_gib: "#{used_storage} / #{row[:total_storage]}",
+            ip4: "#{used_ip4} / #{row[:total_ip4]}",
+            image_types: row[:image_types],
+          }
+        end
+      end
+
+      view("vm_host_usage")
+    end
+
     r.post "close-admin-account" do
       login = typecast_params.nonempty_str!("login")
 
@@ -1424,6 +1573,7 @@ class CloverAdmin < Roda
         .exclude(severity: "info")
         .left_join(:page_root_resource, page_id: :id)
         .to_hash_groups(:root_resource_id)
+      @total_pages = @grouped_pages.flat_map(&:last).map!(&:id).uniq.size
       @classes = available_classes
       @info_pages = Page.active.where(severity: "info").reverse(:created_at).all
 

@@ -6,7 +6,7 @@ require "netaddr"
 Al = Scheduling::Allocator
 TestAllocation = Struct.new(:score, :is_valid)
 TestResourceAllocation = Struct.new(:utilization, :is_valid)
-RSpec.describe Al do
+RSpec.describe Scheduling::Allocator do
   let(:vm) {
     Vm.new(family: "standard", vcpus: 2, cpu_percent_limit: 200, cpu_burst_percent_limit: 0, memory_gib: 8, name: "dummy-vm", arch: "x64", location_id: Location::HETZNER_FSN1_ID, ip4_enabled: "true", created_at: Time.now, unix_user: "", public_key: "", boot_image: "ubuntu-jammy").tap {
       it.id = "2464de61-7501-8374-9ab0-416caebe31da"
@@ -121,9 +121,10 @@ RSpec.describe Al do
     }
 
     it "prints diagnostics if flagged" do
-      expect(req).to receive(:diagnostics).and_return(true)
+      expect(req).to receive(:diagnostics).and_return(true).at_least(:once)
       expect(Clog).to receive(:emit).with("Allocator query for vm", instance_of(Hash)) do |_, b|
-        expect(b[:allocator_query].keys).to eq([:vm_id, :sql])
+        expect(b[:allocator_query].keys).to eq([:vm_id, :sql, :counts])
+        expect(b[:allocator_query][:counts]).to eq [[:base, 0]]
       end
       Al::Allocation.best_allocation(req)
     end
@@ -157,6 +158,14 @@ RSpec.describe Al do
       Address.create(cidr: "4.1.1.0/30", routed_to_host_id: vmh4.id)
       Address.create(cidr: "5.1.1.0/30", routed_to_host_id: vmh5.id)
 
+      expect(Clog).to receive(:emit).twice.with("Allocator query for vm", instance_of(Hash)) do |_, b|
+        expect(b[:allocator_query][:counts]).to eq [[:base, 3], [:space, 1], [:boot_image, 0]]
+      end
+      Al::Allocation.best_allocation(req)
+      expect(Al::Allocation.candidate_hosts(req)).to eq([])
+
+      req.boot_image = "github-ubuntu-2404"
+      expect(Clog).not_to receive(:emit)
       expect(Al::Allocation.candidate_hosts(req)).to eq([])
     end
 
@@ -198,6 +207,10 @@ RSpec.describe Al do
       create_vm(vm_host_id: vmh.id, location_id: vmh.location_id, boot_image: "ubuntu-jammy", display_state: "creating")
       BootImage.create(name: "ubuntu-jammy", version: "20220202", vm_host_id: vmh.id, activated_at: Time.now, size_gib: 3)
 
+      expect(req).to receive(:diagnostics).and_return(true).at_least(:once)
+      expect(Clog).to receive(:emit).with("Allocator query for vm", instance_of(Hash)) do |_, b|
+        expect(b[:allocator_query][:counts]).to eq [[:base, 1], [:space, 1], [:boot_image, 1], [:ipv4, 1], [:allocation_state, 1], [:non_gpu, 1]]
+      end
       expect(Al::Allocation.candidate_hosts(req))
         .to eq([{location_id: vmh.location_id,
                  num_storage_devices: 1,

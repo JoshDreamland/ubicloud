@@ -755,6 +755,7 @@ RSpec.describe CloverAdmin do
       ["GithubRunnerVCpuArm", "100", "0"],
       ["PostgresVCpu", "128", "0"],
       ["KubernetesVCpu", "32", "0"],
+      ["MachineImageVersion", "16", "0"],
     ]
   end
 
@@ -806,7 +807,7 @@ RSpec.describe CloverAdmin do
 
     page1 = Prog::PageNexus.assemble("some problem", %w[a], nil).subject
     page.refresh
-    expect(page).to have_content "Active Pages"
+    expect(page).to have_content "1 Active Pages"
     expect(page_data).to eq [
       ["", "some problem", "[]", "{}"],
     ]
@@ -815,6 +816,7 @@ RSpec.describe CloverAdmin do
 
     Prog::PageNexus.assemble("another problem", %w[b], vm_pool.ubid).subject
     visit "/"
+    expect(page).to have_content "2 Active Pages"
     expect(page_data).to eq [
       ["", "some problem", "[]", "{}"],
       ["another problem", "[\"#{vm_pool.ubid}\"]", "{}"],
@@ -828,6 +830,7 @@ RSpec.describe CloverAdmin do
     vm.update(vm_host_id: vmh.id)
     Prog::PageNexus.assemble("third problem", %w[c], vm.ubid).subject
     visit "/"
+    expect(page).to have_content "3 Active Pages"
     expect(page_data).to eq [
       [vmh.ubid, "third problem", "[\"#{vm.ubid}\"]", "{}"],
       ["", "some problem", "[]", "{}"],
@@ -1743,6 +1746,64 @@ RSpec.describe CloverAdmin do
       expect(st.stack[0]["remaining"]).to eq [page_st.id]
       expect(st.stack[0]["gap"]).to eq 90
       expect(st.stack[0]["increment"]).to be true
+      expect(st.stack[0]["wait_label"]).to be true
+
+      st.run
+      page.refresh
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "wait_current", "0", st.ubid, "{}", "", "", "increment resolve"]
+
+      Semaphore.where(strand_id: page_st.id, name: "resolve").destroy
+      st.run
+      page.refresh
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "{\"remaining\" => 0, \"completed\" => 1}", "", "", "increment resolve"]
+    end
+
+    it "allows creation of semaphore increment rollout strands with locations and wait labels" do
+      select "Page"
+      fill_in "Semaphore", with: "bad"
+      click_button "Start Semaphore Rollout"
+      expect(page).to have_flash_error("invalid semaphore for class")
+
+      fsn1_vm = create_vm
+      hel1_vm = create_vm(location_id: Location::HETZNER_HEL1_ID)
+
+      Strand.create_with_id(fsn1_vm.id, prog: "Vm::Metal::Nexus", label: "start")
+      Strand.create_with_id(hel1_vm.id, prog: "Vm::Metal::Nexus", label: "start")
+
+      select "Vm"
+      select "hetzner-fsn1"
+      fill_in "Semaphore", with: "update_firewall_rules"
+      fill_in "Wait Label", with: "wait"
+      click_button "Start Semaphore Rollout"
+
+      st = Strand.first(prog: "RolloutSemaphore")
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "{}", "", "", "increment update_firewall_rules"]
+      expect(page).to have_flash_notice("Started rollout strand: #{st.ubid}")
+
+      expect(st.stack[0]["semaphore"]).to eq "update_firewall_rules"
+      expect(st.stack[0]["remaining"]).to eq [fsn1_vm.id]
+      expect(st.stack[0]["gap"]).to eq 60
+      expect(st.stack[0]["increment"]).to be true
+      expect(st.stack[0]["wait_label"]).to eq "wait"
+    end
+
+    it "allows creation of semaphore increment without wait rollout strands" do
+      page_st = Prog::PageNexus.assemble("some problem", %w[a], nil)
+
+      select "Page"
+      fill_in "Semaphore", with: "resolve"
+      choose "Increment Without Waiting"
+      click_button "Start Semaphore Rollout"
+
+      st = Strand.first(prog: "RolloutSemaphore")
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "{}", "", "", "increment resolve"]
+      expect(page).to have_flash_notice("Started rollout strand: #{st.ubid}")
+
+      expect(st.stack[0]["semaphore"]).to eq "resolve"
+      expect(st.stack[0]["remaining"]).to eq [page_st.id]
+      expect(st.stack[0]["gap"]).to eq 60
+      expect(st.stack[0]["increment"]).to be true
+      expect(st.stack[0]["wait_label"]).to be false
 
       st.run
       page.refresh
@@ -1930,6 +1991,47 @@ RSpec.describe CloverAdmin do
       click_button "Rollback"
       expect(page).to have_flash_notice("Strand #{st.ubid} updated")
       expect(st.semaphores.map(&:name)).to eq ["rollback"]
+    end
+  end
+
+  describe "remove boot images" do
+    before do
+      click_link "Remove Boot Images"
+    end
+
+    it "lists boot image groups and removes only unused images" do
+      expect(page.title).to eq "Ubicloud Admin - Remove Boot Images"
+      expect(page).to have_content("No data available for Boot Images")
+
+      remove_path = page.current_path
+      vmh1 = create_vm_host
+      vmh2 = create_vm_host
+      used = BootImage.create(name: "ubuntu-noble", version: "20240101", vm_host_id: vmh1.id, size_gib: 14, activated_at: Time.now)
+      unused = BootImage.create(name: "ubuntu-noble", version: "20240101", vm_host_id: vmh2.id, size_gib: 14, activated_at: Time.now)
+      vm = create_vm(vm_host_id: vmh1.id)
+      VmStorageVolume.create(vm_id: vm.id, boot: true, size_gib: 5, disk_index: 0, boot_image_id: used.id)
+
+      visit remove_path
+      expect(page.all(".boot-images-table td").map(&:text)).to eq ["ubuntu-noble", "20240101", "2", "1", "Remove"]
+
+      click_link "Remove"
+      expect(page).to have_content("schedule removal of 1 of 2 image(s)")
+
+      click_button "Confirm Remove"
+      expect(page).to have_flash_notice("Scheduled removal of 1 boot image(s) for ubuntu-noble 20240101")
+      expect(Strand.where(prog: "RemoveBootImage").map { it.stack.first["subject_id"] }).to eq [unused.id]
+    end
+
+    it "shows a message and no button when there are no removable images" do
+      vmh = create_vm_host
+      image = BootImage.create(name: "ubuntu-noble", version: "20240101", vm_host_id: vmh.id, size_gib: 14, activated_at: Time.now)
+      vm = create_vm(vm_host_id: vmh.id)
+      VmStorageVolume.create(vm_id: vm.id, boot: true, size_gib: 5, disk_index: 0, boot_image_id: image.id)
+
+      page.refresh
+      click_link "Remove"
+      expect(page).to have_content("There are no images to remove.")
+      expect(page).to have_no_button("Confirm Remove")
     end
   end
 
@@ -2845,5 +2947,69 @@ RSpec.describe CloverAdmin do
       click_button "Search"
       expect(audit_log_content).to be_empty
     end
+  end
+
+  it "shows VM Host Usage filtered by location" do
+    vm_host = create_vm_host(data_center: "FSN1-DC1", total_cores: 48, used_cores: 4, total_hugepages_1g: 375, used_hugepages_1g: 32)
+    StorageDevice.create(name: "nvme0", total_storage_gib: 1000, available_storage_gib: 600, vm_host_id: vm_host.id)
+    StorageDevice.create(name: "nvme1", total_storage_gib: 500, available_storage_gib: 100, vm_host_id: vm_host.id)
+    BootImage.create(name: "ubuntu-jammy", version: "1", vm_host_id: vm_host.id, size_gib: 14)
+    BootImage.create(name: "ubuntu-jammy", version: "2", vm_host_id: vm_host.id, size_gib: 14)
+    BootImage.create(name: "ubuntu-noble", version: "1", vm_host_id: vm_host.id, size_gib: 14)
+    create_vm(vm_host_id: vm_host.id)
+    create_vm(vm_host_id: vm_host.id)
+
+    # A host in another location that must be excluded by the location filter.
+    create_vm_host(location_id: Location::GITHUB_RUNNERS_ID)
+
+    click_link "VM Host Usage"
+    expect(page.title).to eq "Ubicloud Admin - VM Host Usage"
+
+    # No results are shown until a search is performed.
+    expect(page).to have_no_css(".vm-host-usage-table")
+
+    click_button "Search"
+    headers = page.all(".vm-host-usage-table thead th").map(&:text)
+    expect(headers).to include("location")
+    expect(page.all(".vm-host-usage-table tbody tr").size).to eq 2
+
+    select "hetzner-fsn1", from: "Location"
+    click_button "Search"
+    row = page.all(".vm-host-usage-table tbody tr").map { it.all("td").map(&:text) }
+    expect(row.size).to eq 1
+    expect(row.first).to include(vm_host.ubid, "accepting", "FSN1-DC1", "standard", "2", "4 / 48", "32 / 375", "800 / 1500", "0 / 0", "2")
+  end
+
+  it "filters VM Host Usage by arch, total_cores and state, composing filters" do
+    x64_48 = create_vm_host(arch: "x64", total_cores: 48, allocation_state: "accepting")
+    x64_96 = create_vm_host(arch: "x64", total_cores: 96, allocation_state: "draining")
+    arm_48 = create_vm_host(arch: "arm64", total_cores: 48, allocation_state: "accepting")
+    ubids = lambda { page.all(".vm-host-usage-table tbody tr").map { it.all("td").map(&:text).first } }
+
+    click_link "VM Host Usage"
+    select "arm64", from: "Arch"
+    click_button "Search"
+    expect(ubids.call).to eq([arm_48.ubid])
+
+    visit "/vm-host-usage"
+    select "96", from: "Cores"
+    click_button "Search"
+    expect(ubids.call).to eq([x64_96.ubid])
+
+    visit "/vm-host-usage"
+    select "draining", from: "State"
+    click_button "Search"
+    expect(ubids.call).to eq([x64_96.ubid])
+
+    visit "/vm-host-usage"
+    click_button "Search"
+    expect(ubids.call).to eq([x64_48.ubid, arm_48.ubid, x64_96.ubid].sort)
+
+    # Composed arch + cores + state filter.
+    select "x64", from: "Arch"
+    select "48", from: "Cores"
+    select "accepting", from: "State"
+    click_button "Search"
+    expect(ubids.call).to eq([x64_48.ubid])
   end
 end

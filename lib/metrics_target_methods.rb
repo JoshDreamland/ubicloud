@@ -18,6 +18,9 @@ module MetricsTargetMethods
       # Additional label names and values to be added to the collected metrics
       additional_labels: {foo: "bar"},
 
+      # Regexps for scraped lines to drop before buffering/export (optional)
+      exclude_metrics: [],
+
       # Directory to store the collected metrics
       metrics_dir: "/home/ubi/metrics",
 
@@ -51,7 +54,7 @@ module MetricsTargetMethods
 
     scrape_files.filter_map do |file|
       time_str = file.split(".").first
-      time = Time.strptime(time_str, FILENAME_FORMAT)
+      time = Time.strptime("#{time_str} UTC", "#{FILENAME_FORMAT} %Z")
       status = {}
 
       samples = session[:ssh_session].exec!("cat :metrics_dir/done/:file", metrics_dir:, file:, status:)

@@ -171,6 +171,7 @@ class Project < Sequel::Model
     when "KubernetesVCpu" then kubernetes_clusters_dataset.select(Sequel[:kubernetes_cluster][:cp_node_count].as(:node_count), Sequel[:kubernetes_cluster][:target_node_size])
       .union(kubernetes_clusters_dataset.association_join(:nodepools).select(:node_count, Sequel[:nodepools][:target_node_size]), all: true)
       .all.sum { it[:node_count] * Validation.validate_vm_size(it[:target_node_size], "x64").vcpus } || 0
+    when "MachineImageVersion" then MachineImageVersion.where(machine_image_id: machine_images_dataset.select(:id)).count
     else
       raise "Unknown resource type: #{resource_type}"
     end
@@ -252,6 +253,7 @@ class Project < Sequel::Model
     :postgres_lantern,
     :postgres_paradedb,
     :private_locations,
+    :require_mfa_or_omniauth,
     :skip_runner_pool,
     :spill_to_alien_runners,
     :visible_locations,

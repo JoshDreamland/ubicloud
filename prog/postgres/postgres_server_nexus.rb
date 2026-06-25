@@ -230,19 +230,22 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
   label def refresh_certificates
     decr_refresh_certificates
 
-    nap 5 if resource.server_cert.nil?
+    nap 5 if resource.server_cert.nil? || resource.client_root_cert_1.nil?
 
     client_ca_bundle = [resource.client_ca_certificates, resource.trusted_ca_certs].compact.join("\n")
 
     vm.sshable.write_file("/etc/ssl/certs/ca.crt", client_ca_bundle)
-    vm.sshable.write_file("/etc/ssl/certs/server-ca.crt", resource.ca_certificates)
+    if (ca_certs = resource.ca_certificates)
+      # Databases using publicly signed certificates do not need this file.
+      vm.sshable.write_file("/etc/ssl/certs/server-ca.crt", ca_certs)
+    end
     vm.sshable.write_file("/etc/ssl/certs/server.crt", resource.server_cert)
     vm.sshable.write_file("/etc/ssl/certs/server.key", resource.server_cert_key)
     vm.sshable.write_file("/etc/ssl/certs/client.crt", resource.client_cert)
     vm.sshable.write_file("/etc/ssl/certs/client.key", resource.client_cert_key)
 
     vm.sshable.cmd("sudo chgrp cert_readers /etc/ssl/certs/ca.crt && sudo chmod 640 /etc/ssl/certs/ca.crt")
-    vm.sshable.cmd("sudo chgrp cert_readers /etc/ssl/certs/server-ca.crt && sudo chmod 640 /etc/ssl/certs/server-ca.crt")
+    vm.sshable.cmd("sudo chgrp cert_readers /etc/ssl/certs/server-ca.crt && sudo chmod 640 /etc/ssl/certs/server-ca.crt") if ca_certs
     vm.sshable.cmd("sudo chgrp cert_readers /etc/ssl/certs/server.crt && sudo chmod 640 /etc/ssl/certs/server.crt")
     vm.sshable.cmd("sudo chgrp cert_readers /etc/ssl/certs/server.key && sudo chmod 640 /etc/ssl/certs/server.key")
     vm.sshable.cmd("sudo chgrp cert_readers /etc/ssl/certs/client.crt && sudo chmod 640 /etc/ssl/certs/client.crt")
@@ -589,15 +592,13 @@ SQL
     end
 
     if (current_lsn = postgres_server.last_known_lsn)
-      previous_lsn = strand.stack.first["previous_lsn"]
       if previous_lsn.nil? || postgres_server.lsn_diff(current_lsn, previous_lsn) > 0
         self.previous_lsn = current_lsn
         register_deadline("wait", 10 * 60, allow_extension: 24 * 60 * 60)
       end
     else
       disk_usage = postgres_server.data_disk_usage
-      previous_disk_usage = strand.stack.first["previous_disk_usage"] || 0
-      if disk_usage > previous_disk_usage
+      if disk_usage > (previous_disk_usage || 0)
         self.previous_disk_usage = disk_usage
         register_deadline("wait", 10 * 60, allow_extension: 24 * 60 * 60)
       end
@@ -735,7 +736,7 @@ SQL
       nap 60 if postgres_server.lsn_caught_up
 
       lsn = postgres_server.current_lsn
-      previous_lsn = strand.stack.first["lsn"]
+      previous_lsn = self.lsn
       # The first time we are behind the primary, so, we'll just record the info
       # and nap
       unless previous_lsn
@@ -861,7 +862,7 @@ SQL
     end
 
     reap(:wait_locked_out, fallthrough: true, reaper:, prog: "Postgres::PostgresLockout")
-    hop_wait_locked_out if strand.stack.first["lockout_succeeded"]
+    hop_wait_locked_out if lockout_succeeded
 
     nap 0.5
   end
@@ -881,7 +882,7 @@ SQL
     representative_server = resource.representative_server
     hop_taking_over if representative_server.strand.label == "wait_in_fence"
 
-    if strand.stack.first["deadline_at"] && Time.now > Time.parse(strand.stack.first["deadline_at"].to_s)
+    if deadline_at && Time.now > Time.parse(deadline_at.to_s)
       representative_server.incr_lockout
       hop_wait_representative_lockout
     end

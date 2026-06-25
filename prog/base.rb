@@ -149,7 +149,7 @@ end
       # This is a multi-level stack with a back-link, i.e. one prog
       # calling another in the same Strand of execution.  The thing to
       # do here is pop the stack entry.
-      pg = Page.from_tag_parts("Deadline", strand.id, strand.prog, strand.stack.first["deadline_target"])
+      pg = Page.from_tag_parts("Deadline", strand.id, strand.prog, deadline_target)
       pg&.incr_resolve
 
       old_prog = strand.prog
@@ -163,7 +163,7 @@ end
     else
       raise Strand::InternalError, "BUG: expect no stacks exceeding depth 1 with no back-link" if strand.stack.length > 1
 
-      pg = Page.from_tag_parts("Deadline", strand.id, strand.prog, strand.stack.first["deadline_target"])
+      pg = Page.from_tag_parts("Deadline", strand.id, strand.prog, deadline_target)
       pg&.incr_resolve
 
       # Child strand with zero or one stack frames, set exitval. Clear
@@ -393,9 +393,7 @@ end
         allow_extension ||
         Time.parse(deadline_at) > new_deadline
 
-      if deadline_target != new_deadline_target && (pg = Page.from_tag_parts("Deadline", strand.id, strand.prog, deadline_target))
-        pg.incr_resolve
-      end
+      resolve_deadline_target(deadline_target) if deadline_target != new_deadline_target
 
       self.deadline_target = new_deadline_target
 
@@ -410,16 +408,12 @@ end
   end
 
   def unregister_deadline(deadline_target)
-    current_frame = strand.stack.first
+    resolve_deadline_target(deadline_target)
+    delete_from_stack("deadline_at", "deadline_target", "deadline_start")
+  end
 
-    if (pg = Page.from_tag_parts("Deadline", strand.id, strand.prog, deadline_target))
-      pg.incr_resolve
-    end
-
-    current_frame.delete("deadline_at")
-    current_frame.delete("deadline_target")
-    current_frame.delete("deadline_start")
-    strand.modified!(:stack)
+  def resolve_deadline_target(deadline_target)
+    Page.from_tag_parts("Deadline", strand.id, strand.prog, deadline_target)&.incr_resolve
   end
 
   # Copied from sequel/model/inflections.rb's camelize, to convert

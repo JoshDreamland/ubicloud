@@ -3,6 +3,7 @@
 class Prog::Vm::HostNexus < Prog::Base
   subject_is :sshable, :vm_host
   frame_reader :vhost_block_backend_version, :default_boot_images
+  frame_accessor :accepting_before_patch
 
   def self.assemble(sshable_hostname, location_id: Location::HETZNER_FSN1_ID, family: "standard", net6: nil, ndp_needed: false, provider_name: nil, server_identifier: nil, vhost_block_backend_version: Config.vhost_block_backend_version, default_boot_images: [])
     DB.transaction do
@@ -147,7 +148,7 @@ class Prog::Vm::HostNexus < Prog::Base
   end
 
   label def wait_download_boot_images
-    reap(:prep_reboot)
+    reap(:patch)
   end
 
   label def prep_reboot
@@ -270,8 +271,10 @@ class Prog::Vm::HostNexus < Prog::Base
     when_graceful_reboot_set? do
       fail "BUG: VmHost not in draining state" unless vm_host.allocation_state == "draining"
 
-      vm_host.update(allocation_state: "accepting")
-      decr_graceful_reboot
+      unless vm_host.patch_set?
+        vm_host.update(allocation_state: "accepting")
+        decr_graceful_reboot
+      end
     end
 
     vm_host.update(allocation_state: "accepting") if vm_host.allocation_state == "unprepared"
@@ -337,6 +340,20 @@ TIMER
     hop_wait
   end
 
+  label def patch
+    sshable = vm_host.sshable
+
+    case sshable.d_check("apply_patches")
+    when "Succeeded"
+      sshable.d_clean("apply_patches")
+      hop_prep_reboot
+    when "Failed", "NotStarted"
+      sshable.d_run("apply_patches", "sudo", "bash", "-c", "apt update && apt full-upgrade -y")
+    end
+
+    nap 60
+  end
+
   label def wait
     hardware_reset_and_reboot_checks
 
@@ -348,6 +365,26 @@ TIMER
     when_configure_metrics_set? do
       decr_configure_metrics
       hop_configure_metrics
+    end
+
+    when_patch_set? do
+      unless vm_host.allocation_state == "draining"
+        vm_host.update(allocation_state: "draining")
+        self.accepting_before_patch = true
+      end
+
+      if vm_host.vms_dataset.empty?
+        if accepting_before_patch
+          # Move back to accepting post-reboot if it was accepting before patch semaphore set
+          incr_graceful_reboot
+          delete_from_stack("accepting_before_patch")
+        end
+        decr_patch
+        register_deadline("prep_reboot", 10 * 60)
+        hop_patch
+      end
+
+      nap 60
     end
 
     nap 6 * 60 * 60
