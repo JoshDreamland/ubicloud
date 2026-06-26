@@ -182,6 +182,7 @@ RSpec.describe Clover, "clickgres-billing" do
     before do
       postgres_project = Project.create(name: "default")
       allow(Config).to receive(:postgres_service_project_id).and_return(postgres_project.id)
+      project.set_ff_chc_postgres_deactivate_lockout(true)
     end
 
     def create_pg(name)
@@ -277,6 +278,141 @@ RSpec.describe Clover, "clickgres-billing" do
       post "/project/#{project.ubid}/clickgres-billing/postgres/#{pg.ubid}/deactivate"
       expect(last_response.status).to eq(200)
       expect(JSON.parse(last_response.body)["phase"]).to eq("destroying")
+    end
+
+    it "noops on a fully-deactivated resource (both tags present, no semaphore incr, no audit log)" do
+      pg = create_pg("pg-already-deactivated")
+      pg.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}, {"key" => "chc_deactivated_at", "value" => "2026-01-01T00:00:00Z"}]))
+
+      expect {
+        post "/project/#{project.ubid}/clickgres-billing/postgres/#{pg.ubid}/deactivate"
+      }.to not_change { Semaphore.where(strand_id: pg.strand.id, name: "mark_billing_deactivated").count }
+        .and not_change { DB[:audit_log].where(action: "billing_deactivate_requested").where(Sequel.lit("? = ANY(object_ids)", pg.id)).count }
+
+      expect(last_response.status).to eq(200)
+    end
+
+    it "re-triggers the handler on a legacy hotfix-deactivated row (chc_state only) so it upgrades to full lockout + timestamp" do
+      pg = create_pg("pg-legacy")
+      pg.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
+
+      expect {
+        post "/project/#{project.ubid}/clickgres-billing/postgres/#{pg.ubid}/deactivate"
+      }.to change { Semaphore.where(strand_id: pg.strand.id, name: "mark_billing_deactivated").count }.by(1)
+    end
+
+    it "noops when FF OFF and chc_state is already set (legacy poll idempotency)" do
+      project.set_ff_chc_postgres_deactivate_lockout(false)
+      pg = create_pg("pg-legacy-poll")
+      pg.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
+
+      expect {
+        post "/project/#{project.ubid}/clickgres-billing/postgres/#{pg.ubid}/deactivate"
+      }.to not_change { Semaphore.where(strand_id: pg.strand.id, name: "mark_billing_deactivated").count }
+        .and not_change { DB[:audit_log].where(action: "billing_deactivate_requested").where(Sequel.lit("? = ANY(object_ids)", pg.id)).count }
+    end
+  end
+
+  describe "POST /project/:project_id/clickgres-billing/postgres/:ubid/activate" do
+    before do
+      postgres_project = Project.create(name: "default")
+      allow(Config).to receive(:postgres_service_project_id).and_return(postgres_project.id)
+      project.set_ff_chc_postgres_deactivate_lockout(true)
+    end
+
+    def create_pg(name, deactivated: true)
+      pg = Prog::Postgres::PostgresResourceNexus.assemble(
+        project_id: project.id,
+        location_id: Location.first.id,
+        name:,
+        target_vm_size: "standard-2",
+        target_storage_size_gib: 128,
+      ).subject
+      pg.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}])) if deactivated
+      pg
+    end
+
+    it "increments mark_billing_activated semaphore and returns ubid for a deactivated resource" do
+      pg = create_pg("pg-activate-1")
+
+      expect {
+        post "/project/#{project.ubid}/clickgres-billing/postgres/#{pg.ubid}/activate"
+      }.to change { Semaphore.where(strand_id: pg.strand.id, name: "mark_billing_activated").count }.by(1)
+
+      expect(last_response.status).to eq(200)
+      expect(JSON.parse(last_response.body)).to eq({"ubid" => pg.ubid})
+    end
+
+    it "writes an audit_log row with action billing_activate_requested" do
+      pg = create_pg("pg-activate-audit")
+
+      expect {
+        post "/project/#{project.ubid}/clickgres-billing/postgres/#{pg.ubid}/activate"
+      }.to change { DB[:audit_log].where(action: "billing_activate_requested").where(Sequel.lit("? = ANY(object_ids)", pg.id)).count }.by(1)
+    end
+
+    it "does NOT pile up duplicate semaphores or audit_log rows on repeated polls while semaphore is queued" do
+      pg = create_pg("pg-activate-poll")
+
+      expect {
+        post "/project/#{project.ubid}/clickgres-billing/postgres/#{pg.ubid}/activate"
+      }.to change { Semaphore.where(strand_id: pg.strand.id, name: "mark_billing_activated").count }.by(1)
+
+      expect {
+        3.times { post "/project/#{project.ubid}/clickgres-billing/postgres/#{pg.ubid}/activate" }
+      }.to not_change { Semaphore.where(strand_id: pg.strand.id, name: "mark_billing_activated").count }
+        .and not_change { DB[:audit_log].where(action: "billing_activate_requested").where(Sequel.lit("? = ANY(object_ids)", pg.id)).count }
+    end
+
+    it "noops on an already-active resource (no semaphore incr, no audit log)" do
+      pg = create_pg("pg-already-active", deactivated: false)
+
+      expect {
+        post "/project/#{project.ubid}/clickgres-billing/postgres/#{pg.ubid}/activate"
+      }.to not_change { Semaphore.where(strand_id: pg.strand.id, name: "mark_billing_activated").count }
+        .and not_change { DB[:audit_log].where(action: "billing_activate_requested").where(Sequel.lit("? = ANY(object_ids)", pg.id)).count }
+
+      expect(last_response.status).to eq(200)
+    end
+
+    it "accepts /activate while a deactivate is in-flight (semaphore queued, tag not yet set)" do
+      pg = create_pg("pg-in-flight", deactivated: false)
+      pg.incr_mark_billing_deactivated # deactivate queued but tag not yet written
+
+      expect {
+        post "/project/#{project.ubid}/clickgres-billing/postgres/#{pg.ubid}/activate"
+      }.to change { Semaphore.where(strand_id: pg.strand.id, name: "mark_billing_activated").count }.by(1)
+
+      expect(last_response.status).to eq(200)
+    end
+
+    it "returns 404 for an unknown ubid" do
+      post "/project/#{project.ubid}/clickgres-billing/postgres/pgqxkxmkdcpp7hj8tppqceat4n/activate"
+      expect(last_response.status).to eq(404)
+    end
+
+    it "refuses with 409 when the resource is being destroyed" do
+      pg = create_pg("pg-activate-destroying")
+      pg.incr_destroy
+
+      expect {
+        post "/project/#{project.ubid}/clickgres-billing/postgres/#{pg.ubid}/activate"
+      }.to not_change { Semaphore.where(strand_id: pg.strand.id, name: "mark_billing_activated").count }
+        .and not_change { DB[:audit_log].where(action: "billing_activate_requested").where(Sequel.lit("? = ANY(object_ids)", pg.id)).count }
+
+      expect(last_response.status).to eq(409)
+    end
+
+    it "returns 404 FeatureNotEnabled when chc_postgres_deactivate_lockout flag is OFF" do
+      project.set_ff_chc_postgres_deactivate_lockout(false)
+      pg = create_pg("pg-flag-off")
+
+      expect {
+        post "/project/#{project.ubid}/clickgres-billing/postgres/#{pg.ubid}/activate"
+      }.to not_change { Semaphore.where(strand_id: pg.strand.id, name: "mark_billing_activated").count }
+
+      expect(last_response.status).to eq(404)
+      expect(JSON.parse(last_response.body)["error"]["type"]).to eq("FeatureNotEnabled")
     end
   end
 

@@ -28,6 +28,23 @@ class Prog::Postgres::PostgresServerNexus
       super
     end
 
+    # Super's success path rewrites pg_hba.conf → re-lock via the post-success Hop.
+    def configure
+      super
+    rescue Prog::Base::Hop
+      reapply_lockout_if_still_deactivated
+      raise
+    end
+
+    # Refresh + dataset-query: cached association can lag the concurrent resource-strand writes.
+    def reapply_lockout_if_still_deactivated
+      pg = postgres_server.resource.refresh
+      return unless pg.project.get_ff_chc_postgres_deactivate_lockout
+      return unless pg.deactivate_requested?
+      return if pg.semaphores_dataset.where(name: "mark_billing_activated").any?
+      postgres_server.apply_lockout
+    end
+
     def setup_otel_collector
       register_deadline("bootstrap_rhizome", 2 * 60)
       setup_otel

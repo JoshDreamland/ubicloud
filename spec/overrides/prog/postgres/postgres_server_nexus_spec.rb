@@ -633,4 +633,70 @@ RSpec.describe Prog::Postgres::PostgresServerNexus::PrependMethods do # rubocop:
       expect { nx.configure_logs }.to hop("setup_hugepages")
     end
   end
+
+  describe "#reapply_lockout_if_still_deactivated" do
+    before do
+      allow(nx).to receive(:postgres_server).and_return(postgres_server)
+      project.set_ff_chc_postgres_deactivate_lockout(true)
+    end
+
+    it "refreshes the resource before reading tags (race: activate clears tags during configure)" do
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
+      # Read the association to populate the cached `tags` column.
+      cached = postgres_server.resource
+      expect(cached.deactivate_requested?).to be(true)
+      # Concurrent activate clears tags directly in the DB (resource strand
+      # on another thread).
+      PostgresResource.where(id: postgres_resource.id).update(tags: Sequel.pg_jsonb([]))
+
+      expect(postgres_server).not_to receive(:apply_lockout)
+      nx.reapply_lockout_if_still_deactivated
+    end
+
+    it "re-applies lockout when the refreshed row is still deactivated and no activate is in-flight" do
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
+      expect(postgres_server).to receive(:apply_lockout)
+      nx.reapply_lockout_if_still_deactivated
+    end
+
+    it "skips lockout when activate is in-flight (semaphore set)" do
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
+      postgres_resource.incr_mark_billing_activated
+      expect(postgres_server).not_to receive(:apply_lockout)
+      nx.reapply_lockout_if_still_deactivated
+    end
+
+    it "skips lockout when not deactivated" do
+      expect(postgres_server).not_to receive(:apply_lockout)
+      nx.reapply_lockout_if_still_deactivated
+    end
+
+    it "skips lockout when chc_postgres_deactivate_lockout flag is OFF" do
+      project.set_ff_chc_postgres_deactivate_lockout(false)
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
+      expect(postgres_server).not_to receive(:apply_lockout)
+      nx.reapply_lockout_if_still_deactivated
+    end
+  end
+
+  describe "#configure" do
+    before do
+      # Drive super through its "Succeeded → hop_wait" path.
+      allow(nx).to receive(:postgres_server).and_return(postgres_server)
+      allow(sshable).to receive(:d_check).with("configure_postgres").and_return("Succeeded")
+      allow(sshable).to receive(:d_clean).with("configure_postgres")
+      project.set_ff_chc_postgres_deactivate_lockout(true)
+    end
+
+    it "delegates to super on success and invokes the rescue handler before re-raising" do
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
+      expect(postgres_server).to receive(:apply_lockout)
+      expect { nx.configure }.to hop("wait")
+    end
+
+    it "passes through when not deactivated (no extra lockout)" do
+      expect(postgres_server).not_to receive(:apply_lockout)
+      expect { nx.configure }.to hop("wait")
+    end
+  end
 end

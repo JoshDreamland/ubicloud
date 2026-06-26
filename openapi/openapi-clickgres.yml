@@ -216,6 +216,68 @@ paths:
                   - error
       tags:
         - Clickgres Billing
+  '/project/{project_id}/clickgres-billing/postgres/{ubid}/activate':
+    parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: UBID of the project
+      - name: ubid
+        in: path
+        required: true
+        schema:
+          type: string
+        description: UBID of the Postgres resource to activate
+    post:
+      operationId: postClickgresBillingPostgresActivate
+      summary: Revert a billing-driven deactivate (lift HBA lockout + reopen billing)
+      responses:
+        '200':
+          description: Activate accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - ubid
+                properties:
+                  ubid:
+                    type: string
+        default:
+          description: An error response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    additionalProperties: false
+                    properties:
+                      code:
+                        type: integer
+                        example: 404
+                      message:
+                        type: string
+                        example: "Postgres resource not found"
+                      type:
+                        type: string
+                        example: ResourceNotFound
+                      details:
+                        type: object
+                        nullable: true
+                    required:
+                      - code
+                      - message
+                      - type
+                additionalProperties: false
+                required:
+                  - error
+      tags:
+        - Clickgres Billing
   /project/{project_id}/clickgres-testing/{pg_name_or_id}/inject-failure:
     parameters:
       - $ref: './openapi.yml#/components/parameters/project_id'
