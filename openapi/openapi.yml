@@ -134,6 +134,12 @@ paths:
     $ref: ./openapi-clickgres.yml#/paths/~1project~1{project_id}~1clickgres-testing~1{pg_name_or_id}~1convergence
   /project/{project_id}/clickgres-testing/{pg_name_or_id}/inject-failure:
     $ref: ./openapi-clickgres.yml#/paths/~1project~1{project_id}~1clickgres-testing~1{pg_name_or_id}~1inject-failure
+  /project/{project_id}/clickgres-testing/{pg_name_or_id}/rhizome-status:
+    $ref: ./openapi-clickgres.yml#/paths/~1project~1{project_id}~1clickgres-testing~1{pg_name_or_id}~1rhizome-status
+  /project/{project_id}/clickgres-testing/{pg_name_or_id}/upgrade-rhizome:
+    $ref: ./openapi-clickgres.yml#/paths/~1project~1{project_id}~1clickgres-testing~1{pg_name_or_id}~1upgrade-rhizome
+  /project/{project_id}/clickgres-testing/{pg_name_or_id}/upgrade-telemetry:
+    $ref: ./openapi-clickgres.yml#/paths/~1project~1{project_id}~1clickgres-testing~1{pg_name_or_id}~1upgrade-telemetry
   /project/{project_id}/firewall:
     parameters:
       - $ref: '#/components/parameters/project_id'
