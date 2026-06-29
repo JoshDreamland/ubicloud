@@ -61,7 +61,7 @@ RSpec.describe Prog::Test::HetznerServer do
 
   describe "#reimage" do
     it "can reimage" do
-      expect(hetzner_api).to receive(:reimage).with("1234", dist: "Ubuntu 24.04 LTS base")
+      expect(hetzner_api).to receive(:reimage).with(dist: "Ubuntu 24.04 LTS base")
       expect { hs_test.reimage }.to hop("wait_reimage")
     end
   end
@@ -252,6 +252,13 @@ RSpec.describe Prog::Test::HetznerServer do
     end
 
     it "hops to destroy_vm_host after resource verified" do
+      refresh_frame(hs_test, new_values: {"available_storage_gib" => 860})
+      expect { hs_test.verify_resources_reclaimed }.to hop("destroy_vm_host")
+    end
+
+    it "counts boot images downloaded after the baseline as reclaimed storage" do
+      vm_host.storage_devices.first.update(available_storage_gib: 710)
+      BootImage.create(vm_host_id: vm_host.id, name: "github-ubuntu-2404", version: "1", activated_at: Time.now, size_gib: 150)
       refresh_frame(hs_test, new_values: {"available_storage_gib" => 860})
       expect { hs_test.verify_resources_reclaimed }.to hop("destroy_vm_host")
     end
