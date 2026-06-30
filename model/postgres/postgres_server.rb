@@ -443,13 +443,17 @@ class PostgresServer < Sequel::Model
   end
 
   def metrics_config
-    ignored_timeseries_patterns = [
-      "pg_stat_user_tables_.*",
-      "pg_statio_user_tables_.*",
-    ]
-    exclude_pattern = ignored_timeseries_patterns.join("|")
+    match_selector = if (export_regex = Config.postgres_timeseries_match_name_export_regex) && !export_regex.empty?
+      "{__name__=~'#{export_regex}'}"
+    else
+      ignored_timeseries_patterns = [
+        "pg_stat_user_tables_.*",
+        "pg_statio_user_tables_.*",
+      ]
+      "{__name__!~'#{ignored_timeseries_patterns.join("|")}'}"
+    end
     query_params = {
-      "match[]": "{__name__!~'#{exclude_pattern}'}",
+      "match[]": match_selector,
     }
     query_str = URI.encode_www_form(query_params)
     additional_labels = resource.tags.filter { |tag| tag["key"].start_with? "chc_" }.to_h { |tag| ["pg_tags_label_#{tag["key"].gsub(/[^a-zA-Z0-9_]/, "_")}", tag["value"]] }

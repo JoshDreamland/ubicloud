@@ -213,6 +213,7 @@ module Config
   optional :postgres_otel_otlp_export_jwt_oidc_provider_id, uuid
   optional :postgres_otel_otlp_export_additional_metadata_field, string
   override :postgres_internal_firewall_cidrs, "", array(string)
+  optional :postgres_timeseries_match_name_export_regex, string
 
   # Logging
   optional :database_logger_level, string

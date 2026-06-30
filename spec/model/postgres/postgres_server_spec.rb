@@ -1552,6 +1552,26 @@ RSpec.describe PostgresServer do
   end
 
   describe "#metrics_config" do
+    def match_selector(server)
+      query = URI(server.metrics_config[:endpoints].first).query
+      URI.decode_www_form(query).to_h.fetch("match[]")
+    end
+
+    it "excludes user-table timeseries by default when no export regex is configured" do
+      allow(Config).to receive(:postgres_timeseries_match_name_export_regex).and_return(nil)
+      expect(match_selector(postgres_server)).to eq("{__name__!~'pg_stat_user_tables_.*|pg_statio_user_tables_.*'}")
+    end
+
+    it "excludes user-table timeseries when the export regex is configured but empty" do
+      allow(Config).to receive(:postgres_timeseries_match_name_export_regex).and_return("")
+      expect(match_selector(postgres_server)).to eq("{__name__!~'pg_stat_user_tables_.*|pg_statio_user_tables_.*'}")
+    end
+
+    it "matches by name against the configured export regex when one is set" do
+      allow(Config).to receive(:postgres_timeseries_match_name_export_regex).and_return("node_cpu_seconds_total|pg_stat_activity_count")
+      expect(match_selector(postgres_server)).to eq("{__name__=~'node_cpu_seconds_total|pg_stat_activity_count'}")
+    end
+
     it "includes only chc_-prefixed tags as additional_labels with sanitized keys" do
       resource.update(tags: [
         {"key" => "chc_environment", "value" => "production"},
