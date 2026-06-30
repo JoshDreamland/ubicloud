@@ -303,6 +303,7 @@ service:
   telemetry:
     resource:
       service.otelcol.location: 'postgres_resource'
+      service.instance.id: '#{postgres_server.ubid}'
     logs:
       encoding: console
     metrics:
