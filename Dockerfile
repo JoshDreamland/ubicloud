@@ -28,8 +28,11 @@ FROM docker.io/library/ruby:4.0.5-alpine3.23
 # - gcompat: Required for nokogiri gem at runtime. https://nokogiri.org/tutorials/installing_nokogiri.html#linux-musl-error-loading-shared-library
 # - foreman: Helps to start different parts of app based on Procfile
 # - coreutils: to have same base binaries as local
+# - jemalloc: Reduces memory fragmentation; arch-independent path on Alpine
+ENV JEMALLOC_PATH=/usr/lib/libjemalloc.so.2
 RUN apk update --no-cache && \
-    apk add tzdata curl postgresql-client gcompat libffi coreutils --no-cache && \
+    apk add tzdata curl postgresql-client gcompat libffi coreutils jemalloc --no-cache && \
+    test -f "$JEMALLOC_PATH" && \
     gem install foreman
 
 RUN adduser -D ubicloud && \
@@ -46,6 +49,7 @@ COPY --chown=ubicloud . /app
 
 ENV RACK_ENV=production
 ENV PORT=3000
+ENV LD_PRELOAD=${JEMALLOC_PATH}
 ARG GIT_COMMIT_HASH
 ENV GIT_COMMIT_HASH=${GIT_COMMIT_HASH}
 EXPOSE 3000
