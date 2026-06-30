@@ -51,7 +51,10 @@
         <% end %>
         <% if commit = Config.git_commit_hash %>
           <span>commit:
-            <a href="https://github.com/ubicloud/ubicloud/commit/<%= commit %>" target="_blank"><%= commit %></a></span>
+            <a
+              href="https://github.com/ClickHouse/ubicloud/releases/tag/clickgres-ubicloud-<%= commit.sub(/-pgAmiRun.*/, "") %>"
+              target="_blank"
+            ><%= commit %></a></span>
         <% end %>
       </div>
     </footer>
