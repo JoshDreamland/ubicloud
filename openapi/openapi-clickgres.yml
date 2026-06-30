@@ -294,6 +294,7 @@ paths:
                         - servers_not_ready
                         - ongoing_failover
                         - pending_semaphores
+                        - pending_upgrade_rollout
                   pending_semaphores:
                     type: array
                     description: >
@@ -306,8 +307,159 @@ paths:
           $ref: './openapi.yml#/components/responses/Error'
       tags:
         - Clickgres Testing
+  /project/{project_id}/clickgres-testing/{pg_name_or_id}/upgrade-rhizome:
+    parameters:
+      - $ref: './openapi.yml#/components/parameters/project_id'
+      - name: pg_name_or_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Name or UBID of the Postgres resource
+    post:
+      operationId: postClickgresTestingUpgradeRhizome
+      summary: Roll the install_rhizome semaphore across a Postgres resource's servers
+      description: >
+        Rolls install_rhizome across the resource's servers (standbys first, then
+        the primary, each converging before the next) via a background strand;
+        poll the convergence endpoint to track it. Optionally limit to a `servers`
+        UBID list. Used to test upgrading rhizome on pre-existing servers.
+      requestBody:
+        $ref: '#/components/requestBodies/ClickgresTestingUpgradeServers'
+      responses:
+        '200':
+          $ref: '#/components/responses/ClickgresTestingUpgrade'
+        default:
+          $ref: './openapi.yml#/components/responses/Error'
+      tags:
+        - Clickgres Testing
+  /project/{project_id}/clickgres-testing/{pg_name_or_id}/upgrade-telemetry:
+    parameters:
+      - $ref: './openapi.yml#/components/parameters/project_id'
+      - name: pg_name_or_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Name or UBID of the Postgres resource
+    post:
+      operationId: postClickgresTestingUpgradeTelemetry
+      summary: Roll the telemetry configuration semaphores across a Postgres resource's servers
+      description: >
+        Rolls configure_metrics and configure_logs across the resource's servers
+        (standbys first, then the primary, each converging before the next) via a
+        background strand; poll the convergence endpoint to track it. Optionally
+        limit to a `servers` UBID list. Used to test upgrading telemetry on
+        pre-existing servers.
+      requestBody:
+        $ref: '#/components/requestBodies/ClickgresTestingUpgradeServers'
+      responses:
+        '200':
+          $ref: '#/components/responses/ClickgresTestingUpgrade'
+        default:
+          $ref: './openapi.yml#/components/responses/Error'
+      tags:
+        - Clickgres Testing
+  /project/{project_id}/clickgres-testing/{pg_name_or_id}/rhizome-status:
+    parameters:
+      - $ref: './openapi.yml#/components/parameters/project_id'
+      - name: pg_name_or_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Name or UBID of the Postgres resource
+    get:
+      operationId: getClickgresTestingRhizomeStatus
+      summary: Report whether each server runs the control plane's current rhizome bundle
+      description: >
+        Compares the git commit recorded for each server (in rhizome_installation,
+        written after the on-VM validate succeeds) against the control plane's
+        current commit. Poll after upgrade-rhizome to confirm the new bundle was
+        applied.
+      responses:
+        '200':
+          $ref: '#/components/responses/ClickgresTestingRhizomeStatus'
+        default:
+          $ref: './openapi.yml#/components/responses/Error'
+      tags:
+        - Clickgres Testing
 components:
   responses:
+    ClickgresTestingRhizomeStatus:
+      description: Per-server rhizome installation status
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required:
+              - folder
+              - expected_commit
+              - up_to_date
+              - servers
+            properties:
+              folder:
+                type: string
+                description: Rhizome target folder these statuses refer to (always "postgres").
+              expected_commit:
+                type: string
+                nullable: true
+                description: The control plane's current git commit hash, that servers are compared against.
+              up_to_date:
+                type: boolean
+                description: True when every server's recorded commit matches expected_commit.
+              servers:
+                type: array
+                description: One entry per server in the resource.
+                items:
+                  type: object
+                  additionalProperties: false
+                  required:
+                    - server
+                    - representative
+                    - commit
+                    - installed_at
+                    - up_to_date
+                  properties:
+                    server:
+                      type: string
+                      description: UBID of the server.
+                    representative:
+                      type: boolean
+                      description: True for the primary (representative) server.
+                    commit:
+                      type: string
+                      nullable: true
+                      description: Git commit recorded at install, or null if rhizome was never installed.
+                    installed_at:
+                      type: string
+                      nullable: true
+                      description: When rhizome was last installed (ISO 8601), or null.
+                    up_to_date:
+                      type: boolean
+                      description: True when this server's recorded commit matches expected_commit.
+    ClickgresTestingUpgrade:
+      description: Rolling upgrade started across the targeted servers
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required:
+              - servers
+              - semaphores_triggered
+            properties:
+              servers:
+                type: array
+                description: UBIDs of the targeted servers in rollout order (standbys first, then primary).
+                items:
+                  type: string
+              semaphores_triggered:
+                type: array
+                description: Names of the semaphores rolled across the servers.
+                items:
+                  type: string
     ClickgresBillingPostgresResources:
       description: List of Clickgres billing resources
       content:
@@ -357,6 +509,22 @@ components:
                   $ref: './openapi.yml#/components/schemas/PostgresDatabase'
             required:
               - items
+  requestBodies:
+    ClickgresTestingUpgradeServers:
+      required: false
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              servers:
+                type: array
+                description: >
+                  UBIDs of the servers (within this resource) to upgrade. When
+                  omitted or empty, all servers of the resource are targeted.
+                items:
+                  type: string
   securitySchemes:
     BearerAuth:
       bearerFormat: JWT

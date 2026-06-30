@@ -56,6 +56,22 @@ RSpec.describe Clover, "clickgres-testing" do
     "/project/#{project.ubid}/clickgres-testing/#{name_or_id}/convergence"
   end
 
+  def upgrade_path(pg_or_name, kind)
+    name_or_id = pg_or_name.is_a?(String) ? pg_or_name : pg_or_name.name
+    "/project/#{project.ubid}/clickgres-testing/#{name_or_id}/upgrade-#{kind}"
+  end
+
+  def rhizome_status_path(pg_or_name)
+    name_or_id = pg_or_name.is_a?(String) ? pg_or_name : pg_or_name.name
+    "/project/#{project.ubid}/clickgres-testing/#{name_or_id}/rhizome-status"
+  end
+
+  def record_rhizome(pg, commit:, folder: "postgres", digest: "ignored-digest")
+    RhizomeInstallation.dataset.insert(
+      id: pg.representative_server.vm_id, folder:, commit:, digest:, installed_at: Time.now,
+    )
+  end
+
   describe "POST /project/:project_id/clickgres-testing/:pg_name_or_id/inject-failure" do
     it "returns 403 when failure injection is disabled" do
       ENV.delete("ENABLE_FAILURE_INJECTION")
@@ -153,6 +169,170 @@ RSpec.describe Clover, "clickgres-testing" do
     end
   end
 
+  describe "POST /project/:project_id/clickgres-testing/:pg_name_or_id/upgrade-rhizome" do
+    it "returns 404 for nonexistent postgres resource" do
+      post upgrade_path("nonexistent", "rhizome"), {}.to_json
+      expect(last_response.status).to eq(404)
+    end
+
+    it "rolls install_rhizome across all servers standby-first when no list is given" do
+      pg = create_pg("test-pg-rhizome")
+      standby = create_postgres_server(resource: pg, is_representative: false)
+      primary = pg.representative_server
+
+      post upgrade_path(pg, "rhizome"), {}.to_json
+      expect(last_response.status).to eq(200)
+      body = JSON.parse(last_response.body)
+      expect(body["servers"]).to eq([standby.ubid, primary.ubid])
+      expect(body["semaphores_triggered"]).to eq(["install_rhizome"])
+
+      strand = pg.strand.children_dataset.first(prog: "Postgres::TriggerServerUpgrade")
+      expect(strand).not_to be_nil
+      expect(strand.stack.first["server_ids"]).to contain_exactly(primary.id, standby.id)
+      expect(strand.stack.first["semaphores"]).to eq(["install_rhizome"])
+    end
+
+    it "limits the rollout to the given servers list" do
+      pg = create_pg("test-pg-rhizome-subset")
+      standby = create_postgres_server(resource: pg, is_representative: false)
+
+      post upgrade_path(pg, "rhizome"), {servers: [standby.ubid]}.to_json
+      expect(last_response.status).to eq(200)
+      expect(JSON.parse(last_response.body)["servers"]).to eq([standby.ubid])
+      strand = pg.strand.children_dataset.first(prog: "Postgres::TriggerServerUpgrade")
+      expect(strand.stack.first["server_ids"]).to eq([standby.id])
+    end
+
+    it "treats an empty servers list as all servers" do
+      pg = create_pg("test-pg-rhizome-empty")
+      post upgrade_path(pg, "rhizome"), {servers: []}.to_json
+      expect(last_response.status).to eq(200)
+      expect(JSON.parse(last_response.body)["servers"]).to eq([pg.representative_server.ubid])
+    end
+
+    it "deduplicates repeated server UBIDs" do
+      pg = create_pg("test-pg-rhizome-dup")
+      server = pg.representative_server
+
+      post upgrade_path(pg, "rhizome"), {servers: [server.ubid, server.ubid]}.to_json
+      expect(last_response.status).to eq(200)
+      expect(JSON.parse(last_response.body)["servers"]).to eq([server.ubid])
+      strand = pg.strand.children_dataset.first(prog: "Postgres::TriggerServerUpgrade")
+      expect(strand.stack.first["server_ids"]).to eq([server.id])
+    end
+
+    it "returns 404 when a given server does not belong to the resource" do
+      pg = create_pg("test-pg-rhizome-badsrv")
+      post upgrade_path(pg, "rhizome"), {servers: ["stnotarealserver000000000"]}.to_json
+      expect(last_response.status).to eq(404)
+    end
+
+    it "writes an audit_log row tagged upgrade_rhizome" do
+      pg = create_pg("test-pg-rhizome-audit")
+      expect {
+        post upgrade_path(pg, "rhizome"), {}.to_json
+      }.to change { DB[:audit_log].where(action: "upgrade_rhizome").count }.by(1)
+      expect(last_response.status).to eq(200)
+    end
+
+    it "looks up postgres resource by UBID" do
+      pg = create_pg("test-pg-rhizome-ubid")
+      post "/project/#{project.ubid}/clickgres-testing/#{pg.ubid}/upgrade-rhizome", {}.to_json
+      expect(last_response.status).to eq(200)
+    end
+  end
+
+  describe "POST /project/:project_id/clickgres-testing/:pg_name_or_id/upgrade-telemetry" do
+    it "returns 404 for nonexistent postgres resource" do
+      post upgrade_path("nonexistent", "telemetry"), {}.to_json
+      expect(last_response.status).to eq(404)
+    end
+
+    it "rolls configure_metrics and configure_logs across the resource's servers" do
+      pg = create_pg("test-pg-telemetry")
+
+      post upgrade_path(pg, "telemetry"), {}.to_json
+      expect(last_response.status).to eq(200)
+      body = JSON.parse(last_response.body)
+      expect(body["servers"]).to eq([pg.representative_server.ubid])
+      expect(body["semaphores_triggered"]).to eq(["configure_metrics", "configure_logs"])
+
+      strand = pg.strand.children_dataset.first(prog: "Postgres::TriggerServerUpgrade")
+      expect(strand.stack.first["semaphores"]).to eq(["configure_metrics", "configure_logs"])
+    end
+
+    it "writes an audit_log row tagged upgrade_telemetry" do
+      pg = create_pg("test-pg-telemetry-audit")
+      expect {
+        post upgrade_path(pg, "telemetry"), {}.to_json
+      }.to change { DB[:audit_log].where(action: "upgrade_telemetry").count }.by(1)
+      expect(last_response.status).to eq(200)
+    end
+
+    it "looks up postgres resource by UBID" do
+      pg = create_pg("test-pg-telemetry-ubid")
+      post "/project/#{project.ubid}/clickgres-testing/#{pg.ubid}/upgrade-telemetry", {}.to_json
+      expect(last_response.status).to eq(200)
+    end
+  end
+
+  describe "GET /project/:project_id/clickgres-testing/:pg_name_or_id/rhizome-status" do
+    it "returns 404 for nonexistent postgres resource" do
+      get rhizome_status_path("nonexistent")
+      expect(last_response.status).to eq(404)
+    end
+
+    it "reports up_to_date when the recorded commit matches the current control plane commit" do
+      allow(Config).to receive(:git_commit_hash).and_return("commit-current")
+      pg = create_pg("test-pg-rhz-ok")
+      record_rhizome(pg, commit: "commit-current")
+
+      get rhizome_status_path(pg)
+      expect(last_response.status).to eq(200)
+      body = JSON.parse(last_response.body)
+      expect(body["folder"]).to eq("postgres")
+      expect(body["expected_commit"]).to eq("commit-current")
+      expect(body["up_to_date"]).to be(true)
+      expect(body["servers"].length).to eq(1)
+      expect(body["servers"][0]).to include(
+        "server" => pg.representative_server.ubid,
+        "representative" => true,
+        "commit" => "commit-current",
+        "up_to_date" => true,
+      )
+      expect(body["servers"][0]["installed_at"]).to be_a(String)
+    end
+
+    it "reports not up_to_date when a server's recorded commit is stale" do
+      allow(Config).to receive(:git_commit_hash).and_return("commit-current")
+      pg = create_pg("test-pg-rhz-stale")
+      record_rhizome(pg, commit: "commit-old")
+
+      get rhizome_status_path(pg)
+      body = JSON.parse(last_response.body)
+      expect(body["up_to_date"]).to be(false)
+      expect(body["servers"][0]["up_to_date"]).to be(false)
+    end
+
+    it "reports null fields and not up_to_date when rhizome was never installed" do
+      pg = create_pg("test-pg-rhz-missing")
+
+      get rhizome_status_path(pg)
+      body = JSON.parse(last_response.body)
+      expect(body["up_to_date"]).to be(false)
+      expect(body["servers"][0]).to include(
+        "commit" => nil, "installed_at" => nil, "up_to_date" => false,
+      )
+    end
+
+    it "does not write an audit_log row" do
+      pg = create_pg("test-pg-rhz-audit")
+      expect { get rhizome_status_path(pg) }
+        .not_to change { DB[:audit_log].count }
+      expect(last_response.status).to eq(200)
+    end
+  end
+
   describe "GET /project/:project_id/clickgres-testing/:pg_name_or_id/convergence" do
     it "is reachable even when failure injection is disabled" do
       ENV.delete("ENABLE_FAILURE_INJECTION")
@@ -225,6 +405,22 @@ RSpec.describe Clover, "clickgres-testing" do
       expect(body["converged"]).to be(false)
       expect(body["reasons"]).to eq(["pending_semaphores"])
       expect(body["pending_semaphores"]).to eq(["restart"])
+    end
+
+    it "reports pending_upgrade_rollout while a TriggerServerUpgrade strand is active" do
+      pg = create_pg("test-pg-conv-rollout")
+      strand_ids = pg.servers.map(&:id) + [pg.id]
+      DB[:strand].where(id: strand_ids).update(label: "wait")
+      DB[:semaphore].where(strand_id: strand_ids).delete
+      Strand.create(
+        prog: "Postgres::TriggerServerUpgrade", label: "wait_primary", parent_id: pg.id,
+        stack: [{"subject_id" => pg.id, "server_ids" => pg.servers.map(&:id), "semaphores" => ["install_rhizome"]}],
+      )
+
+      get convergence_path(pg)
+      body = JSON.parse(last_response.body)
+      expect(body["converged"]).to be(false)
+      expect(body["reasons"]).to eq(["pending_upgrade_rollout"])
     end
 
     it "looks up postgres resource by UBID" do

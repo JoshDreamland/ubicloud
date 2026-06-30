@@ -16,6 +16,16 @@ class Clover
         postgres_inject_failure(pg, typecast_params.nonempty_str!("failure_type"))
       end
 
+      r.post api?, "upgrade-rhizome" do
+        authorize("Postgres:edit", pg)
+        pg_testing_trigger_upgrade(pg, pg_testing_servers_for_upgrade(pg), "rhizome")
+      end
+
+      r.post api?, "upgrade-telemetry" do
+        authorize("Postgres:edit", pg)
+        pg_testing_trigger_upgrade(pg, pg_testing_servers_for_upgrade(pg), "telemetry")
+      end
+
       r.get api?, "convergence" do
         authorize("Postgres:view", pg)
         no_audit_log
@@ -24,6 +34,7 @@ class Clover
         reasons << "needs_convergence" if pg.needs_convergence?
         reasons << "servers_not_ready" unless pg.has_enough_ready_servers?
         reasons << "ongoing_failover" if pg.ongoing_failover?
+        reasons << "pending_upgrade_rollout" unless pg.strand.children_dataset.where(prog: "Postgres::TriggerServerUpgrade", exitval: nil).empty?
 
         # PostgresResource and PostgresServer have one_to_one :strand, key: :id —
         # strand.id equals the model's id, so we don't need to load the strand.
@@ -32,6 +43,14 @@ class Clover
         reasons << "pending_semaphores" if pending.any?
 
         {converged: reasons.empty?, reasons:, pending_semaphores: pending}
+      end
+
+      # Reports whether each server runs the control plane's current rhizome bundle.
+      r.get api?, "rhizome-status" do
+        authorize("Postgres:view", pg)
+        no_audit_log
+
+        pg_testing_rhizome_status(pg)
       end
     end
   end
