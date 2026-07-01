@@ -407,7 +407,7 @@ RSpec.describe Prog::CapacityReservation do
       resource = create_postgres_resource(project:, location_id: location.id)
       resource.update(target_vm_size: "c6gd.4xlarge", ha_type: "async") # async -> target_server_count 2
       server = create_postgres_server(resource:)
-      NicAwsResource.create_with_id(server.vm.nic.id, subnet_az: "a")
+      NicAwsResource.create_with_id(server.vm.nics.first.id, subnet_az: "a")
 
       usage, per_az = nx.compute_current_usage
       # target_server_count (2) is intent; only one server is actually placed, so the

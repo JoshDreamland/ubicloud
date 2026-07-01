@@ -52,7 +52,7 @@ RSpec.describe Prog::Vm::Aws::Nexus do
   let(:aws_instance) { AwsInstance.create_with_id(vm, instance_id: "i-0123456789abcdefg") }
 
   let(:nic_aws_resource) {
-    NicAwsResource.create_with_id(vm.nics.first, network_interface_id: "eni-0123456789abcdefg")
+    NicAwsResource.create_with_id(vm.user_nic, network_interface_id: "eni-0123456789abcdefg")
   }
 
   let(:client) { Aws::EC2::Client.new(stub_responses: true) }
@@ -113,6 +113,13 @@ usermod -L ubuntu
         Prog::Vm::Nexus.assemble("some_ssh key", project.id, location_id: assemble_loc.id, boot_image: "test-image@1.0")
       }.to raise_error("Machine images are only supported for metal locations")
     end
+
+    it "creates a management NIC when use_separate_management_nic is set" do
+      vm = Prog::Vm::Nexus.assemble("some_ssh key", project.id, location_id: assemble_loc.id, use_separate_management_nic: true).subject
+      expect(vm.nics.count).to eq(2)
+      expect(vm.user_nic).not_to be_nil
+      expect(vm.management_nic).not_to be_nil
+    end
   end
 
   describe "#before_destroy" do
@@ -137,12 +144,12 @@ usermod -L ubuntu
 
   describe "#start" do
     it "naps if vm nics are not in wait state" do
-      vm.nics.first.strand.update(label: "start")
+      vm.user_nic.strand.update(label: "start")
       expect { nx.start }.to nap(1)
     end
 
     it "creates a role for instance" do
-      vm.nics.first.strand.update(label: "wait")
+      vm.user_nic.strand.update(label: "wait")
       iam_client.stub_responses(:create_role, {role: {role_name: vm.name, path: "/", role_id: "ROLE123", arn: "arn:aws:iam::123456789012:role/#{vm.name}", create_date: Time.now}})
       expect(iam_client).to receive(:create_role).with({
         role_name: vm.name,
@@ -163,7 +170,7 @@ usermod -L ubuntu
     end
 
     it "hops to create_role_policy if role already exists" do
-      vm.nics.first.strand.update(label: "wait")
+      vm.user_nic.strand.update(label: "wait")
       expect(iam_client).to receive(:create_role).with({role_name: vm.name, assume_role_policy_document: {
         Version: "2012-10-17",
         Statement: [
@@ -178,7 +185,7 @@ usermod -L ubuntu
     end
 
     it "hops to create_instance if it's a runner instance" do
-      vm.nics.first.strand.update(label: "wait")
+      vm.user_nic.strand.update(label: "wait")
       vm.update(unix_user: "runneradmin")
       expect { nx.start }.to hop("create_instance")
     end
@@ -380,6 +387,55 @@ usermod -L ubuntu
       expect(vm.aws_instance).to have_attributes(instance_id: "i-0123456789abcdefg", az_id: "use1-az1", iam_role: "testvm", ipv4_dns_name: "ec2-44-224-119-46.us-west-2.compute.amazonaws.com")
     end
 
+    it "attaches both pre-created mgmt and user ENIs and policy-routes the data NIC" do
+      user_nic_record = vm.user_nic
+      aws_subnet = user_nic_record.private_subnet.private_subnet_aws_resource.aws_subnets.first
+      nic_aws_resource.update(subnet_id: "subnet-12345678", aws_subnet_id: aws_subnet.id)
+      mgmt_nic = Prog::Vnet::NicNexus.assemble(user_nic_record.private_subnet_id, name: "#{vm.name}-mgmt-nic", is_management: true).subject
+      mgmt_nic.update(vm_id: vm.id)
+      NicAwsResource.create_with_id(mgmt_nic.id, network_interface_id: "eni-mgmt-0000000000", subnet_id: "subnet-12345678")
+      refresh_frame(nx, new_values: {"use_separate_management_nic" => true})
+      client.stub_responses(:describe_network_interfaces, network_interfaces: [
+        {network_interface_id: "eni-mgmt-0000000000", mac_address: "0a:00:00:00:00:01", private_ip_address: "10.0.1.4"},
+        {network_interface_id: "eni-0123456789abcdefg", mac_address: "0a:1b:2c:3d:4e:5f", private_ip_address: "10.0.1.5"},
+      ])
+      client.stub_responses(:run_instances, instances: [{instance_id: "i-0123456789abcdefg", network_interfaces: [{subnet_id: "subnet-12345678"}], public_dns_name: "ec2-44-224-119-46.us-west-2.compute.amazonaws.com"}])
+      expect(client).to receive(:run_instances).with(hash_including(
+        network_interfaces: [
+          {network_interface_id: "eni-mgmt-0000000000", device_index: 0},
+          {network_interface_id: "eni-0123456789abcdefg", device_index: 1},
+        ],
+      )).and_call_original
+      expect { nx.create_instance }.to hop("wait_instance_created")
+      user_data = Base64.decode64(client.api_requests.find { it[:operation_name] == :run_instances }[:params][:user_data])
+      # mgmt NIC: only SSH (from-mgmt) on table 100, default suppressed; data NIC: main default + table 200
+      expect(user_data).to include('macaddress: "0a:00:00:00:00:01"').and include('macaddress: "0a:1b:2c:3d:4e:5f"')
+      expect(user_data).to include("use-routes: false").and include("network: {config: disabled}")
+      expect(user_data).to include("{from: 10.0.1.4/32, table: 100}").and include("{from: 10.0.1.5/32, table: 200}")
+    end
+
+    it "routes GuardDuty telemetry out the mgmt NIC when the endpoint is present" do
+      vm.project.set_ff_aws_cloudwatch_logs(true)
+      aws_subnet = vm.user_nic.private_subnet.private_subnet_aws_resource.aws_subnets.first
+      vm.user_nic.private_subnet.private_subnet_aws_resource.update(vpc_id: "vpc-12345678")
+      nic_aws_resource.update(subnet_id: "subnet-12345678", aws_subnet_id: aws_subnet.id)
+      mgmt_nic = Prog::Vnet::NicNexus.assemble(vm.user_nic.private_subnet_id, name: "#{vm.name}-mgmt-nic", is_management: true).subject
+      mgmt_nic.update(vm_id: vm.id)
+      NicAwsResource.create_with_id(mgmt_nic.id, network_interface_id: "eni-mgmt-0000000000", subnet_id: "subnet-12345678")
+      refresh_frame(nx, new_values: {"use_separate_management_nic" => true})
+      client.stub_responses(:describe_network_interfaces,
+        {network_interfaces: [
+          {network_interface_id: "eni-mgmt-0000000000", mac_address: "0a:00:00:00:00:01", private_ip_address: "10.0.1.4"},
+          {network_interface_id: "eni-0123456789abcdefg", mac_address: "0a:1b:2c:3d:4e:5f", private_ip_address: "10.0.1.5"},
+        ]},
+        {network_interfaces: [{network_interface_id: "eni-gd-0000000000", private_ip_address: "10.0.1.9"}]})
+      client.stub_responses(:describe_vpc_endpoints, vpc_endpoints: [{vpc_endpoint_id: "vpce-1", network_interface_ids: ["eni-gd-0000000000"]}])
+      client.stub_responses(:run_instances, instances: [{instance_id: "i-0123456789abcdefg", network_interfaces: [{subnet_id: "subnet-12345678"}], public_dns_name: "ec2-44-224-119-46.us-west-2.compute.amazonaws.com"}])
+      expect { nx.create_instance }.to hop("wait_instance_created")
+      user_data = Base64.decode64(client.api_requests.find { it[:operation_name] == :run_instances }[:params][:user_data])
+      expect(user_data).to include("routing-policy: [{from: 10.0.1.4/32, table: 100}, {to: 10.0.1.9/32, table: 100}]")
+    end
+
     it "skips instance profile creation for runner instances" do
       client.stub_responses(:run_instances, instances: [{instance_id: "i-0123456789abcdefg", network_interfaces: [{subnet_id: "subnet-12345678"}], public_dns_name: "ec2-44-224-119-46.us-west-2.compute.amazonaws.com"}])
       vm.update(unix_user: "runneradmin")
@@ -481,7 +537,7 @@ usermod -L ubuntu
     end
 
     describe "when insufficient capacity error for non-runner" do
-      let(:nic) { vm.nics.first }
+      let(:nic) { vm.user_nic }
 
       before do
         client.stub_responses(:run_instances, Aws::EC2::Errors::InsufficientInstanceCapacity.new(nil, "Insufficient capacity"))
@@ -519,7 +575,7 @@ usermod -L ubuntu
     end
 
     describe "when unsupported instance type error" do
-      let(:nic) { vm.nics.first }
+      let(:nic) { vm.user_nic }
 
       before do
         client.stub_responses(:run_instances, Aws::EC2::Errors::Unsupported.new(nil, "Instance type not supported"))
@@ -566,7 +622,7 @@ usermod -L ubuntu
     end
 
     describe "mixed error sequences" do
-      let(:nic) { vm.nics.first }
+      let(:nic) { vm.user_nic }
 
       before do
         nic.nic_aws_resource.update(subnet_az: "a")
@@ -605,7 +661,7 @@ usermod -L ubuntu
     end
 
     describe "when postgres family fallback engages" do
-      let(:nic) { vm.nics.first }
+      let(:nic) { vm.user_nic }
 
       before do
         nic.nic_aws_resource.update(subnet_az: "a")
@@ -692,7 +748,8 @@ usermod -L ubuntu
   describe "#wait_instance_created" do
     before do
       aws_instance
-      client.stub_responses(:describe_instances, reservations: [{instances: [{state: {name: "running"}, network_interfaces: [{association: {public_ip: "1.2.3.4"}, ipv_6_addresses: [{ipv_6_address: "2a01:4f8:173:1ed3:aa7c::/79"}]}]}]}])
+      nic_aws_resource
+      client.stub_responses(:describe_instances, reservations: [{instances: [{state: {name: "running"}, network_interfaces: [{network_interface_id: "eni-0123456789abcdefg", association: {public_ip: "1.2.3.4"}, ipv_6_addresses: [{ipv_6_address: "2a01:4f8:173:1ed3:aa7c::/79"}]}]}]}])
     end
 
     it "updates the vm" do
@@ -773,6 +830,27 @@ usermod -L ubuntu
       expect { nx.wait_instance_created }.to nap(1)
         .and not_change(GithubRunner, :count)
     end
+
+    it "looks up the tracked NIC by id when there are multiple ENIs" do
+      client.stub_responses(:describe_instances, reservations: [{instances: [{state: {name: "running"}, network_interfaces: [
+        {network_interface_id: "eni-placeholder", association: {public_ip: "9.9.9.9"}, ipv_6_addresses: []},
+        {network_interface_id: "eni-0123456789abcdefg", association: {public_ip: "1.2.3.4"}, ipv_6_addresses: [{ipv_6_address: "2a01:4f8:173:1ed3:aa7c::/79"}]},
+      ]}]}])
+      expect { nx.wait_instance_created }.to hop("wait_sshable")
+      expect(vm.sshable.reload.host).to eq("1.2.3.4")
+      expect(vm.reload.ephemeral_net6.to_s).to eq("2a01:4f8:173:1ed3:aa7c::/79")
+    end
+
+    it "sets sshable host to mgmt NIC and ipv4_dns_name to data NIC when use_separate_management_nic is set" do
+      refresh_frame(nx, new_values: {"use_separate_management_nic" => true})
+      client.stub_responses(:describe_instances, reservations: [{instances: [{state: {name: "running"}, network_interfaces: [
+        {network_interface_id: "eni-mgmt", attachment: {device_index: 0}, association: {public_ip: "9.9.9.9", public_dns_name: "ec2-9-9-9-9.compute.amazonaws.com"}, ipv_6_addresses: []},
+        {network_interface_id: "eni-0123456789abcdefg", attachment: {device_index: 1}, association: {public_ip: "1.2.3.4", public_dns_name: "ec2-1-2-3-4.compute.amazonaws.com"}, ipv_6_addresses: [{ipv_6_address: "2a01:4f8:173:1ed3:aa7c::/79"}]},
+      ]}]}])
+      expect { nx.wait_instance_created }.to hop("wait_sshable")
+      expect(vm.sshable.reload.host).to eq("9.9.9.9")
+      expect(aws_instance.reload.ipv4_dns_name).to eq("ec2-1-2-3-4.compute.amazonaws.com")
+    end
   end
 
   describe "#wait_instance_created", "without sshable" do
@@ -781,7 +859,8 @@ usermod -L ubuntu
 
     before do
       aws_instance
-      client.stub_responses(:describe_instances, reservations: [{instances: [{state: {name: "running"}, network_interfaces: [{association: {public_ip: "1.2.3.4"}, ipv_6_addresses: [{ipv_6_address: "2a01:4f8:173:1ed3:aa7c::/79"}]}]}]}])
+      nic_aws_resource
+      client.stub_responses(:describe_instances, reservations: [{instances: [{state: {name: "running"}, network_interfaces: [{network_interface_id: "eni-0123456789abcdefg", association: {public_ip: "1.2.3.4"}, ipv_6_addresses: [{ipv_6_address: "2a01:4f8:173:1ed3:aa7c::/79"}]}]}]}])
     end
 
     it "handles vm without sshable" do
@@ -800,7 +879,7 @@ usermod -L ubuntu
   end
 
   describe "#wait_old_nic_deleted" do
-    let(:old_nic) { vm.nics.first }
+    let(:old_nic) { vm.user_nic }
     let(:private_subnet_id) { old_nic.private_subnet_id }
 
     before do
@@ -808,7 +887,7 @@ usermod -L ubuntu
     end
 
     it "naps if old NIC still exists" do
-      expect(vm.nic).to exist
+      expect(vm.user_nic).to exist
       expect { nx.wait_old_nic_deleted }.to nap(1)
     end
 
@@ -817,14 +896,25 @@ usermod -L ubuntu
       vm.reload
 
       expect { nx.wait_old_nic_deleted }.to hop("wait_nic_recreated")
-      expect(vm.reload.nic.id).not_to eq(old_nic.id)
-      expect(vm.nic.strand.label).to eq("start")
-      expect(vm.nic.strand.stack.first["exclude_availability_zones"]).to eq(["a", "b"])
+      expect(vm.reload.user_nic.id).not_to eq(old_nic.id)
+      expect(vm.user_nic.strand.label).to eq("start")
+      expect(vm.user_nic.strand.stack.first["exclude_availability_zones"]).to eq(["a", "b"])
+    end
+
+    it "creates both user and mgmt NICs when use_separate_management_nic is set" do
+      old_nic.update(vm_id: nil)
+      vm.reload
+      refresh_frame(nx, new_values: {"private_subnet_id" => private_subnet_id, "use_separate_management_nic" => true})
+
+      expect { nx.wait_old_nic_deleted }.to hop("wait_nic_recreated")
+      expect(vm.reload.nics.count).to eq(2)
+      expect(vm.user_nic).not_to be_nil
+      expect(vm.management_nic).not_to be_nil
     end
   end
 
   describe "#wait_nic_recreated" do
-    let(:nic) { vm.nics.first }
+    let(:nic) { vm.user_nic }
 
     it "naps if NIC strand is not in wait state" do
       nic.strand.update(label: "start")
@@ -860,6 +950,15 @@ usermod -L ubuntu
     it "skips a check if ipv4 is not enabled" do
       vm.incr_update_firewall_rules
       expect(vm.ip4).to be_nil
+      expect { nx.wait_sshable }.to hop("create_billing_record")
+    end
+
+    it "probes the management NIC's EIP (sshable.host) when use_separate_management_nic is set" do
+      refresh_frame(nx, new_values: {"use_separate_management_nic" => true})
+      vm.sshable.update(host: "9.9.9.9")
+      AssignedVmAddress.create(dst_vm_id: vm.id, ip: "10.0.0.1/32")
+      vm.incr_update_firewall_rules
+      expect(Socket).to receive(:tcp).with("9.9.9.9", 22, connect_timeout: 1)
       expect { nx.wait_sshable }.to hop("create_billing_record")
     end
   end

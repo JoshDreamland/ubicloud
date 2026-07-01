@@ -12,7 +12,8 @@ class Prog::Vm::Nexus < Prog::Base
     distinct_storage_devices: false, force_host_id: nil, exclude_host_ids: [], gpu_count: 0, gpu_device: nil,
     hugepages: true, hypervisor: nil, ch_version: nil, firmware_version: nil, new_private_subnet_name: nil,
     exclude_availability_zones: [], availability_zone: nil, alternative_families: [],
-    allow_private_subnet_in_other_project: false, init_script: nil, exclude_data_centers: [])
+    allow_private_subnet_in_other_project: false, init_script: nil, exclude_data_centers: [],
+    use_separate_management_nic: false)
 
     unless (project = Project[project_id])
       fail "No existing project"
@@ -103,6 +104,8 @@ class Prog::Vm::Nexus < Prog::Base
         else
           subnet = project.default_private_subnet(location)
         end
+
+        availability_zone = Prog::Vnet::NicNexus.select_aws_subnet(subnet, availability_zone, exclude_availability_zones).az_suffix if use_separate_management_nic
         nic = Prog::Vnet::NicNexus.assemble(subnet.id, name: "#{name}-nic", exclude_availability_zones:, availability_zone:).subject
       end
 
@@ -126,6 +129,12 @@ class Prog::Vm::Nexus < Prog::Base
       subnet.lock! if location.gcp?
       vm.validate_subnet_firewall_cap(subnet)
       nic.update(vm_id: vm.id)
+
+      if use_separate_management_nic
+        Prog::Vnet::NicNexus.assemble(
+          subnet.id, name: "#{name}-mgmt-nic", exclude_availability_zones:, availability_zone:, is_management: true,
+        ).subject.update(vm_id: vm.id)
+      end
 
       if init_script && !init_script.empty?
         VmInitScript.create_with_id(vm, init_script:)
@@ -190,6 +199,7 @@ class Prog::Vm::Nexus < Prog::Base
           "firmware_version" => firmware_version,
           "alternative_families" => alternative_families,
           "private_subnet_id" => subnet.id,
+          "use_separate_management_nic" => use_separate_management_nic,
           # AZs permanently excluded: seeded from multi-AZ policy (use_different_az),
           # grows with Unsupported errors at runtime. Never cleared during retries.
           "unsupported_azs" => exclude_availability_zones,
