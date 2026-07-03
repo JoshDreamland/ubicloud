@@ -54,6 +54,7 @@ RSpec.describe Prog::Vnet::Aws::VpcNexus do
 
   describe "#wait_vpc_created" do
     before do
+      allow(Config).to receive(:control_plane_outbound_cidrs).and_return(["0.0.0.0/0", "::/0"])
       client.stub_responses(:modify_vpc_attribute)
       client.stub_responses(:create_security_group, group_id: "sg-single")
       client.stub_responses(:authorize_security_group_ingress)
@@ -72,6 +73,7 @@ RSpec.describe Prog::Vnet::Aws::VpcNexus do
       expect(client).to receive(:create_security_group).with({group_name: "aws-us-west-2-#{ps.ubid}-user", description: "User security group for aws-us-west-2-#{ps.ubid}", vpc_id: "vpc-0123456789abcdefg", tag_specifications: Util.aws_tag_specifications("security-group", ps.name)}).and_call_original
       expect(client).to receive(:authorize_security_group_ingress).with({group_id: "sg-single", ip_permissions: [{ip_protocol: "tcp", from_port: 22, to_port: 80, ip_ranges: [{cidr_ip: "0.0.0.1/32"}]}]}).and_call_original
       expect(client).to receive(:authorize_security_group_ingress).with({group_id: "sg-single", ip_permissions: [{ip_protocol: "tcp", from_port: 22, to_port: 22, ip_ranges: [{cidr_ip: "0.0.0.0/0"}]}]}).and_call_original
+      expect(client).to receive(:authorize_security_group_ingress).with({group_id: "sg-single", ip_permissions: [{ip_protocol: "tcp", from_port: 22, to_port: 22, ipv_6_ranges: [{cidr_ipv_6: "::/0"}]}]}).and_call_original
       FirewallRule.create(firewall_id: ps.firewalls.first.id, cidr: "0.0.0.1/32", port_range: 22..80)
       expect { nx.wait_vpc_created }.to hop("create_route_table")
       expect(aws_resource.reload.user_security_group_id).to eq("sg-single")
@@ -96,9 +98,22 @@ RSpec.describe Prog::Vnet::Aws::VpcNexus do
       expect(client).to receive(:create_security_group).with(hash_including(group_name: "aws-us-west-2-#{ps.ubid}-user")).and_call_original
       expect(client).to receive(:create_security_group).with(hash_including(group_name: "aws-us-west-2-#{ps.ubid}-mgmt")).and_call_original
       expect(client).to receive(:authorize_security_group_ingress).with({group_id: "sg-mgmt", ip_permissions: [{ip_protocol: "tcp", from_port: 22, to_port: 22, ip_ranges: [{cidr_ip: "0.0.0.0/0"}]}]}).and_call_original
+      expect(client).to receive(:authorize_security_group_ingress).with({group_id: "sg-mgmt", ip_permissions: [{ip_protocol: "tcp", from_port: 22, to_port: 22, ipv_6_ranges: [{cidr_ipv_6: "::/0"}]}]}).and_call_original
       expect { nx.wait_vpc_created }.to hop("create_route_table")
       expect(aws_resource.reload.user_security_group_id).to eq("sg-user")
       expect(aws_resource.mgmt_security_group_id).to eq("sg-mgmt")
+    end
+
+    it "authorizes mgmt SSH ingress from each control_plane_outbound_cidrs entry, routing IPv6 cidrs to ipv_6_ranges" do
+      Prog::Vnet::NicNexus.assemble(ps.id, name: "test-mgmt-nic", is_management: true)
+      allow(Config).to receive(:control_plane_outbound_cidrs).and_return(["100.64.0.0/10", "192.0.2.0/24", "fd00::/8"])
+      client.stub_responses(:describe_vpcs, vpcs: [{state: "available", vpc_id: "vpc-0123456789abcdefg"}])
+      client.stub_responses(:create_security_group, [{group_id: "sg-user"}, {group_id: "sg-mgmt"}])
+      expect(client).to receive(:authorize_security_group_ingress).with({group_id: "sg-mgmt", ip_permissions: [{ip_protocol: "tcp", from_port: 22, to_port: 22, ip_ranges: [{cidr_ip: "100.64.0.0/10"}]}]}).and_call_original
+      expect(client).to receive(:authorize_security_group_ingress).with({group_id: "sg-mgmt", ip_permissions: [{ip_protocol: "tcp", from_port: 22, to_port: 22, ip_ranges: [{cidr_ip: "192.0.2.0/24"}]}]}).and_call_original
+      expect(client).to receive(:authorize_security_group_ingress).with({group_id: "sg-mgmt", ip_permissions: [{ip_protocol: "tcp", from_port: 22, to_port: 22, ipv_6_ranges: [{cidr_ipv_6: "fd00::/8"}]}]}).and_call_original
+      expect { nx.wait_vpc_created }.to hop("create_route_table")
+      expect(aws_resource.reload.mgmt_security_group_id).to eq("sg-mgmt")
     end
 
     it "skips security group ingress rule if it already exists" do
@@ -112,8 +127,28 @@ RSpec.describe Prog::Vnet::Aws::VpcNexus do
       nx.private_subnet.project.set_ff_aws_cloudwatch_logs(true)
       client.stub_responses(:describe_vpcs, vpcs: [{state: "available", vpc_id: "vpc-0123456789abcdefg"}])
       expect(client).to receive(:authorize_security_group_ingress).with({group_id: "sg-single", ip_permissions: [{ip_protocol: "tcp", from_port: 22, to_port: 22, ip_ranges: [{cidr_ip: "0.0.0.0/0"}]}]}).and_call_original
+      expect(client).to receive(:authorize_security_group_ingress).with({group_id: "sg-single", ip_permissions: [{ip_protocol: "tcp", from_port: 22, to_port: 22, ipv_6_ranges: [{cidr_ipv_6: "::/0"}]}]}).and_call_original
       expect(client).to receive(:authorize_security_group_ingress).with({group_id: "sg-single", ip_permissions: [{ip_protocol: "tcp", from_port: 443, to_port: 443, ip_ranges: [{cidr_ip: ps.net4.to_s}]}]}).and_call_original
       expect { nx.wait_vpc_created }.to hop("create_route_table")
+    end
+  end
+
+  describe "#allow_ingress" do
+    it "authorizes an IPv4 cidr via ip_ranges" do
+      client.stub_responses(:authorize_security_group_ingress)
+      expect(client).to receive(:authorize_security_group_ingress).with({group_id: "sg-test", ip_permissions: [{ip_protocol: "tcp", from_port: 22, to_port: 22, ip_ranges: [{cidr_ip: "203.0.113.0/24"}]}]}).and_call_original
+      nx.allow_ingress("sg-test", 22, 22, "203.0.113.0/24")
+    end
+
+    it "authorizes an IPv6 cidr via ipv_6_ranges" do
+      client.stub_responses(:authorize_security_group_ingress)
+      expect(client).to receive(:authorize_security_group_ingress).with({group_id: "sg-test", ip_permissions: [{ip_protocol: "tcp", from_port: 22, to_port: 22, ipv_6_ranges: [{cidr_ipv_6: "2001:db8::/32"}]}]}).and_call_original
+      nx.allow_ingress("sg-test", 22, 22, "2001:db8::/32")
+    end
+
+    it "swallows a duplicate permission for either family" do
+      client.stub_responses(:authorize_security_group_ingress, Aws::EC2::Errors::InvalidPermissionDuplicate.new(nil, nil))
+      expect { nx.allow_ingress("sg-test", 22, 22, "2001:db8::/32") }.not_to raise_error
     end
   end
 

@@ -48,9 +48,8 @@ class Prog::Postgres::PostgresServerAwsNicMigration < Prog::Base
         client.describe_security_groups(filters: [{name: "group-name", values: [group_name]}]).security_groups[0].group_id
       end
 
-      begin
-        client.authorize_security_group_ingress(group_id: sg_id, ip_permissions: [{ip_protocol: "tcp", from_port: 22, to_port: 22, ip_ranges: [{cidr_ip: "0.0.0.0/0"}]}])
-      rescue Aws::EC2::Errors::InvalidPermissionDuplicate
+      Config.control_plane_outbound_cidrs.each do |cidr|
+        authorize_mgmt_ssh_ingress(sg_id, cidr)
       end
 
       ps_aws.update(mgmt_security_group_id: sg_id)
@@ -329,6 +328,17 @@ class Prog::Postgres::PostgresServerAwsNicMigration < Prog::Base
 
   def client
     @client ||= vm.location.location_credential_aws.client
+  end
+
+  def authorize_mgmt_ssh_ingress(sg_id, cidr)
+    # IPv4 sources go in ip_ranges, IPv6 sources in ipv_6_ranges
+    ranges = if cidr.include?(":")
+      {ipv_6_ranges: [{cidr_ipv_6: cidr}]}
+    else
+      {ip_ranges: [{cidr_ip: cidr}]}
+    end
+    client.authorize_security_group_ingress(group_id: sg_id, ip_permissions: [{ip_protocol: "tcp", from_port: 22, to_port: 22, **ranges}])
+  rescue Aws::EC2::Errors::InvalidPermissionDuplicate
   end
 
   def get_network_interface(nic)

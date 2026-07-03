@@ -50,7 +50,9 @@ class Prog::Vnet::Aws::VpcNexus < Prog::Base
       allow_ingress(private_subnet_aws_resource.user_security_group_id, firewall_rule.port_range.first, firewall_rule.port_range.last - 1, firewall_rule.cidr.to_s)
     end
 
-    allow_ingress(private_subnet_aws_resource.mgmt_security_group_id, 22, 22, "0.0.0.0/0")
+    Config.control_plane_outbound_cidrs.each do |cidr|
+      allow_ingress(private_subnet_aws_resource.mgmt_security_group_id, 22, 22, cidr)
+    end
     allow_ingress(private_subnet_aws_resource.mgmt_security_group_id, 443, 443, private_subnet.net4.to_s) if private_subnet.project.get_ff_aws_cloudwatch_logs
 
     hop_create_route_table
@@ -276,13 +278,18 @@ class Prog::Vnet::Aws::VpcNexus < Prog::Base
   end
 
   def allow_ingress(group_id, from_port, to_port, cidr)
+    ranges = if cidr.include?(":")
+      {ipv_6_ranges: [{cidr_ipv_6: cidr}]}
+    else
+      {ip_ranges: [{cidr_ip: cidr}]}
+    end
     client.authorize_security_group_ingress({
       group_id:,
       ip_permissions: [{
         ip_protocol: "tcp",
         from_port:,
         to_port:,
-        ip_ranges: [{cidr_ip: cidr}],
+        **ranges,
       }],
     })
   rescue Aws::EC2::Errors::InvalidPermissionDuplicate
