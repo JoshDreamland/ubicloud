@@ -1,0 +1,88 @@
+# Input matrix for bin/generate_billing_rates.rb. Top-level keys are providers.
+#
+# Running the generator produces config/billing_rates/overrides/{vm,postgres}_<provider>.yml,
+# each being the matching base file copied verbatim plus generated price-0 rows for every
+# resource_type x resource_family x region combination below that is not already present.
+aws:
+  billingRatesGenerator:
+    vmResourceTypes:
+      - VmVCpu
+      - VmStorage
+    postgresVCpuTypes:
+      - PostgresVCpu
+      - PostgresStandbyVCpu
+    postgresStorageTypes:
+      - PostgresStorage
+      - PostgresStandbyStorage
+    instanceResourceFamilies:
+      - c6gd
+      - m6id
+      - m6gd
+      - m7gd
+      - m8gd
+      - m8id
+      - i8g
+      - i8ge
+      - i7i
+      - i7ie
+      - m6a
+      - m7a
+      - m7i
+      - r6id
+      - r6gd
+      - r7gd
+      - r8gd
+      - r8id
+    regions:
+      - us-west-2
+      - sa-east-1
+      - eu-central-2
+      - me-central-1
+      - ap-northeast-2
+      - il-central-1
+      - us-east-2
+      - eu-west-1
+      - us-east-1
+      - eu-central-1
+      - ap-southeast-1
+      - ap-south-1
+      - ap-southeast-2
+      - af-south-1
+      - ca-central-1
+      - eu-north-1
+      - eu-west-2
+      - ap-northeast-1
+      - eu-west-3
+      - eu-south-1
+    activeFrom: "2025-10-20T00:00:00Z"
+    # Instance families that appear in instance availability but are intentionally
+    # NOT priced by this matrix. Consumed only by the availability-coverage spec
+    # (spec/lib/billing_rate_availability_coverage_spec.rb) to exempt them; the
+    # generator ignores this key, so billing-rate output is unaffected.
+    excludedFamilies:
+      - c6id
+      - c7gd
+      - c8gd
+      - c8id
+gcp:
+  billingRatesGenerator:
+    vmResourceTypes:
+      - VmVCpu
+    postgresVCpuTypes:
+      - PostgresVCpu
+      - PostgresStandbyVCpu
+    postgresStorageTypes:
+      - PostgresStorage
+      - PostgresStandbyStorage
+    instanceResourceFamilies:
+      - c4a-standard
+      - c4a-highmem
+    regions:
+      - gcp-us-central1
+      - gcp-us-east4
+      - gcp-us-east1
+      - gcp-europe-west2
+      - gcp-europe-west4
+      - gcp-asia-southeast1
+      - gcp-asia-northeast1
+    activeFrom: "2025-01-01T00:00:00Z"

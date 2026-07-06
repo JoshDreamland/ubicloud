@@ -47,6 +47,15 @@ COPY --from=bundler /usr/local/bundle/ /usr/local/bundle/
 COPY --chown=ubicloud --from=frontend-builder /app/assets/css/app.css /app/assets/css/app.css
 COPY --chown=ubicloud . /app
 
+# Apply the generated billing-rate overrides over the base files. The set of
+# config/billing_rates/*.yml files must be identical before and after the copy,
+# so every override must correspond to an existing base file (a stray override
+# would change the listing and fail the build).
+RUN before="$(ls config/billing_rates/*.yml | sort)" && \
+    cp config/billing_rates/overrides/*.yml config/billing_rates/ && \
+    after="$(ls config/billing_rates/*.yml | sort)" && \
+    [ "$before" = "$after" ]
+
 ENV RACK_ENV=production
 ENV PORT=3000
 ENV LD_PRELOAD=${JEMALLOC_PATH}

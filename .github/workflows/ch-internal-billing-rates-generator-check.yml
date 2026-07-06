@@ -1,0 +1,151 @@
+name: '[INTERNAL] Billing rates generator check'
+permissions:
+  contents: read
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - clickhouse
+  pull_request:
+    branches:
+      - clickhouse
+jobs:
+  check:
+    name: Generate overrides and assert no diff
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: .tool-versions
+
+      - name: Regenerate billing-rate overrides
+        run: ruby bin/generate_billing_rates.rb
+
+      - name: Fail if overrides are out of date
+        run: |
+          if [ -n "$(git status --porcelain config/billing_rates/overrides)" ]; then
+            echo "::error::Billing-rate overrides are out of date. Run 'ruby bin/generate_billing_rates.rb' and commit the result."
+            git --no-pager diff -- config/billing_rates/overrides
+            git status --porcelain config/billing_rates/overrides
+            exit 1
+          fi
+          echo "Billing-rate overrides are up to date."
+
+  availability-coverage:
+    name: AWS billing rates cover instance availability
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: .tool-versions
+
+      - name: Check billing-rate coverage of instance availability
+        id: coverage
+        env:
+          COVERAGE_REPORT_PATH: ${{ runner.temp }}/billing_coverage_report.md
+        run: ruby bin/check_billing_rate_availability_coverage.rb
+
+      - name: Sync coverage comment on PR
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT: ${{ runner.temp }}/billing_coverage_report.md
+          OUTCOME: ${{ steps.coverage.outcome }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ ! -f "$REPORT" ]; then
+            echo "No coverage report produced; nothing to comment."
+            exit 0
+          fi
+          marker="<!-- billing-rate-availability-coverage -->"
+          existing="$(gh api "repos/$REPO/issues/$PR/comments" --jq "map(select(.body | contains(\"$marker\"))) | .[0].id // empty")"
+          if [ "$OUTCOME" = "failure" ]; then
+            # Gap found: create the comment, or update it in place if it already exists.
+            if [ -n "$existing" ]; then
+              gh api -X PATCH "repos/$REPO/issues/comments/$existing" -f body="$(cat "$REPORT")"
+            else
+              gh pr comment "$PR" --body-file "$REPORT"
+            fi
+          elif [ "$OUTCOME" = "success" ]; then
+            # Coverage complete: mark a prior comment resolved (do not create a new one).
+            if [ -n "$existing" ]; then
+              gh api -X PATCH "repos/$REPO/issues/comments/$existing" -f body="$(cat "$REPORT")"
+            else
+              echo "Coverage passed and no prior comment exists; nothing to resolve."
+            fi
+          else
+            echo "Coverage step outcome '$OUTCOME'; skipping comment."
+          fi
+
+  new-instance-availability:
+    name: New instance types available in regions
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: .tool-versions
+
+      - name: Detect newly-available instance types vs PR base
+        id: newavail
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_AVAILABILITY_PATH: ${{ runner.temp }}/base_instance_availability.yml
+          NEW_AVAILABILITY_REPORT_PATH: ${{ runner.temp }}/new_availability_report.md
+        run: |
+          if git cat-file -e "$BASE_SHA:config/instance_availability.yml" 2>/dev/null; then
+            git show "$BASE_SHA:config/instance_availability.yml" > "$BASE_AVAILABILITY_PATH"
+          fi
+          ruby bin/check_new_instance_availability.rb
+
+      - name: Sync new-availability comment on PR
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT: ${{ runner.temp }}/new_availability_report.md
+          STATE: ${{ steps.newavail.outputs.state }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          [ -f "$REPORT" ] || { echo "No new-availability report; nothing to comment."; exit 0; }
+          marker="<!-- new-instance-availability -->"
+          existing="$(gh api "repos/$REPO/issues/$PR/comments" --jq "map(select(.body | contains(\"$marker\"))) | .[0].id // empty")"
+          if [ "$STATE" = "alert" ]; then
+            # New (region, family) pairs added: create, or update in place if present.
+            if [ -n "$existing" ]; then
+              gh api -X PATCH "repos/$REPO/issues/comments/$existing" -f body="$(cat "$REPORT")"
+            else
+              gh pr comment "$PR" --body-file "$REPORT"
+            fi
+          elif [ "$STATE" = "clean" ] && [ -n "$existing" ]; then
+            # PR no longer adds new instance types: resolve a prior comment (don't create one).
+            gh api -X PATCH "repos/$REPO/issues/comments/$existing" -f body="$(cat "$REPORT")"
+          else
+            echo "No new-availability comment action (state=$STATE)."
+          fi
