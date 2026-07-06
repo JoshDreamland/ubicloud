@@ -57,6 +57,11 @@
         "minProperties": 1
       }
     },
+    "pg_gce_images": {
+      "type": "array",
+      "description": "GCE images for provisioning Postgres on GCP (the GCP analogue of pg_amis, without the region dimension; GCE images are global). Each entry is upserted into pg_gce_image, keyed by (arch, gce_image_name), with its explicit pg_versions list.",
+      "items": { "$ref": "#/definitions/PgGceImageConfig" }
+    },
     "dns_server_amis": {
       "type": "object",
       "description": "region -> arch AMI map for DNS server VMs.",
@@ -80,20 +85,39 @@
     "LocationConfig": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["account_name", "name", "region", "role", "dns_suffix"],
+      "required": ["account_name", "name", "region"],
       "properties": {
         "account_name": { "type": "string", "minLength": 1 },
         "name": { "type": "string", "minLength": 1 },
-        "region": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "^[a-z]{2}-[a-z]+-[0-9]+$"
+        "region": { "type": "string", "minLength": 1 },
+        "provider": {
+          "enum": ["aws", "gcp"],
+          "description": "Cloud provider for the location. Defaults to \"aws\" when omitted."
         },
         "role": {
           "type": "string",
-          "pattern": "^arn:aws:iam::[0-9]{12}:role/.+$"
+          "pattern": "^arn:aws:iam::[0-9]{12}:role/.+$",
+          "description": "AWS IAM role ARN the control plane assumes for this location. Required for aws locations."
         },
-        "dns_suffix": { "type": "string", "minLength": 1 },
+        "dns_suffix": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Per-location DNS subdomain. Required for aws locations; omitted for gcp locations, which fall back to publicly-signed certificates (DNS server provisioning is not yet supported on gcp)."
+        },
+        "gcp_project_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "GCP project that hosts the location's resources. Required for gcp locations."
+        },
+        "service_account_email": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Service account the control plane impersonates for this location. Required for gcp locations."
+        },
+        "project_visible": {
+          "type": "boolean",
+          "description": "Whether the location is enabled in the project's Postgres UI (the visible_postgres_locations feature flag). Defaults to true. Only gcp locations are gated this way; aws locations are always visible."
+        },
         "otel_otlp_destination": { "$ref": "#/definitions/OtelOtlpDestinationConfig" },
         "capacity_reservation": { "$ref": "#/definitions/CapacityReservationConfig" },
         "otel_otlp_export_endpoint": {
@@ -101,7 +125,25 @@
           "format": "uri",
           "description": "Deprecated. Retained for backward compatibility; ignored by setup.rb. Use otel_otlp_destination instead."
         }
-      }
+      },
+      "oneOf": [
+        {
+          "description": "AWS location: assume-role auth, requires dns_suffix.",
+          "properties": {
+            "provider": { "enum": ["aws"] },
+            "region": { "pattern": "^[a-z]{2}-[a-z]+-[0-9]+$" }
+          },
+          "required": ["role", "dns_suffix"]
+        },
+        {
+          "description": "GCP location: service-account impersonation; capacity_reservation and dns_suffix do not apply.",
+          "properties": {
+            "provider": { "enum": ["gcp"] },
+            "region": { "pattern": "^gcp-[a-z]+-[a-z0-9]+$" }
+          },
+          "required": ["provider", "gcp_project_id", "service_account_email"]
+        }
+      ]
     },
     "CapacityReservationConfig": {
       "type": "object",
@@ -185,6 +227,20 @@
     "AmiId": {
       "type": "string",
       "pattern": "^ami-[0-9a-f]{8,17}$"
+    },
+    "PgGceImageConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gce_image_name", "arch", "pg_versions"],
+      "properties": {
+        "gce_image_name": { "type": "string", "minLength": 1 },
+        "arch": { "type": "string", "enum": ["x64", "arm64"] },
+        "pg_versions": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[0-9]+$" },
+          "minItems": 1
+        }
+      }
     },
     "BotAccountConfig": {
       "type": "object",

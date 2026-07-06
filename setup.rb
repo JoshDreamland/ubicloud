@@ -94,41 +94,29 @@ module UbicloudSetup
   end
 
   def self.add_location(location)
+    provider = location.provider || "aws"
+    # nil (not "") so PostgresResource#hostname_suffix's compact drops it instead of
+    # producing a leading-dot hostname. GCP locations omit dns_suffix entirely.
+    dns_suffix = location.dns_suffix.to_s.empty? ? nil : location.dns_suffix
     DB.transaction do
       Clog.emit "Checking if location #{location.account_name}:#{location.region} already exists"
       created_location = Location.where(name: location.region, ui_name: location.account_name).first
       if created_location
-        Clog.emit "Location #{location.account_name}:#{location.region} already exists, not creating, will update dns_suffix #{location.dns_suffix} and location_credentials with role #{location.role}"
-        created_location.update(dns_suffix: location.dns_suffix)
-        # we will update location_credential if role is different
-        if LocationCredentialAws.where(id: created_location.id).any?
-          location_credential = LocationCredentialAws.where(id: created_location.id).update(assume_role: location.role)
-        else
-          Clog.emit "Creating credentials for existing location #{created_location}"
-          location_credential = LocationCredentialAws.create_with_id(
-            created_location.id,
-            access_key: nil,
-            secret_key: nil,
-            assume_role: location.role,
-          )
-        end
+        Clog.emit "Location #{location.account_name}:#{location.region} already exists, not creating, will update dns_suffix #{dns_suffix} and #{provider} location_credentials"
+        created_location.update(dns_suffix:)
+        location_credential = upsert_location_credential(created_location.id, location, provider)
       else
-        Clog.emit "Creating location #{location.account_name}:#{location.region}"
+        Clog.emit "Creating #{provider} location #{location.account_name}:#{location.region}"
         created_location = Location.create(
           display_name: location.name,
           name: location.region,
           ui_name: location.account_name,
           visible: true,
-          provider: "aws",
-          dns_suffix: location.dns_suffix,
+          provider:,
+          dns_suffix:,
         )
         Clog.emit "Creating credentials for location #{location.region}"
-        location_credential = LocationCredentialAws.create_with_id(
-          created_location.id,
-          access_key: nil,
-          secret_key: nil,
-          assume_role: location.role,
-        )
+        location_credential = create_location_credential(created_location.id, location, provider)
       end
 
       if (dest = location.otel_otlp_destination)
@@ -154,9 +142,54 @@ module UbicloudSetup
     end
   end
 
+  # Create the provider-appropriate credential for a brand-new location.
+  def self.create_location_credential(location_id, location, provider)
+    if provider == "gcp"
+      # Service-account impersonation: no stored JSON key (credentials_json nil).
+      LocationCredentialGcp.create_with_id(
+        location_id,
+        project_id: location.gcp_project_id,
+        service_account_email: location.service_account_email,
+        credentials_json: nil,
+      )
+    else
+      LocationCredentialAws.create_with_id(
+        location_id,
+        access_key: nil,
+        secret_key: nil,
+        assume_role: location.role,
+      )
+    end
+  end
+
+  # Update an existing credential in place, or create one if the location predates it.
+  def self.upsert_location_credential(location_id, location, provider)
+    if provider == "gcp"
+      if LocationCredentialGcp.where(id: location_id).any?
+        LocationCredentialGcp.where(id: location_id).update(project_id: location.gcp_project_id, service_account_email: location.service_account_email)
+      else
+        Clog.emit "Creating gcp credentials for existing location #{location_id}"
+        create_location_credential(location_id, location, provider)
+      end
+    elsif LocationCredentialAws.where(id: location_id).any?
+      LocationCredentialAws.where(id: location_id).update(assume_role: location.role)
+    else
+      Clog.emit "Creating aws credentials for existing location #{location_id}"
+      create_location_credential(location_id, location, provider)
+    end
+  end
+
+  # Names of gcp locations the config marks project_visible (default true when unset).
+  # These populate the project's visible_postgres_locations ff, which gates gcp locations
+  # in the Postgres UI (AWS locations are always visible and unaffected).
+  def self.visible_gcp_location_names(locations)
+    locations.select { |l| l.provider == "gcp" && (l.project_visible.nil? || l.project_visible) }.map(&:region)
+  end
+
   # Create-or-update the capacity-reservation strand when enabled, or pause it (keeping
   # its ODCRs in place) when disabled. A location removed from the config is not visited.
   def self.setup_capacity_reservation(location)
+    return if location.provider == "gcp" # ODCRs are an AWS-only concept
     cr = location.capacity_reservation
     created_location = Location.where(name: location.region, ui_name: location.account_name).first
 
@@ -198,6 +231,24 @@ module UbicloudSetup
           aws_ami_id: archs[arch_attr],
         )
       end
+    end
+  end
+
+  # Upsert a GCE image (the GCP analogue of pg_aws_ami) used to provision Postgres
+  # VMs on GCP. Keyed by (arch, gce_image_name); re-running updates pg_versions in
+  # place. id is omitted so the pg_gce_image gen_random_ubid_uuid default applies.
+  def self.update_pg_gce_image(image)
+    pg_versions = Sequel.pg_array(Array(image.pg_versions).map(&:to_s), :text)
+    DB.transaction do
+      DB.run "SET LOCAL clickgres.bypass_dml_blocker__pg_gce_image = 'true'"
+      DB[:pg_gce_image].insert_conflict(
+        target: [:arch, :gce_image_name],
+        update: {pg_versions:},
+      ).insert(
+        gce_image_name: image.gce_image_name,
+        arch: image.arch,
+        pg_versions:,
+      )
     end
   end
 
@@ -300,7 +351,11 @@ module UbicloudSetup
   #   attr_reader :cleanup_default_locations, :email, :password, :project_name, :locations
   # end
 
-  LocationConfig = Struct.new(:account_name, :name, :region, :role, :dns_suffix, :otel_otlp_destination, :capacity_reservation)
+  # `provider` defaults to "aws" when absent (see run_ch_ubi parsing). AWS locations use
+  # `role` (assume-role). GCP locations use `gcp_project_id` + `service_account_email`
+  # (service-account impersonation; no stored key). `project_visible` (default true) gates
+  # a gcp location in the project's visible_postgres_locations ff (the gcp UI gate).
+  LocationConfig = Struct.new(:account_name, :name, :region, :role, :dns_suffix, :otel_otlp_destination, :capacity_reservation, :provider, :gcp_project_id, :service_account_email, :project_visible)
   OtelOtlpDestinationConfig = Struct.new(:otlp_data_endpoint, :otlp_arrow_endpoint, :logs_endpoint, :metrics_endpoint, :auth_audience)
   # Standing AWS capacity reservation (ODCR) config for a location. `enabled` defaults to
   # false, so a location only gets a Prog::CapacityReservation strand when opted in.
@@ -329,11 +384,15 @@ module UbicloudSetup
   #       arch_arm64: ami-iyyyy
 
   PgAmiArchConfig = Struct.new(:arch_x64, :arch_arm64)
+  # A GCE image for Postgres on GCP: one row per (arch, gce_image_name), carrying the list
+  # of pg major versions the image supports. The GCP analogue of pg_amis (no region: GCE
+  # images are global, and one image typically backs multiple versions).
+  PgGceImageConfig = Struct.new(:gce_image_name, :arch, :pg_versions)
   DnsAmiArchConfig = Struct.new(:arch_x64, :arch_arm64)
   BotAccountConfig = Struct.new(:email, :password)
   OidcProviderConfig = Struct.new(:display_name, :url, :client_id, :client_secret)
 
-  SetupConfig = Struct.new(:enabled, :cleanup_default_locations, :email, :password, :project_name, :project_uuid, :locations, :pg_amis, :dns_server_amis, :bot_accounts, :oidc_providers)
+  SetupConfig = Struct.new(:enabled, :cleanup_default_locations, :email, :password, :project_name, :project_uuid, :locations, :pg_amis, :pg_gce_images, :dns_server_amis, :bot_accounts, :oidc_providers)
 
   def self.run_ch_ubi
     ubicloud_setup_yaml_path = ENV["UBICLOUD_SETUP_YAML_PATH"]
@@ -347,6 +406,7 @@ module UbicloudSetup
     setup_yaml = YAML.safe_load_file(ubicloud_setup_yaml_path, permitted_classes: [], aliases: false).transform_keys(&:to_sym)
     setup_yaml[:locations] = setup_yaml[:locations].map do |loc|
       loc = loc.transform_keys(&:to_sym)
+      loc[:provider] ||= "aws"
       if (dest = loc[:otel_otlp_destination])
         loc[:otel_otlp_destination] = OtelOtlpDestinationConfig.new(**dest.transform_keys(&:to_sym).slice(*OtelOtlpDestinationConfig.members))
       end
@@ -369,6 +429,14 @@ module UbicloudSetup
       end
     else
       {}
+    end
+
+    setup_yaml[:pg_gce_images] = if setup_yaml[:pg_gce_images]
+      setup_yaml[:pg_gce_images].map do |img|
+        PgGceImageConfig.new(**img.transform_keys(&:to_sym).slice(*PgGceImageConfig.members))
+      end
+    else
+      []
     end
 
     # Parse dns_server_amis
@@ -420,6 +488,13 @@ module UbicloudSetup
     setup_config.locations.each do |location|
       add_location(location)
       setup_capacity_reservation(location)
+      # TODO: GCP DNS server provisioning is not yet implemented (no AWS AMI / no
+      # SSD-free GCP machine type wired up). Skip it for now; remove this guard when
+      # GCP DNS support lands. GCP postgres falls back to publicly-signed certs.
+      if location.provider == "gcp"
+        Clog.emit "Skipping DNS server provisioning for GCP location #{location.account_name}:#{location.region} (not yet supported)"
+        next
+      end
       # Get DNS AMI for this region (x64 arch required)
       dns_ami = setup_config.dns_server_amis.dig(location.region, :arch_x64)
       fail "DNS AMI not configured for region #{location.region}" if dns_ami.nil? || dns_ami.empty?
@@ -433,6 +508,11 @@ module UbicloudSetup
       end
     end
 
+    setup_config.pg_gce_images.each do |image|
+      Clog.emit "Updating pg_gce_image #{image.gce_image_name} (#{image.arch}) for pg_versions #{image.pg_versions}"
+      update_pg_gce_image(image)
+    end
+
     aws_family_options = %w[c6gd m6id m6gd i8ge i7i i7ie r8gd r6gd r6id m7gd r7gd r8id m8id]
 
     Clog.emit "Enabling AWS instance types: #{aws_family_options}"
@@ -444,6 +524,19 @@ module UbicloudSetup
     Clog.emit "Enabling Postgres Standbys to always use different AZs for standbys [postgres_aws_use_different_azs_for_standbys]"
     project.send(:set_ff_postgres_aws_use_different_azs_for_standbys, true)
 
+    # Enable per-subnet (dedicated) GCP VPCs by default for the project, so each GCP
+    # resource gets its own VPC instead of a shared per-location VPC. Column, not a ff.
+    Clog.emit "Enabling GCP dedicated subnet VPCs [gcp_dedicated_subnet_vpcs]"
+    project.update(gcp_dedicated_subnet_vpcs: true)
+
+    # GCP postgres locations are gated in the UI by the visible_postgres_locations ff.
+    # When the config declares any gcp locations, setup owns this list: it's set to exactly
+    # the project_visible gcp names (others are hidden). AWS-only configs leave it untouched.
+    if setup_config.locations.any? { |l| l.provider == "gcp" }
+      visible = visible_gcp_location_names(setup_config.locations)
+      Clog.emit "Setting visible_postgres_locations for gcp UI visibility: #{visible}"
+      project.set_ff_visible_postgres_locations(visible)
+    end
   end
 end
 

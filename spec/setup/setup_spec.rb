@@ -236,6 +236,20 @@ RSpec.describe "UbicloudSetup" do
       expect(PgAwsAmi.where(aws_location_name: "some-region", pg_version: "18", arch: "x64").first).to have_attributes(aws_ami_id: "ami-88888888")
     end
 
+    it "upserts a pg_gce_image row, updating pg_versions in place on re-run" do
+      PgGceImage.dataset.destroy
+      name = "postgres-ubuntu-2404-x64-20260218"
+      UbicloudSetup.update_pg_gce_image(UbicloudSetup::PgGceImageConfig.new(gce_image_name: name, arch: "x64", pg_versions: ["16", "17"]))
+      img = PgGceImage.where(arch: "x64", gce_image_name: name)
+      expect(img.count).to eq 1
+      expect(img.first.pg_versions).to eq(["16", "17"])
+
+      # same (arch, gce_image_name) key -> update in place, no duplicate row
+      UbicloudSetup.update_pg_gce_image(UbicloudSetup::PgGceImageConfig.new(gce_image_name: name, arch: "x64", pg_versions: ["16", "17", "18"]))
+      expect(img.count).to eq 1
+      expect(img.first.pg_versions).to eq(["16", "17", "18"])
+    end
+
     it "add_location" do
       old_count = Location.count
 
@@ -359,6 +373,77 @@ RSpec.describe "UbicloudSetup" do
         metrics_endpoint: "https://new-metrics.example.com:4317",
         auth_audience: "https://new.example.com",
       )
+    end
+
+    it "normalizes an empty dns_suffix to nil" do
+      UbicloudSetup.add_location(UbicloudSetup::LocationConfig.new(account_name: "account_name", name: "test-location", region: "region", role: "role", dns_suffix: ""))
+      expect(Location.where(display_name: "test-location").first.dns_suffix).to be_nil
+    end
+
+    it "add_location for gcp provider creates a gcp location and gcp credential" do
+      UbicloudSetup.add_location(UbicloudSetup::LocationConfig.new(
+        account_name: "gcp-account", name: "GCP US Central 1", region: "gcp-us-central1",
+        provider: "gcp", gcp_project_id: "my-gcp-project",
+        service_account_email: "clickgres@my-gcp-project.iam.gserviceaccount.com",
+      ))
+      location = Location.where(display_name: "GCP US Central 1").first
+      expect(location).to have_attributes(
+        name: "gcp-us-central1",
+        ui_name: "gcp-account",
+        provider: "gcp",
+        visible: true,
+        project_id: nil,
+      )
+      expect(LocationCredentialAws.count).to eq 0
+      expect(LocationCredentialGcp.count).to eq 1
+      expect(LocationCredentialGcp[location.id]).to have_attributes(
+        project_id: "my-gcp-project",
+        service_account_email: "clickgres@my-gcp-project.iam.gserviceaccount.com",
+        credentials_json: nil,
+      )
+    end
+
+    it "add_location for gcp provider adds a credential to an existing gcp location" do
+      Location.create(name: "gcp-us-central1", ui_name: "gcp-account", display_name: "GCP US Central 1", provider: "gcp", visible: true, project_id: nil)
+      expect(LocationCredentialGcp.count).to eq 0
+      UbicloudSetup.add_location(UbicloudSetup::LocationConfig.new(
+        account_name: "gcp-account", name: "GCP US Central 1", region: "gcp-us-central1",
+        provider: "gcp", gcp_project_id: "my-gcp-project",
+        service_account_email: "clickgres@my-gcp-project.iam.gserviceaccount.com",
+      ))
+      location = Location.where(display_name: "GCP US Central 1").first
+      expect(LocationCredentialGcp.count).to eq 1
+      expect(LocationCredentialGcp[location.id]).to have_attributes(
+        project_id: "my-gcp-project",
+        service_account_email: "clickgres@my-gcp-project.iam.gserviceaccount.com",
+      )
+    end
+
+    it "add_location for gcp provider updates an existing gcp credential" do
+      location = Location.create(name: "gcp-us-central1", ui_name: "gcp-account", display_name: "GCP US Central 1", provider: "gcp", visible: true, project_id: nil)
+      LocationCredentialGcp.create_with_id(location.id, project_id: "old-project", service_account_email: "old@old-project.iam.gserviceaccount.com", credentials_json: nil)
+      UbicloudSetup.add_location(UbicloudSetup::LocationConfig.new(
+        account_name: "gcp-account", name: "GCP US Central 1", region: "gcp-us-central1",
+        provider: "gcp", gcp_project_id: "new-project",
+        service_account_email: "new@new-project.iam.gserviceaccount.com",
+      ))
+      expect(LocationCredentialGcp.count).to eq 1
+      expect(LocationCredentialGcp[location.id]).to have_attributes(
+        project_id: "new-project",
+        service_account_email: "new@new-project.iam.gserviceaccount.com",
+      )
+    end
+  end
+
+  describe ".visible_gcp_location_names" do
+    it "returns gcp locations marked project_visible (defaulting to true), excluding hidden and non-gcp" do
+      locations = [
+        UbicloudSetup::LocationConfig.new(region: "gcp-us-central1", provider: "gcp", project_visible: true),
+        UbicloudSetup::LocationConfig.new(region: "gcp-us-east4", provider: "gcp", project_visible: false),
+        UbicloudSetup::LocationConfig.new(region: "gcp-us-west1", provider: "gcp"),
+        UbicloudSetup::LocationConfig.new(region: "us-west-2", provider: "aws", project_visible: true),
+      ]
+      expect(UbicloudSetup.visible_gcp_location_names(locations)).to eq ["gcp-us-central1", "gcp-us-west1"]
     end
   end
 
@@ -630,6 +715,18 @@ RSpec.describe "UbicloudSetup" do
       expect(Semaphore.where(strand_id: strand.id, name: "pause").count).to eq(0)
       expect(strand.reload.stack.first["additional_capacity"]).to eq(0.45)
     end
+
+    it "is a no-op for gcp locations (ODCRs are AWS-only)" do
+      # enabled: true would create a live strand for a non-gcp location (see the
+      # resume test above and the e2e us-west-2 assertion); the provider guard
+      # short-circuits before that, so no strand is created.
+      gcp_loc = Location.create(name: "gcp-us-central1", ui_name: "gcp-account", display_name: "GCP US Central 1", provider: "gcp", visible: true, project_id: nil)
+      UbicloudSetup.setup_capacity_reservation(UbicloudSetup::LocationConfig.new(
+        account_name: "gcp-account", name: "GCP US Central 1", region: "gcp-us-central1", provider: "gcp",
+        capacity_reservation: UbicloudSetup::CapacityReservationConfig.new(enabled: true, enable_all_families: true, additional_capacity: 0.2),
+      ))
+      expect(Prog::CapacityReservation.live_strand(gcp_loc.id)).to be_nil
+    end
   end
 
   describe "run_ch_ubi e2e" do
@@ -676,6 +773,34 @@ RSpec.describe "UbicloudSetup" do
     it "fails on missing DNS Suffix" do
       stub_setup_yaml("setup_test_no_dns_suffix.yaml")
       expect { UbicloudSetup.run_ch_ubi }.to raise_error(RuntimeError, /no dns_suffix/)
+    end
+
+    it "creates gcp locations, skips dns provisioning, and gates UI visibility via project_visible" do
+      stub_setup_yaml("setup_test_gcp.yaml")
+      UbicloudSetup.run_ch_ubi
+      central = Location.where(name: "gcp-us-central1", ui_name: "dev-gcp-us-central1-clickgres").first
+      east = Location.where(name: "gcp-us-east4", ui_name: "dev-gcp-us-east4-clickgres").first
+      expect(central).not_to be_nil
+      expect(central.provider).to eq "gcp"
+      expect(central.dns_suffix).to be_nil
+      expect(LocationCredentialGcp[central.id]).to have_attributes(
+        project_id: "my-gcp-project",
+        service_account_email: "clickgres-cell@my-gcp-project.iam.gserviceaccount.com",
+        credentials_json: nil,
+      )
+      expect(east).not_to be_nil
+      expect(LocationCredentialGcp[east.id]).not_to be_nil
+      expect(Prog::DnsZone::SetupDnsServerVm).not_to have_received(:assemble)
+      expect(DnsServer.count).to eq 0
+
+      # project_visible drives the per-project visible_postgres_locations ff (the gcp UI gate):
+      # central is visible, east is not.
+      project = Project.where(name: "clickgres-development").first
+      expect(project.get_ff_visible_postgres_locations).to eq ["gcp-us-central1"]
+      expect(project.gcp_dedicated_subnet_vpcs).to be true
+
+      expect(PgGceImage.where(arch: "x64", gce_image_name: "postgres-ubuntu-2404-x64-20260218").first&.pg_versions).to eq(["16", "17", "18"])
+      expect(PgGceImage.where(arch: "arm64", gce_image_name: "postgres-ubuntu-2404-arm64-20260218").first&.pg_versions).to eq(["16", "17", "18"])
     end
 
     it "no cleanup default locations" do
@@ -733,16 +858,18 @@ RSpec.describe "UbicloudSetup" do
     # was authored to exercise the runtime dns_suffix-missing failure path;
     # setup_test_disabled.yaml drives the `enabled: false` no-op path and
     # happens to also omit dns_suffix on its locations (those locations are
-    # never read at runtime). Both shapes are caught by the schema.
-    missing_dns_suffix = {type: :required_failed, message: /"dns_suffix" wasn't supplied/}
+    # never read at runtime). Both have aws-shaped locations missing dns_suffix,
+    # so they satisfy neither branch of the provider oneOf (aws requires
+    # dns_suffix; gcp requires provider + gcp_project_id + service_account_email).
+    location_one_of_failed = {type: :one_of_failed, message: /No subschema in "oneOf" matched/}
     invalid_configs = {
       "setup_test_no_dns_suffix.yaml" => [
-        missing_dns_suffix.merge(path: ["#", "locations", 0]),
-        missing_dns_suffix.merge(path: ["#", "locations", 1]),
+        location_one_of_failed.merge(path: ["#", "locations", 0]),
+        location_one_of_failed.merge(path: ["#", "locations", 1]),
       ],
       "setup_test_disabled.yaml" => [
-        missing_dns_suffix.merge(path: ["#", "locations", 0]),
-        missing_dns_suffix.merge(path: ["#", "locations", 1]),
+        location_one_of_failed.merge(path: ["#", "locations", 0]),
+        location_one_of_failed.merge(path: ["#", "locations", 1]),
       ],
     }
 

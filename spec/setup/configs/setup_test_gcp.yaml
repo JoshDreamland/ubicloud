@@ -1,0 +1,28 @@
+cleanup_default_locations: false
+email: postgres-team+dev@clickhouse.com
+enabled: true
+password: PASSWORD_TEST
+project_name: clickgres-development
+project_uuid: 3fa904f0-e4dc-86d2-a919-f8b0a326206f
+locations:
+  - account_name: dev-gcp-us-central1-clickgres
+    name: GCP US Central 1
+    region: gcp-us-central1
+    provider: gcp
+    project_visible: true
+    gcp_project_id: my-gcp-project
+    service_account_email: clickgres-cell@my-gcp-project.iam.gserviceaccount.com
+  - account_name: dev-gcp-us-east4-clickgres
+    name: GCP US East 4
+    region: gcp-us-east4
+    provider: gcp
+    project_visible: false
+    gcp_project_id: my-gcp-project
+    service_account_email: clickgres-cell@my-gcp-project.iam.gserviceaccount.com
+pg_gce_images:
+  - gce_image_name: postgres-ubuntu-2404-x64-20260218
+    arch: x64
+    pg_versions: ["16", "17", "18"]
+  - gce_image_name: postgres-ubuntu-2404-arm64-20260218
+    arch: arm64
+    pg_versions: ["16", "17", "18"]
