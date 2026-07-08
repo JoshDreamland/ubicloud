@@ -31,11 +31,12 @@ class Prog::Postgres::PostgresServerAwsNicMigration < Prog::Base
   end
 
   label def ensure_mgmt_sg
-    # Old subnets have a single group serving both roles (mgmt_security_group_id
-    # was backfilled to the legacy shared group); split off the SSH-only mgmt
+    # Old subnets have a single group used as both the mgmt and user group
+    # (mgmt_security_group_id was backfilled to it); create the SSH-only mgmt
     # group, keeping the shared group as the user group.
     ps_aws = private_subnet.private_subnet_aws_resource
-    if ps_aws.mgmt_security_group_id.nil? || ps_aws.mgmt_security_group_id == ps_aws.user_security_group_id
+    sg_id = ps_aws.mgmt_security_group_id
+    if sg_id.nil? || sg_id == ps_aws.user_security_group_id
       group_name = "aws-#{private_subnet.location.name}-#{private_subnet.ubid}-mgmt"
       sg_id = begin
         client.create_security_group(
@@ -47,13 +48,14 @@ class Prog::Postgres::PostgresServerAwsNicMigration < Prog::Base
       rescue Aws::EC2::Errors::InvalidGroupDuplicate
         client.describe_security_groups(filters: [{name: "group-name", values: [group_name]}]).security_groups[0].group_id
       end
-
-      Config.control_plane_outbound_cidrs.each do |cidr|
-        authorize_mgmt_ssh_ingress(sg_id, cidr)
-      end
-
-      ps_aws.update(mgmt_security_group_id: sg_id)
     end
+
+    # Idempotent; also backfills IPv6 rules onto mgmt groups created before
+    # control_plane_outbound_cidrs included IPv6 entries.
+    Config.control_plane_outbound_cidrs.each do |cidr|
+      authorize_mgmt_ssh_ingress(sg_id, cidr)
+    end
+    ps_aws.update(mgmt_security_group_id: sg_id)
 
     # When CloudWatch logs are enabled the GuardDuty interface endpoint and its
     # 443 ingress live on the mgmt group, matching what VpcNexus sets up for
@@ -80,6 +82,18 @@ class Prog::Postgres::PostgresServerAwsNicMigration < Prog::Base
       end
     end
 
+    hop_attach_mgmt_sg
+  end
+
+  label def attach_mgmt_sg
+    # Attach the mgmt group before flip_to_user_nic points SSH at the mgmt
+    # IPv6, which only the mgmt group's rules allow. Keep the user group;
+    # customer traffic uses it until downgrade_old_sg.
+    ps_aws = private_subnet.private_subnet_aws_resource
+    client.modify_network_interface_attribute(
+      network_interface_id: old_nic.nic_aws_resource.network_interface_id,
+      groups: [ps_aws.user_security_group_id, ps_aws.mgmt_security_group_id],
+    )
     hop_create_new_nic
   end
 
@@ -132,8 +146,8 @@ class Prog::Postgres::PostgresServerAwsNicMigration < Prog::Base
   label def wait_new_nic_created
     nap 1 unless (eni = get_network_interface(new_nic))&.status == "available"
     # The ENI is created with only an IPv6 prefix; assign an individual address
-    # too (as NicNexus#assign_ipv6_address does) so the VM's ephemeral_net6 can
-    # follow the user NIC at the flip. Guarded so re-runs don't add a second.
+    # too (as NicNexus#assign_ipv6_address does) so ephemeral_net6 can be
+    # repointed to the new NIC at the flip. Guarded so re-runs don't add a second.
     if eni.ipv_6_addresses.empty?
       client.assign_ipv_6_addresses(network_interface_id: eni.network_interface_id, ipv_6_address_count: 1)
     end
@@ -184,48 +198,37 @@ class Prog::Postgres::PostgresServerAwsNicMigration < Prog::Base
   end
 
   label def setup_routing
-    # Keep the management NIC for management traffic only (SSH replies and
-    # GuardDuty telemetry) and route everything else (customer traffic,
-    # replication, all VM-initiated outbound) through the user NIC.
     mgmt_nic_id = old_nic.nic_aws_resource.network_interface_id
     user_nic_id = new_nic.nic_aws_resource.network_interface_id
     nis = client.describe_network_interfaces(network_interface_ids: [mgmt_nic_id, user_nic_id]).network_interfaces.to_h { [it.network_interface_id, it] }
     mgmt_nic = nis[mgmt_nic_id]
     user_nic = nis[user_nic_id]
     nap 1 unless mgmt_nic && user_nic
-    subnet = NetAddr::IPv4Net.parse(new_nic.nic_aws_resource.aws_subnet.ipv4_cidr.to_s)
-    gw = subnet.nth(1)
 
-    mgmt_policy = ["{from: #{mgmt_nic.private_ip_address}/32, table: 100}"]
-    if private_subnet.project.get_ff_aws_cloudwatch_logs
-      client.describe_network_interfaces(network_interface_ids: guardduty_endpoint.network_interface_ids).network_interfaces.each do |gd_nic|
-        mgmt_policy << "{to: #{gd_nic.private_ip_address}/32, table: 100}"
-      end
+    guardduty_ips = if private_subnet.project.get_ff_aws_cloudwatch_logs
+      client.describe_network_interfaces(network_interface_ids: guardduty_endpoint.network_interface_ids).network_interfaces.map(&:private_ip_address)
+    else
+      []
     end
 
+    subnet6 = if private_subnet.postgres_aws_ssh_ipv6?
+      fail "AWS subnet #{new_nic.nic_aws_resource.aws_subnet.id} is missing ipv6_cidr" if new_nic.nic_aws_resource.aws_subnet.ipv6_cidr.to_s.empty?
+      NetAddr::IPv6Net.parse(new_nic.nic_aws_resource.aws_subnet.ipv6_cidr.to_s)
+    end
+
+    netplan_install = AwsDualNicNetplan.install_script(
+      mgmt: mgmt_nic,
+      user: user_nic,
+      subnet: NetAddr::IPv4Net.parse(new_nic.nic_aws_resource.aws_subnet.ipv4_cidr.to_s),
+      guardduty_ips:,
+      subnet6:,
+    )
     setup_user_nic_script = <<~SCRIPT
     set -e
     echo 'network: {config: disabled}' > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
     if [ -f /etc/netplan/50-cloud-init.yaml ]; then mv /etc/netplan/50-cloud-init.yaml /etc/netplan/50-cloud-init.yaml.bak; fi
     rm -f /etc/netplan/61-user-nic.yaml
-    cat > /etc/netplan/61-ubicloud.yaml <<'NP'
-    network:
-      version: 2
-      ethernets:
-        mgmt-nic:
-          match: {macaddress: "#{mgmt_nic.mac_address}"}
-          dhcp4: true
-          dhcp4-overrides: {use-routes: false}
-          routes: [{to: #{subnet}, scope: link, table: 100}, {to: 0.0.0.0/0, via: #{gw}, table: 100}]
-          routing-policy: [#{mgmt_policy.join(", ")}]
-        user-nic:
-          match: {macaddress: "#{user_nic.mac_address}"}
-          dhcp4: true
-          routes: [{to: #{subnet}, scope: link, table: 200}, {to: 0.0.0.0/0, via: #{gw}, table: 200}]
-          routing-policy: [{from: #{user_nic.private_ip_address}/32, table: 200}]
-    NP
-    chmod 600 /etc/netplan/61-ubicloud.yaml
-    netplan apply
+    #{netplan_install.chomp}
     for i in $(seq 1 30); do
       iface=$(ip -o link | grep -i "#{user_nic.mac_address}" | awk -F': ' '{print $2; exit}')
       [ -n "$iface" ] && ip -4 addr show "$iface" | grep -q "inet " && break
@@ -253,6 +256,22 @@ class Prog::Postgres::PostgresServerAwsNicMigration < Prog::Base
     # Point ephemeral_net6 at the new user NIC, matching what VM creation records
     # for native dual-NIC VMs (the old NIC's IPv6 now belongs to the mgmt NIC).
     vm.update(ephemeral_net6: eni.ipv_6_addresses.first.ipv_6_address)
+
+    # Move the Sshable host to the mgmt NIC public IPv6; drop the cached SSH
+    # session keyed by the old IPv4 host first. The EIP is released only at
+    # release_old_eip, since customer DNS resolves to it until update_dns_record
+    # propagates.
+    if private_subnet.postgres_aws_ssh_ipv6?
+      mgmt_ipv6 = get_network_interface(old_nic).ipv_6_addresses.first.ipv_6_address
+      begin
+        Socket.tcp(mgmt_ipv6, 22, connect_timeout: 5) {}
+      rescue SystemCallError, IO::TimeoutError => e
+        Clog.emit("mgmt IPv6 ssh preflight failed", {aws_nic_migration_preflight: {server_ubid: postgres_server.ubid, mgmt_ipv6:, error: e.class.name}})
+        nap 10
+      end
+      vm.sshable.invalidate_cache_entry
+      vm.sshable.update(host: mgmt_ipv6)
+    end
 
     # Keep the AWS Name tags consistent with the renamed records.
     retag_nic_aws_resources(new_nic)
@@ -300,6 +319,21 @@ class Prog::Postgres::PostgresServerAwsNicMigration < Prog::Base
       network_interface_id: old_nic.nic_aws_resource.network_interface_id,
       groups: [private_subnet.private_subnet_aws_resource.mgmt_security_group_id],
     )
+    hop_release_old_eip
+  end
+
+  label def release_old_eip
+    release_nic_eip(old_nic) if private_subnet.postgres_aws_ssh_ipv6?
+    hop_refresh_internal_firewall
+  end
+
+  label def refresh_internal_firewall
+    # Rewrite the internal firewall rules: with every VM on a management NIC
+    # they no longer include port 22 (PostgresResource#mgmt_ssh_via_user_sg?),
+    # so Vnet::Aws::UpdateFirewallRules revokes it from the user security
+    # group on the next sync.
+    resource.internal_firewall.replace_firewall_rules(resource.internal_firewall_rules)
+    resource.servers.each { it.vm.incr_update_firewall_rules }
     Clog.emit("AWS NIC migration complete", {
       aws_nic_migration_complete: {server_ubid: postgres_server.ubid, new_network_interface_id: new_nic.nic_aws_resource.network_interface_id},
     })
@@ -350,6 +384,25 @@ class Prog::Postgres::PostgresServerAwsNicMigration < Prog::Base
   def retag_nic_aws_resources(nic)
     nar = nic.nic_aws_resource
     client.create_tags(resources: [nar.network_interface_id, nar.eip_allocation_id].compact, tags: [{key: "Name", value: nic.name}])
+  end
+
+  # Disassociate and release a NIC's EIP and clear the stored allocation id.
+  def release_nic_eip(nic)
+    nar = nic.nic_aws_resource
+    return unless (allocation_id = nar.eip_allocation_id)
+
+    if (association = get_network_interface(nic)&.association)
+      begin
+        client.disassociate_address(association_id: association.association_id)
+      rescue Aws::EC2::Errors::InvalidAssociationIDNotFound
+      end
+    end
+    begin
+      client.release_address(allocation_id:)
+    rescue Aws::EC2::Errors::InvalidAllocationIDNotFound, Aws::EC2::Errors::InvalidAddressIDNotFound => e
+      Clog.emit("EIP already released for nic", {ignored_aws_eip_release: {nic_ubid: nic.ubid, error: e.class.name}})
+    end
+    nar.update(eip_allocation_id: nil)
   end
 
   def guardduty_service_name
