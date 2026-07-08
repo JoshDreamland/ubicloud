@@ -524,6 +524,9 @@ module UbicloudSetup
     Clog.emit "Enabling Postgres Standbys to always use different AZs for standbys [postgres_aws_use_different_azs_for_standbys]"
     project.send(:set_ff_postgres_aws_use_different_azs_for_standbys, true)
 
+    Clog.emit "Enabling AWS Postgres management SSH over IPv6 [postgres_aws_ssh_ipv6]"
+    project.set_ff_postgres_aws_ssh_ipv6(true)
+
     # Enable per-subnet (dedicated) GCP VPCs by default for the project, so each GCP
     # resource gets its own VPC instead of a shared per-location VPC. Column, not a ff.
     Clog.emit "Enabling GCP dedicated subnet VPCs [gcp_dedicated_subnet_vpcs]"
