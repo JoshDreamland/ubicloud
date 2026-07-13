@@ -252,70 +252,63 @@ jobs:
               " 2>/dev/null
             ' > /tmp/ci-logs/strand-state.log 2>/dev/null || true
 
+      # NOTE: temporarily `always()` to verify the triage step end-to-end on a
+      # passing run; revert to `failure()` before merge.
       - name: Triage failure with Claude
-        if: failure()
+        if: always()
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
+          # Claude Code stores per-session state under ~/.claude; on the runner
+          # that path is not reliably writable (EACCES on session-env, which
+          # kills the Bash tool). Point it at a guaranteed-writable dir.
+          export CLAUDE_CONFIG_DIR="${RUNNER_TEMP:-/tmp}/claude-config"
+          mkdir -p "$CLAUDE_CONFIG_DIR"
+
           PROMPT=$(cat <<'EOF'
-          You are debugging a failed test in the Ubicloud CI pipeline.
-          The test source is in data-plane-application/stresshouse/tests/stable/postgres/.
-          Read the test code to understand what it does before investigating.
+          You are triaging a CI run of the Ubicloud pg-ubicloud-ci E2E pipeline.
 
-          ## Available tools
+          ## Logs (already collected — read them with the Read tool)
+          The debug logs are in /tmp/ci-logs/ :
+          - foreman.log        — Ubicloud foreman (strand runner). grep for "strand_error"
+                                 to find crashing strands; each has "from" (prog.label),
+                                 an "exception" (class + message), and a "try" count
+                                 (a high count means a crash-loop).
+          - strand-state.log   — strand state dump from the DB
+          - docker-compose.log — container logs
+          - <test>.log         — per-test output (e.g. smoke-test-.log,
+                                 e2e-avail-replicas-pg17.log); retries use a -retry2 suffix.
 
-          You have access to tools defined in .claude/settings.json: Read files, Edit files,
-          Bash (git, grep, cat, tail, curl, bundle exec, docker compose exec, ssh, python3,
-          .devcontainer/scripts/*.sh). Use these to investigate.
-
-          The devcontainer is running. You can exec into it:
-          ```bash
-          docker compose -f .devcontainer/docker-compose.yml -f .devcontainer/docker-compose.ci.yml exec -T app <command>
-          ```
-          This gives you access to: DB queries (bundle exec ruby -r ./loader), Ubicloud API
-          (.devcontainer/scripts/invoke_ubicloud_api_curl.sh), foreman restart, code changes.
-
-          If you need a tool that is not permitted, note it in your output under NEEDS_MORE.
+          The stresshouse test source is in ./data-plane-application/stresshouse/tests/stable/postgres/ .
+          The Ubicloud checkout is the current working directory; use `git log` for history.
 
           ## Investigation
+          1. Read the per-test logs to find which test failed and its surface error
+             (e.g. a server stuck in "creating", exit=124 timeout, an API error).
+          2. Read foreman.log and grep "strand_error" for the underlying exception and
+             which prog/label raised it, and whether it is crash-looping.
+          3. Correlate: an AWS UnauthorizedOperation/AccessDenied => infrastructure/permissions;
+             a Ruby exception raised inside a prog => code regression; a timeout with no
+             strand error => test/timing.
+          4. For a code regression, use `git log --oneline -20` and
+             `git log --oneline -- <file>` to name the most likely culprit commit.
+          If the run actually passed (no failing test, no blocking strand error), say so
+          and use CATEGORY: NONE (still report notable non-fatal strand errors under EVIDENCE).
 
-          List all files in /tmp/ci-logs/ and read them to understand the failure.
-          Test logs are named by test (e.g. smoke-test.log, e2e-avail-replicas-pg17.log).
-          Retry attempts get a -retry2 suffix. Also check:
-          - /tmp/ci-logs/foreman.log — Ubicloud foreman (strand runner) logs
-          - /tmp/ci-logs/strand-state.log — strand state dump from DB
-          - /tmp/ci-logs/docker-compose.log — container logs
-
-          Then dig deeper: read the relevant source code, check git history for recent changes
-          to the failing code path, and correlate errors across logs.
-
-          ## Classification
-
-          Classify the root cause into exactly one category:
-
-          1. TEST_PROBLEM — workflow misconfiguration, wrong API params, timing issue, test infra failure
-          2. INFRASTRUCTURE_PROBLEM — AWS issue (AMI not accessible, VPC limits, IAM permissions, region issue)
-          3. CODE_REGRESSION — Ubicloud code bug (strand crash, migration issue, logic error)
-
-          If the category is CODE_REGRESSION, also identify the likely culprit commit:
-          - Run `git log --oneline -20` to see recent commits
-          - Check `git log --oneline --since="1 week ago"` for recent changes
-          - Use `git log --oneline -- <file>` for files involved in the failure
-          - Report the most likely commit SHA and title
-
-          ## Output
-
-          Output your findings in this exact format:
-
-          CATEGORY: <one of TEST_PROBLEM, INFRASTRUCTURE_PROBLEM, CODE_REGRESSION>
-          ANALYSIS: <2-3 sentence explanation of the root cause>
-          EVIDENCE: <key log lines or facts that support your conclusion>
-          VERIFIED: <yes/no — did you confirm the hypothesis by retrying?>
+          ## Output (exactly this format, nothing else)
+          CATEGORY: <TEST_PROBLEM | INFRASTRUCTURE_PROBLEM | CODE_REGRESSION | NONE>
+          ANALYSIS: <2-3 sentence explanation>
+          EVIDENCE: <key log lines / facts that support the conclusion>
           CULPRIT_COMMIT: <SHA and title if CODE_REGRESSION, otherwise N/A>
-          NEEDS_MORE: <list of tools/permissions needed for deeper investigation, or N/A>
+          NEEDS_MORE: <anything that blocked deeper analysis, or N/A>
           EOF
           )
-          npx -y @anthropic-ai/claude-code --print "$PROMPT"
+          npx -y @anthropic-ai/claude-code \
+            --print \
+            --dangerously-skip-permissions \
+            --add-dir /tmp/ci-logs \
+            --model sonnet \
+            "$PROMPT"
 
       - name: Cleanup Postgres resources
         if: always()
