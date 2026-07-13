@@ -109,6 +109,7 @@ class Clover < Roda
     add_member
     associate
     attach_vm
+    billing_activate_requested
     billing_deactivate_requested
     cancel_storage_auto_scale
     connect

@@ -81,12 +81,9 @@ class Clover
         pg = @project.postgres_resources_dataset.first(id: UBID.to_uuid(ubid))
         raise CloverError.new(404, "ResourceNotFound", "Postgres resource not found") unless pg
 
-        # The endpoint is poll-friendly (billing keeps calling to track phase),
-        # so the meaningful "request" event is only the first call that actually
-        # signals the strand — subsequent calls are status checks and shouldn't
-        # spam the audit log or pile up dead semaphore rows on the strand.
+        completed = @project.get_ff_chc_postgres_deactivate_lockout ? pg.deactivated? : pg.deactivate_requested?
         in_deactivate_phase = BILLING_DEACTIVATE_PHASE_BY_LABEL.key?(pg.strand.label)
-        if !in_deactivate_phase && !pg.mark_billing_deactivated_set?
+        if !in_deactivate_phase && !completed && !pg.mark_billing_deactivated_set?
           pg.incr_mark_billing_deactivated
           audit_log(pg, "billing_deactivate_requested")
         else
@@ -94,6 +91,30 @@ class Clover
         end
         phase = BILLING_DEACTIVATE_PHASE_BY_LABEL[pg.strand.label] || "pending"
         {ubid: pg.ubid, phase:}
+      end
+
+      r.post "activate" do
+        no_authorization_needed
+
+        unless @project.get_ff_chc_postgres_deactivate_lockout
+          raise CloverError.new(404, "FeatureNotEnabled", "Postgres reactivate is not enabled for this project")
+        end
+        pg = @project.postgres_resources_dataset.first(id: UBID.to_uuid(ubid))
+        raise CloverError.new(404, "ResourceNotFound", "Postgres resource not found") unless pg
+
+        in_flight_or_deactivated = pg.deactivate_requested? || pg.mark_billing_deactivated_set?
+        being_destroyed = pg.destroy_set? || pg.destroying_set?
+        if being_destroyed
+          no_audit_log
+          raise CloverError.new(409, "ResourceDestroying", "Resource is being destroyed and cannot be activated")
+        end
+        if in_flight_or_deactivated && !pg.mark_billing_activated_set?
+          pg.incr_mark_billing_activated
+          audit_log(pg, "billing_activate_requested")
+        else
+          no_audit_log
+        end
+        {ubid: pg.ubid}
       end
     end
   end

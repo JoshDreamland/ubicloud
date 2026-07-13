@@ -263,6 +263,7 @@ class Project < Sequel::Model
     :postgres_instance_type_fallback,
     :cache_proxy_download_url,
     :postgres_aws_ssh_ipv6,
+    :chc_postgres_deactivate_lockout,
   )
 end
 

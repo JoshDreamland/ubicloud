@@ -17,6 +17,7 @@ RSpec.describe Prog::Postgres::PostgresResourceNexus::PrependMethods do # ruboco
 
   before do
     allow(Config).to receive(:postgres_service_project_id).and_return(postgres_project.id)
+    project.set_ff_chc_postgres_deactivate_lockout(true)
   end
 
   describe "#create_billing_record" do
@@ -61,49 +62,206 @@ RSpec.describe Prog::Postgres::PostgresResourceNexus::PrependMethods do # ruboco
       expect { nx.wait }.to nap(30)
     end
 
-    it "runs mark_billing_deactivated when mark_billing_deactivated semaphore is set, then delegates to super" do
+    it "runs mark_billing_deactivated when its semaphore is set, then delegates to super" do
       nx.incr_mark_billing_deactivated
       expect(nx).to receive(:mark_billing_deactivated).and_call_original
-      allow(nx.postgres_resource).to receive_messages(read_replicas: [], active_billing_records: [])
+      allow(nx.postgres_resource).to receive_messages(servers: [], read_replicas: [], active_billing_records: [])
       expect { nx.wait }.to nap(30)
+    end
+
+    it "runs mark_billing_activated when its semaphore is set, then delegates to super" do
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
+      nx.incr_mark_billing_activated
+      expect(nx).to receive(:mark_billing_activated).and_call_original
+      allow(nx.postgres_resource).to receive_messages(servers: [], read_replicas: [])
+      expect { nx.wait }.to nap(30)
+    end
+
+    it "prefers activate over deactivate when both semaphores are set (newer customer intent wins)" do
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
+      nx.incr_mark_billing_activated
+      nx.incr_mark_billing_deactivated
+      expect(nx).to receive(:mark_billing_activated).and_call_original
+      expect(nx).not_to receive(:mark_billing_deactivated)
+      allow(nx.postgres_resource).to receive_messages(servers: [], read_replicas: [])
+      expect { nx.wait }.to nap(30)
+    end
+  end
+
+  describe "#update_billing_records" do
+    before { postgres_server }
+
+    it "no-ops and hops to wait when the resource is deactivated (prevents billing reopen during pause)" do
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
+      nx.incr_update_billing_records
+      st.update(label: "update_billing_records")
+      expect(nx).not_to receive(:create_billing_record)
+      expect { nx.update_billing_records }.to hop("wait")
+    end
+
+    it "drains initial_provisioning when deactivated (matches upstream's always-drain semantics)" do
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
+      nx.incr_update_billing_records
+      nx.incr_initial_provisioning
+      st.update(label: "update_billing_records")
+      expect { nx.update_billing_records }.to hop("wait")
+      expect(nx.initial_provisioning_set?).to be(false)
+    end
+
+    it "no-ops when mark_billing_deactivated is queued but the tag isn't yet written" do
+      # Tag NOT written; only the semaphore is queued.
+      nx.incr_update_billing_records
+      nx.incr_mark_billing_deactivated
+      st.update(label: "update_billing_records")
+      expect(nx).not_to receive(:create_billing_record)
+      expect { nx.update_billing_records }.to hop("wait")
+    end
+
+    it "delegates to super when the resource is not deactivated" do
+      nx.incr_update_billing_records
+      st.update(label: "update_billing_records")
+      expect { nx.update_billing_records }.to hop("wait")
+    end
+
+    it "calls super unconditionally when chc_postgres_deactivate_lockout flag is OFF (even if deactivated)" do
+      project.set_ff_chc_postgres_deactivate_lockout(false)
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
+      nx.incr_update_billing_records
+      st.update(label: "update_billing_records")
+      expect { nx.update_billing_records }.to hop("wait")
     end
   end
 
   describe "#mark_billing_deactivated" do
     before { postgres_server }
 
-    it "decrements the semaphore, finalizes billing, sets chc_state tag, and cascades to read replicas" do
+    it "writes chc_state BEFORE lockout (closes pg_hba race), then lockout/finalize/cascade, then chc_deactivated_at" do
+      primary = instance_double(PostgresServer, is_representative: true).tap { allow(it).to receive(:apply_lockout) }
+      standby = instance_double(PostgresServer, is_representative: false).tap { allow(it).to receive(:apply_lockout) }
       replica = instance_double(PostgresResource)
       br = instance_double(BillingRecord)
-      allow(nx.postgres_resource).to receive_messages(active_billing_records: [br], read_replicas: [replica])
+      allow(nx.postgres_resource).to receive_messages(servers: [primary, standby], active_billing_records: [br], read_replicas: [replica])
 
       expect(nx).to receive(:decr_mark_billing_deactivated)
+      # Customer's late /activate during the deactivate handler must survive.
+      expect(nx).not_to receive(:decr_mark_billing_activated)
       expect(br).to receive(:finalize)
+      expect(nx.postgres_resource).to receive(:update).ordered.and_call_original # phase 1: chc_state
+      expect(standby).to receive(:apply_lockout).ordered
+      expect(primary).to receive(:apply_lockout).ordered
       expect(replica).to receive(:incr_mark_billing_deactivated)
+      expect(nx.postgres_resource).to receive(:update).ordered.and_call_original # phase 3: chc_deactivated_at
 
       nx.mark_billing_deactivated
-      expect(nx.postgres_resource.reload.tags).to include({"key" => "chc_state", "value" => "deactivated"})
+      tags = nx.postgres_resource.reload.tags
+      expect(tags).to include({"key" => "chc_state", "value" => "deactivated"})
+      expect(tags.find { it["key"] == "chc_deactivated_at" }["value"]).to match(/\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\z/)
     end
 
-    it "replaces any pre-existing chc_state tag (idempotent) and preserves unrelated tags" do
-      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "env", "value" => "prod"}, {"key" => "chc_state", "value" => "deactivated"}]))
-      allow(nx.postgres_resource).to receive_messages(active_billing_records: [], read_replicas: [])
+    it "re-runs phase 2 and writes chc_deactivated_at when only chc_state is present (crash-mid-handler retry)" do
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
+      server = instance_double(PostgresServer, is_representative: true).tap { allow(it).to receive(:apply_lockout) }
+      allow(nx.postgres_resource).to receive_messages(servers: [server], active_billing_records: [], read_replicas: [])
+
+      expect(server).to receive(:apply_lockout)
+      nx.mark_billing_deactivated
+
+      tags = nx.postgres_resource.reload.tags
+      expect(tags.find { it["key"] == "chc_deactivated_at" }["value"]).to match(/\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\z/)
+    end
+
+    it "drains the semaphore and is otherwise a no-op when chc_state=deactivated tag is already set" do
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "env", "value" => "prod"}, {"key" => "chc_state", "value" => "deactivated"}, {"key" => "chc_deactivated_at", "value" => "2020-01-01T00:00:00Z"}]))
+      allow(nx.postgres_resource).to receive_messages(servers: [], active_billing_records: [], read_replicas: [])
+
+      expect(nx).to receive(:decr_mark_billing_deactivated)
+      expect(nx).not_to receive(:decr_mark_billing_activated)
+      nx.mark_billing_deactivated
+
+      tags = nx.postgres_resource.reload.tags
+      expect(tags.find { it["key"] == "chc_deactivated_at" }["value"]).to eq("2020-01-01T00:00:00Z")
+      expect(tags).to include({"key" => "env", "value" => "prod"})
+    end
+
+    it "writes a single chc_state and chc_deactivated_at tag pair when none existed before" do
+      postgres_resource.update(tags: Sequel.pg_jsonb([]))
+      allow(nx.postgres_resource).to receive_messages(servers: [], active_billing_records: [], read_replicas: [])
 
       nx.mark_billing_deactivated
 
       tags = nx.postgres_resource.reload.tags
-      expect(tags.count { it["key"] == "chc_state" }).to eq(1)
-      expect(tags).to include({"key" => "env", "value" => "prod"})
-      expect(tags).to include({"key" => "chc_state", "value" => "deactivated"})
+      expect(tags.map { it["key"] }.sort).to eq(["chc_deactivated_at", "chc_state"])
     end
 
-    it "writes a single chc_state tag when none existed before" do
+    it "legacy path when flag OFF: writes chc_state only, skips lockout, skips chc_deactivated_at" do
+      project.set_ff_chc_postgres_deactivate_lockout(false)
       postgres_resource.update(tags: Sequel.pg_jsonb([]))
-      allow(nx.postgres_resource).to receive_messages(active_billing_records: [], read_replicas: [])
+      server = instance_double(PostgresServer, is_representative: true).tap { allow(it).to receive(:apply_lockout) }
+      br = instance_double(BillingRecord)
+      allow(nx.postgres_resource).to receive_messages(servers: [server], active_billing_records: [br], read_replicas: [])
+
+      expect(server).not_to receive(:apply_lockout)
+      expect(br).to receive(:finalize)
+      expect(nx).to receive(:decr_mark_billing_deactivated)
 
       nx.mark_billing_deactivated
 
-      expect(nx.postgres_resource.reload.tags).to eq([{"key" => "chc_state", "value" => "deactivated"}])
+      tags = nx.postgres_resource.reload.tags
+      expect(tags).to include({"key" => "chc_state", "value" => "deactivated"})
+      expect(tags.map { it["key"] }).not_to include("chc_deactivated_at")
+    end
+
+    it "legacy path when flag OFF: retry-safe when tag already set — still finalizes, cascades, decrs" do
+      project.set_ff_chc_postgres_deactivate_lockout(false)
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
+      br = instance_double(BillingRecord)
+      replica = instance_double(PostgresResource)
+      allow(nx.postgres_resource).to receive_messages(servers: [], active_billing_records: [br], read_replicas: [replica])
+
+      expect(br).to receive(:finalize)
+      expect(replica).to receive(:incr_mark_billing_deactivated)
+      expect(nx).to receive(:decr_mark_billing_deactivated)
+      # Tag already set — must NOT rewrite.
+      expect(nx.postgres_resource).not_to receive(:update)
+      nx.mark_billing_deactivated
+    end
+  end
+
+  describe "#mark_billing_activated" do
+    before do
+      postgres_server
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "env", "value" => "prod"}, {"key" => "chc_state", "value" => "deactivated"}, {"key" => "chc_deactivated_at", "value" => "2026-06-20T00:00:00Z"}]))
+    end
+
+    it "clears chc_state and chc_deactivated_at (preserving others), reopens billing, configures each server, drains both billing-state semaphores, and does not cascade to replicas" do
+      server = instance_double(PostgresServer)
+      replica = instance_double(PostgresResource)
+      allow(nx.postgres_resource).to receive_messages(servers: [server], read_replicas: [replica])
+
+      expect(nx).to receive(:decr_mark_billing_activated)
+      expect(nx).to receive(:decr_mark_billing_deactivated)
+      expect(nx.postgres_resource).to receive(:incr_update_billing_records)
+      expect(server).to receive(:incr_configure)
+      expect(replica).not_to receive(:incr_mark_billing_activated)
+
+      nx.mark_billing_activated
+
+      tags = nx.postgres_resource.reload.tags
+      expect(tags).to eq([{"key" => "env", "value" => "prod"}])
+    end
+
+    it "runs the activate steps idempotently when no chc_state tag is present (recovers from crashed deactivate that locked HBA but didn't tag)" do
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "env", "value" => "prod"}]))
+      server = instance_double(PostgresServer)
+      allow(nx.postgres_resource).to receive_messages(servers: [server], read_replicas: [])
+      expect(nx).to receive(:decr_mark_billing_activated)
+      expect(nx).to receive(:decr_mark_billing_deactivated)
+      expect(nx.postgres_resource).to receive(:incr_update_billing_records)
+      expect(server).to receive(:incr_configure)
+
+      nx.mark_billing_activated
+
+      expect(nx.postgres_resource.reload.tags).to eq([{"key" => "env", "value" => "prod"}])
     end
   end
 
