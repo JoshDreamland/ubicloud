@@ -66,6 +66,15 @@ class PostgresResource < Sequel::Model
     "creating"
   end
 
+  # Update prog assemble method when updating this
+  def uses_publicly_signed_certificates?
+    !!(hostname_version == "v3" &&
+      Config.acme_email &&
+      location.dns_suffix.to_s.empty? &&
+      !project.get_ff_postgres_hostname_override &&
+      dns_zone)
+  end
+
   def hostname_suffix
     domain = (hostname_version == "v3") ? Config.postgres_service_hostname_v3 : Config.postgres_service_hostname
     project&.get_ff_postgres_hostname_override || [location.dns_suffix, domain].compact.join(".")
@@ -127,20 +136,38 @@ class PostgresResource < Sequel::Model
     "#{ubid}.#{hostname_suffix}"
   end
 
-  def connection_string
+  def libpq_ssl_params(channel_binding: true, publicly_signed: uses_publicly_signed_certificates?)
+    ssl_params = {"sslmode" => "require"}
+    ssl_params["channel_binding"] = "require" if channel_binding
+    if publicly_signed
+      ssl_params["sslmode"] = "verify-full"
+      ssl_params["sslrootcert"] = "system"
+    end
+    ssl_params
+  end
+
+  private def base_connection_string(hostname)
     URI::Generic.build2(
       scheme: "postgres",
       userinfo: "postgres:#{URI.encode_uri_component(superuser_password)}",
       host: hostname,
       port: 5432,
       path: "/postgres",
-      query: "channel_binding=require",
+      query: libpq_ssl_params.map { it.join("=") }.join("&"),
     ).to_s
+  end
+
+  def connection_string
+    base_connection_string(hostname)
+  end
+
+  def private_connection_string
+    base_connection_string(private_hostname)
   end
 
   def replication_connection_string(application_name:)
     query_parameters = {
-      sslrootcert: "/etc/ssl/certs/server-ca.crt",
+      sslrootcert: (root_cert_1 && root_cert_2) ? "/etc/ssl/certs/server-ca.crt" : "system",
       sslcert: "/etc/ssl/certs/client.crt",
       sslkey: "/etc/ssl/certs/client.key",
       sslmode: dns_zone ? "verify-full" : "require",
@@ -148,10 +175,9 @@ class PostgresResource < Sequel::Model
       application_name:,
       tcp_user_timeout: 30000,
     }
-    query_parameters.delete(:sslrootcert) unless root_cert_1 && root_cert_2
     query_parameters = query_parameters.map { |k, v| "#{k}=#{v}" }.join("&")
 
-    URI::Generic.build2(scheme: "postgres", userinfo: "ubi_replication", host: dns_zone ? identity : representative_server.vm.ip4_string, query: query_parameters).to_s
+    URI::Generic.build2(scheme: "postgres", userinfo: "ubi_replication", host: private_hostname, query: query_parameters).to_s
   end
 
   def provision_new_standby
@@ -202,6 +228,30 @@ class PostgresResource < Sequel::Model
 
   def in_maintenance_window?
     maintenance_window_start_at.nil? || (Time.now.utc.hour - maintenance_window_start_at) % 24 < MAINTENANCE_DURATION_IN_HOURS
+  end
+
+  # Returns array of any DNS record lookup failures
+  def check_all_dns_records
+    return [].freeze unless dns_zone && (vm = representative_server&.vm)
+
+    record_name = hostname
+    nameservers = dns_zone.dns_servers(eager: :vms).flat_map { it.vms.map(&:ip4_string) }
+
+    DnsChecker.open(nameservers) do |dns|
+      if location.aws?
+        dns.check(:CNAME, record_name, vm.aws_instance.ipv4_dns_name + ".")
+      else
+        dns.check(:A, record_name, vm.ip4_string)
+
+        unless dns_zone.records_dataset.where(type: "AAAA", name: record_name + ".").empty?
+          dns.check(:AAAA, record_name, vm.ip6_string)
+        end
+
+        record_name = private_hostname
+        dns.check(:A, record_name, vm.private_ipv4_string)
+        dns.check(:AAAA, record_name, vm.private_ipv6_string)
+      end
+    end
   end
 
   # This may return nil if the customer has destroyed the firewall or

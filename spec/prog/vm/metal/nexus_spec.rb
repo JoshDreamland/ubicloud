@@ -94,26 +94,27 @@ RSpec.describe Prog::Vm::Metal::Nexus do
       expect(st.stack.first["storage_volumes"].first["size_gib"]).to eq(40)
     end
 
-    it "sets track_written when ff_machine_image is set and single volume within size limit" do
-      project.set_ff_machine_image(true)
+    it "sets track_written for a single writeable volume" do
       st = Prog::Vm::Nexus.assemble("some_ssh key", project.id, storage_volumes: [{size_gib: 20}])
       expect(st.stack.first["storage_volumes"].first["track_written"]).to be(true)
     end
 
-    it "does not set track_written when ff_machine_image is not set" do
-      st = Prog::Vm::Nexus.assemble("some_ssh key", project.id, storage_volumes: [{size_gib: 20}])
-      expect(st.stack.first["storage_volumes"].first["track_written"]).to be(false)
-    end
-
-    it "does not set track_written if there are multiple storage volumes" do
-      project.set_ff_machine_image(true)
+    it "sets track_written on every writeable volume when there are multiple" do
       st = Prog::Vm::Nexus.assemble("some_ssh key", project.id, storage_volumes: [{size_gib: 20}, {size_gib: 10}])
-      expect(st.stack.first["storage_volumes"].first["track_written"]).to be(false)
+      expect(st.stack.first["storage_volumes"].map { it["track_written"] }).to eq([true, true])
     end
 
-    it "does not set track_written if storage volume size exceeds machine image max size even if ff_machine_image is set" do
-      project.set_ff_machine_image(true)
-      st = Prog::Vm::Nexus.assemble("some_ssh key", project.id, storage_volumes: [{size_gib: Config.machine_image_max_size_gib + 1}])
+    it "does not set track_written for a read-only volume" do
+      create_machine_image_version_metal(project_id: project.id)
+      st = Prog::Vm::Nexus.assemble("some_ssh key", project.id, boot_image: "test-mi@v1",
+        storage_volumes: [{size_gib: 20}, {size_gib: 10, read_only: true}])
+      _, rov = st.stack.first["storage_volumes"]
+      expect(rov["read_only"]).to be(true)
+      expect(rov["track_written"]).to be(false)
+    end
+
+    it "preserves an explicitly-provided track_written value" do
+      st = Prog::Vm::Nexus.assemble("some_ssh key", project.id, storage_volumes: [{size_gib: 20, track_written: false}])
       expect(st.stack.first["storage_volumes"].first["track_written"]).to be(false)
     end
 
@@ -200,8 +201,7 @@ RSpec.describe Prog::Vm::Metal::Nexus do
     it "uses a machine image if a base boot image is requested and boot_image@latest exists in the machine images service project" do
       mi_project = Project.create(name: "machine-images-service-project")
       expect(Config).to receive(:machine_images_service_project_id).at_least(:once).and_return(mi_project.id)
-      miv = create_machine_image_version_metal(project_id: mi_project.id, location_id: Location::HETZNER_FSN1_ID, name: "ubuntu-jammy").machine_image_version
-      miv.machine_image.update(latest_version_id: miv.id)
+      miv = create_machine_image_version_metal(project_id: mi_project.id, location_id: Location::HETZNER_FSN1_ID, name: "ubuntu-jammy", set_latest_version: true).machine_image_version
       vm = Prog::Vm::Nexus.assemble("some_ssh key", project.id, boot_image: "ubuntu-jammy", location_id: Location::HETZNER_FSN1_ID).subject
       expect(vm.vm_storage_volumes.first.machine_image_version_id).to eq(miv.id)
     end
@@ -325,11 +325,7 @@ RSpec.describe Prog::Vm::Metal::Nexus do
 
   describe ".lookup_machine_image_version" do
     let(:project_id) { Project.create(name: "test").id }
-    let(:miv) {
-      miv = create_machine_image_version_metal(project_id:, location_id: Location::HETZNER_FSN1_ID, name: "ubuntu-jammy").machine_image_version
-      miv.machine_image.update(latest_version_id: miv.id)
-      miv
-    }
+    let(:miv) { create_machine_image_version_metal(project_id:, location_id: Location::HETZNER_FSN1_ID, name: "ubuntu-jammy", set_latest_version: true).machine_image_version }
 
     it "looks up the machine image version for the VM's location and image" do
       miv
@@ -1425,6 +1421,7 @@ RSpec.describe Prog::Vm::Metal::Nexus do
     end
 
     it "detaches from gpu partition" do
+      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete_gpu_partition #{nx.vm_name}")
       expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10)
       expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq")
       expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete #{nx.vm_name}")

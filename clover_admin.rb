@@ -201,9 +201,69 @@ class CloverAdmin < Roda
     _classes { it < ResourceMethods::InstanceMethods }
   end
 
-  def semaphore_classes
-    _classes { it.respond_to?(:semaphore_names) }
+  def customer_vm_dataset
+    vm = Sequel[:vm]
+    customer_project_id = Sequel.function(:coalesce, Sequel[:pg][:project_id], Sequel[:kc][:project_id], Sequel[:gi][:project_id], vm[:project_id])
+    DB[:vm]
+      .left_join(Sequel[:postgres_server].as(:ps), vm_id: vm[:id])
+      .left_join(Sequel[:postgres_resource].as(:pg), id: Sequel[:ps][:resource_id])
+      .left_join(Sequel[:kubernetes_node].as(:kn), vm_id: vm[:id])
+      .left_join(Sequel[:kubernetes_cluster].as(:kc), id: Sequel[:kn][:kubernetes_cluster_id])
+      .left_join(Sequel[:github_runner].as(:gr), vm_id: vm[:id])
+      .left_join(Sequel[:github_installation].as(:gi), id: Sequel[:gr][:installation_id])
+      .select(
+        vm[:id].as(:vm_id),
+        vm[:name].as(:vm_name),
+        vm[:vcpus],
+        vm[:created_at],
+        vm[:vm_host_id],
+        customer_project_id.as(:project_id),
+        Sequel[:pg][:id].as(:pg_resource_id),
+        Sequel[:pg][:name].as(:pg_resource_name),
+        Sequel[:kc][:id].as(:kubernetes_cluster_id),
+        Sequel[:kc][:name].as(:kubernetes_cluster_name),
+        Sequel[:gr][:id].as(:github_runner_id),
+        Sequel[:gi][:name].as(:github_installation_name),
+      )
+      .from_self(alias: :cvm)
   end
+
+  # Classify a customer_vm_dataset row into a [type, resource_link] pair.
+  def customer_resource_type(row)
+    if row[:pg_resource_id]
+      ["PostgreSQL", table_link(row[:pg_resource_name], "/model/PostgresResource/#{UBID.to_ubid(row[:pg_resource_id])}")]
+    elsif row[:kubernetes_cluster_id]
+      ["Kubernetes", table_link(row[:kubernetes_cluster_name], "/model/KubernetesCluster/#{UBID.to_ubid(row[:kubernetes_cluster_id])}")]
+    elsif row[:github_runner_id]
+      ["GitHub Runner", table_link(row[:github_installation_name], "/model/GithubRunner/#{UBID.to_ubid(row[:github_runner_id])}")]
+    else
+      ["VM", nil]
+    end
+  end
+
+  # Email of the earliest-created account per project (one row per project via
+  # DISTINCT ON), used to make customers identifiable since project names are
+  # frequently just "Default".
+  def customer_email_dataset
+    DB[:access_tag]
+      .join(:accounts, id: Sequel[:access_tag][:hyper_tag_id])
+      .distinct(Sequel[:access_tag][:project_id])
+      .order(Sequel[:access_tag][:project_id], Sequel[:accounts][:created_at], Sequel[:accounts][:email])
+      .select(
+        Sequel[:access_tag][:project_id],
+        Sequel[:accounts][:email],
+      )
+  end
+
+  # Human-readable project label combining the project name with its account
+  # email, when present.
+  def project_label(name, email)
+    email ? "#{name} (#{email})" : name
+  end
+
+  ROLLOUT_SEMAPHORE_OPTIONS = Prog::RolloutSemaphore::ALLOWED_SEMAPHORES_PER_RESOURCE_TYPE.flat_map do |klass, semaphores|
+    semaphores.map { "#{klass.name} - #{it}" }
+  end.freeze
 
   skip_webauthn_requirement = Config.development? && Config.clover_admin_development_no_webauthn?
 
@@ -352,13 +412,24 @@ class CloverAdmin < Roda
     },
     "GithubRepository" => {
       "github_page" => github_page_action,
-      "show_job_log" => object_action("Show Job Log", params: {job_id: {typecast: :pos_int!, type: "number", attr: {min: 1, max: 2**63 - 1}}}, type: :content) do |obj, job_id|
-        url = obj.installation.client.workflow_run_job_logs(obj.name, job_id)
-        "<a href=\"#{Erubi.h(url)}\">Download Job Log</a>"
-      rescue Octokit::NotFound
-        "Job not found"
-      rescue Octokit::Error => e
-        "GitHub error: #{e.message}"
+      "show_job_log" => object_action("Show Job Log", params: {job_ids: {typecast: :nonempty_str!, label: "Job IDs (comma-separated)"}}, type: :content) do |obj, job_ids|
+        client = obj.installation.client
+        items = job_ids.split(",").filter_map do |job_id|
+          job_id.strip!
+          next if job_id.empty?
+
+          unless (id = Integer(job_id, exception: false)) && id.between?(1, 2**63 - 1)
+            next "<li>Job #{Erubi.h(job_id)}: invalid job ID</li>"
+          end
+
+          begin
+            url = client.workflow_run_job_logs(obj.name, id)
+            "<li><a href=\"#{Erubi.h(url)}\" target=\"_blank\">Job #{id}: Show Log</a></li>"
+          rescue Octokit::Error => e
+            "<li>Job #{id}: #{e.class}: #{Erubi.h(e.message)}</li>"
+          end
+        end
+        "<ol>#{items.join}</ol>"
       end,
     },
     "GithubRunner" => {
@@ -1185,16 +1256,17 @@ class CloverAdmin < Roda
 
       r.post "start", ROLLOUT_PROGS do |prog|
         st = if prog == "RolloutSemaphore"
-          klass, semaphore, increment = typecast_params.nonempty_str!(%w[class semaphore increment])
+          class_semaphore, increment = typecast_params.nonempty_str!(%w[class_semaphore increment])
           gap = typecast_params.pos_int!("gap")
           wait = typecast_params.nonempty_str("wait_label")
           location_id = typecast_params.ubid_uuid("location_id")
 
-          unless semaphore_classes.map(&:name).include?(klass) &&
-              (klass = Object.const_get(klass)).semaphore_names.include?(semaphore.to_sym)
+          unless ROLLOUT_SEMAPHORE_OPTIONS.include?(class_semaphore)
             flash["error"] = "invalid semaphore for class"
             r.redirect "/rollouts"
           end
+          klass_name, semaphore = class_semaphore.split(" - ", 2)
+          klass = Object.const_get(klass_name)
 
           ds = klass
           ds = ds.where(location_id:) if location_id && klass.columns.include?(:location_id)
@@ -1513,6 +1585,69 @@ class CloverAdmin < Roda
       end
 
       view("vm_host_usage")
+    end
+
+    r.get "customer-usage" do
+      count = Sequel.function(:count).*
+      vm_agg = customer_vm_dataset
+        .group(:project_id)
+        .select(
+          :project_id,
+          Sequel.function(:sum, :vcpus).as(:total_vcpus),
+          count.filter(pg_resource_id: nil, kubernetes_cluster_id: nil, github_runner_id: nil).as(:vm_count),
+          count.filter(Sequel.~(pg_resource_id: nil)).as(:postgres_count),
+          count.filter(Sequel.~(kubernetes_cluster_id: nil)).as(:kubernetes_count),
+          count.filter(Sequel.~(github_runner_id: nil)).as(:runner_count),
+        )
+
+      spend_agg = DB[:invoice]
+        .group(:project_id)
+        .select(
+          :project_id,
+          Sequel.function(:sum, Sequel.cast(Sequel.pg_jsonb_op(:content).get_text("cost"), :numeric)).as(:total_spend),
+        )
+
+      email_agg = customer_email_dataset
+
+      proj = Sequel[:project]
+      total_vcpus = Sequel.function(:coalesce, Sequel[:va][:total_vcpus], 0)
+      total_spend = Sequel.function(:coalesce, Sequel[:sa][:total_spend], 0)
+
+      @data = DB[:project]
+        .left_join(vm_agg.as(:va), project_id: proj[:id])
+        .left_join(spend_agg.as(:sa), project_id: proj[:id])
+        .left_join(email_agg.as(:ea), project_id: proj[:id])
+        # Only projects with attributed resources or invoices are customers.
+        .exclude(Sequel[:va][:project_id] => nil, Sequel[:sa][:project_id] => nil)
+        .select(
+          proj[:id],
+          proj[:name],
+          Sequel[:ea][:email],
+          proj[:reputation],
+          Sequel.function(:coalesce, Sequel[:va][:vm_count], 0).as(:vm_count),
+          Sequel.function(:coalesce, Sequel[:va][:postgres_count], 0).as(:postgres_count),
+          Sequel.function(:coalesce, Sequel[:va][:kubernetes_count], 0).as(:kubernetes_count),
+          Sequel.function(:coalesce, Sequel[:va][:runner_count], 0).as(:runner_count),
+          total_vcpus.as(:total_vcpus),
+          total_spend.as(:total_spend),
+        )
+        .order(Sequel.desc(total_vcpus), Sequel.desc(total_spend), Sequel.function(:lower, proj[:name]))
+        .map do |row|
+          ubid = UBID.to_ubid(row[:id])
+          name = project_label(row[:name], row[:email])
+          {
+            "Project" => table_link(name, "/model/Project/#{ubid}"),
+            "Reputation" => row[:reputation],
+            "VMs" => row[:vm_count],
+            "PostgreSQL" => row[:postgres_count],
+            "Kubernetes" => row[:kubernetes_count],
+            "Runners" => row[:runner_count],
+            "Total vCPUs" => row[:total_vcpus],
+            "Total Spend" => "$%.2f" % row[:total_spend],
+          }
+        end
+
+      view("customer_usage")
     end
 
     r.post "close-admin-account" do

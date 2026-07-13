@@ -43,8 +43,30 @@ RSpec.describe Prog::RolloutSemaphore do
       expect(frame.fetch("current")).to be_nil
     end
 
+    it "raises when ids reference more than one class" do
+      ids = [KubernetesCluster.generate_ubid.to_uuid, VmHost.generate_ubid.to_uuid]
+      expect { described_class.assemble(semaphore: "resolve", ids:) }.to raise_error(RuntimeError, "There cannot be more than one class type in a rollout")
+    end
+
     it "raises for invalid semaphore" do
-      expect { described_class.assemble(semaphore: "bad", ids: page_ids) }.to raise_error(RuntimeError, "Some classes do not support semaphores: Page")
+      expect { described_class.assemble(semaphore: "bad", ids: page_ids) }.to raise_error(RuntimeError, "Semaphore \"bad\" is not allow-listed for Page")
+    end
+
+    it "raises for a supported but non-allow-listed semaphore such as 'destroy'" do
+      kubernetes_cluster_id = KubernetesCluster.generate_ubid.to_uuid
+      expect { described_class.assemble(semaphore: "destroy", ids: [kubernetes_cluster_id]) }.to raise_error(RuntimeError, "Semaphore \"destroy\" is not allow-listed for KubernetesCluster")
+    end
+
+    it "raises for a class that has no allow-list entry at all" do
+      firewall_id = Firewall.generate_ubid.to_uuid
+      expect { described_class.assemble(semaphore: "destroy", ids: [firewall_id]) }.to raise_error(RuntimeError, "Semaphore \"destroy\" is not allow-listed for Firewall")
+    end
+
+    it "allows rolling out a semaphore that is allow-listed for the resource type" do
+      kubernetes_cluster_id = KubernetesCluster.generate_ubid.to_uuid
+      st = described_class.assemble(semaphore: "install_csi", ids: [kubernetes_cluster_id])
+      expect(st.label).to eq("start")
+      expect(st.stack.first["semaphore"]).to eq("install_csi")
     end
   end
 
