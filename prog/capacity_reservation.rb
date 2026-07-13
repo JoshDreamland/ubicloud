@@ -475,7 +475,8 @@ class Prog::CapacityReservation < Prog::Base
   # and subnet_az IS NOT NULL drops ones with no AZ -- both still counted in usage_raw via the
   # target, just not placed in az_raw. Every other placed server is counted, including one on a
   # fallback family or mid-resize; that only raises a per-AZ floor, which errs safely toward
-  # holding capacity (never strands a running VM).
+  # holding capacity (never strands a running VM). The count is DISTINCT on server id: the
+  # nic join yields one row per NIC, and dual-NIC VMs would otherwise count twice.
   def aggregate_usage
     rid = Sequel[:postgres_resource][:id]
     surviving = PostgresResource
@@ -492,7 +493,7 @@ class Prog::CapacityReservation < Prog::Base
       .join(:nic_aws_resource, id: Sequel[:nic][:id])
       .exclude(Sequel[:nic_aws_resource][:subnet_az] => nil)
       .group(Sequel[:postgres_resource][:target_vm_size], Sequel[:nic_aws_resource][:subnet_az])
-      .select_map([Sequel[:postgres_resource][:target_vm_size], Sequel[:nic_aws_resource][:subnet_az], Sequel.function(:count, 1).as(:count)])
+      .select_map([Sequel[:postgres_resource][:target_vm_size], Sequel[:nic_aws_resource][:subnet_az], Sequel.function(:count, Sequel[:postgres_server][:id]).distinct.as(:count)])
 
     [usage_raw, az_raw]
   end

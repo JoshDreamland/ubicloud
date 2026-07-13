@@ -415,6 +415,22 @@ RSpec.describe Prog::CapacityReservation do
       expect(usage).to eq({"c6gd.4xlarge" => 2})
       expect(per_az).to eq({"c6gd.4xlarge" => {"us-west-2a" => 1}})
     end
+
+    it "counts each server once per AZ regardless of how many NICs its VM has (dual-NIC layout)" do
+      location_credential_aws
+      resource = create_postgres_resource(project:, location_id: location.id)
+      resource.update(target_vm_size: "c6gd.4xlarge", ha_type: "none")
+      server = create_postgres_server(resource:)
+      user_nic = server.vm.nics.first
+      NicAwsResource.create_with_id(user_nic.id, subnet_az: "a")
+      mgmt_nic = Prog::Vnet::NicNexus.assemble(user_nic.private_subnet_id, name: "#{server.vm.name}-mgmt-nic", is_management: true).subject
+      mgmt_nic.update(vm_id: server.vm.id)
+      NicAwsResource.create_with_id(mgmt_nic.id, subnet_az: "a")
+
+      usage, per_az = nx.compute_current_usage
+      expect(usage).to eq({"c6gd.4xlarge" => 1})
+      expect(per_az).to eq({"c6gd.4xlarge" => {"us-west-2a" => 1}})
+    end
   end
 
   describe "#eligible_instance_types" do
