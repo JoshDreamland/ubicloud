@@ -1,5 +1,5 @@
 #!/bin/bash
-# Sync mise-managed tools to whatever .tool-versions specifies, then reconcile
+# Sync mise-managed tools to whatever mise.toml specifies, then reconcile
 # the bundle so native gems / git-sourced gems / new Gemfile.lock entries are
 # picked up.
 #
@@ -13,14 +13,14 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MISE="${MISE:-/home/vscode/.local/bin/mise}"
-TOOL_VERSIONS="$REPO_ROOT/.tool-versions"
+MISE_CONFIG="$REPO_ROOT/mise.toml"
 
 if [ ! -x "$MISE" ]; then
   echo "mise not found at $MISE (set MISE=... to override)" >&2
   exit 1
 fi
-if [ ! -f "$TOOL_VERSIONS" ]; then
-  echo ".tool-versions not found at $TOOL_VERSIONS" >&2
+if [ ! -f "$MISE_CONFIG" ]; then
+  echo "mise.toml not found at $MISE_CONFIG" >&2
   exit 1
 fi
 
@@ -30,18 +30,32 @@ cd "$REPO_ROOT"
 # shell still resolves tools to stale install dirs.
 CALLER_PATH="$PATH"
 
-echo "=== mise: installing tools listed in .tool-versions ==="
+# mise.toml can carry [env]/[tasks]/[hooks], so mise refuses to load it until the
+# path is trusted. The old .tool-versions (asdf format) never needed this.
+"$MISE" trust "$MISE_CONFIG"
+if [ -f "$REPO_ROOT/mise.local.toml" ]; then
+  "$MISE" trust "$REPO_ROOT/mise.local.toml"
+fi
+
+echo "=== mise: installing tools listed in mise.toml ==="
 "$MISE" install
 
-while IFS= read -r line; do
-  line="${line%%#*}"
-  [ -z "${line// /}" ] && continue
-  tool="$(echo "$line" | awk '{print $1}')"
-  version="$(echo "$line" | awk '{print $2}')"
+# Pin each tool globally too, so shims still resolve outside the repo tree
+# (mise.toml only governs the repo dir). Parse the [tools] table with tomllib
+# instead of a brittle shell TOML reader.
+while IFS=$'\t' read -r tool version; do
   [ -z "$tool" ] && continue
   [ -z "$version" ] && continue
   "$MISE" use --global "${tool}@${version}"
-done < "$TOOL_VERSIONS"
+done < <(python3 -c "
+import tomllib
+with open('$MISE_CONFIG', 'rb') as f:
+    data = tomllib.load(f)
+for name, spec in data.get('tools', {}).items():
+    version = spec if isinstance(spec, str) else spec.get('version', '')
+    if version:
+        print(f'{name}\t{version}')
+")
 
 # After `mise use --global`, the parent shell's PATH may still point at the
 # previously-active tool bin dirs (mise activate baked them in at shell start).
