@@ -9,7 +9,7 @@ on:
     branches:
       - main
     paths:
-      - '.tool-versions'
+      - 'mise.toml'
       - 'bin/monitor'
       - 'lib/monitor_runner.rb'
       - 'lib/monitor_repartitioner.rb'
@@ -22,7 +22,7 @@ on:
       - '.github/actions/setup-clover/action.yml'
   pull_request:
     paths:
-      - '.tool-versions'
+      - 'mise.toml'
       - 'bin/monitor'
       - 'lib/monitor_runner.rb'
       - 'lib/monitor_repartitioner.rb'

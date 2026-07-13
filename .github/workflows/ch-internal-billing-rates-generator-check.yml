@@ -22,7 +22,7 @@ jobs:
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: .tool-versions
+          ruby-version: mise.toml
 
       - name: Regenerate billing-rate overrides
         run: ruby bin/generate_billing_rates.rb
@@ -52,7 +52,7 @@ jobs:
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: .tool-versions
+          ruby-version: mise.toml
 
       - name: Check billing-rate coverage of instance availability
         id: coverage
@@ -110,7 +110,7 @@ jobs:
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: .tool-versions
+          ruby-version: mise.toml
 
       - name: Detect newly-available instance types vs PR base
         id: newavail

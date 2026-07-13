@@ -48,15 +48,6 @@ class Prog::Postgres::PostgresServerAwsNicMigration < Prog::Base
       rescue Aws::EC2::Errors::InvalidGroupDuplicate
         client.describe_security_groups(filters: [{name: "group-name", values: [group_name]}]).security_groups[0].group_id
       end
-<<<<<<< HEAD
-=======
-
-      Config.control_plane_outbound_cidrs.each do |cidr|
-        authorize_mgmt_ssh_ingress(sg_id, cidr)
-      end
-
-      ps_aws.update(mgmt_security_group_id: sg_id)
->>>>>>> 6568a967b15aee2515df3d5cc95ee8b53e7b0046
     end
 
     # Idempotent; also backfills IPv6 rules onto mgmt groups created before
@@ -382,10 +373,6 @@ class Prog::Postgres::PostgresServerAwsNicMigration < Prog::Base
     end
     client.authorize_security_group_ingress(group_id: sg_id, ip_permissions: [{ip_protocol: "tcp", from_port: 22, to_port: 22, **ranges}])
   rescue Aws::EC2::Errors::InvalidPermissionDuplicate
-<<<<<<< HEAD
-=======
-    nil
->>>>>>> 6568a967b15aee2515df3d5cc95ee8b53e7b0046
   end
 
   def get_network_interface(nic)

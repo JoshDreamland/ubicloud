@@ -4174,7 +4174,7 @@ components:
         - name
         - node_count
         - node_size
-<<<<<<< HEAD
+      x-go-name: KubernetesNodepoolSchema
     PostgresLocation:
       type: object
       properties:
@@ -4292,9 +4292,6 @@ components:
         - vcpu
         - memory_gib
         - storage_size_gib
-=======
-      x-go-name: KubernetesNodepoolSchema
->>>>>>> 6568a967b15aee2515df3d5cc95ee8b53e7b0046
     PostgresCapabilities:
       description: 'Tree of valid option combinations and metadata for each option value. The option_tree encodes parent-child dependencies: traverse from flavor -> location -> family -> size -> storage_size -> ha_type (with version branching from flavor). Only combinations present in the tree are valid for provisioning.'
       type: object

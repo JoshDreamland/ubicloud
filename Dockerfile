@@ -27,18 +27,11 @@ FROM docker.io/library/ruby:4.0.5-alpine3.23
 # - postgresql-client: Required for postgresql gem at runtime
 # - gcompat: Required for nokogiri gem at runtime. https://nokogiri.org/tutorials/installing_nokogiri.html#linux-musl-error-loading-shared-library
 # - foreman: Helps to start different parts of app based on Procfile
-<<<<<<< HEAD
 # - coreutils: to have same base binaries as local
 # - jemalloc: Reduces memory fragmentation; arch-independent path on Alpine
 ENV JEMALLOC_PATH=/usr/lib/libjemalloc.so.2
 RUN apk update --no-cache && \
     apk add tzdata curl postgresql-client gcompat libffi coreutils jemalloc --no-cache && \
-=======
-# - jemalloc: Reduces memory fragmentation; arch-independent path on Alpine
-ENV JEMALLOC_PATH=/usr/lib/libjemalloc.so.2
-RUN apk update --no-cache && \
-    apk add tzdata curl postgresql-client gcompat libffi jemalloc --no-cache && \
->>>>>>> 6568a967b15aee2515df3d5cc95ee8b53e7b0046
     test -f "$JEMALLOC_PATH" && \
     gem install foreman
 
@@ -66,12 +59,9 @@ RUN before="$(ls config/billing_rates/*.yml | sort)" && \
 ENV RACK_ENV=production
 ENV PORT=3000
 ENV LD_PRELOAD=${JEMALLOC_PATH}
-<<<<<<< HEAD
 ARG GIT_COMMIT_HASH
 ENV GIT_COMMIT_HASH=${GIT_COMMIT_HASH}
-=======
 
->>>>>>> 6568a967b15aee2515df3d5cc95ee8b53e7b0046
 EXPOSE 3000
 
 CMD ["foreman", "start"]

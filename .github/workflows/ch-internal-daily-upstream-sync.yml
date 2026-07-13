@@ -61,7 +61,7 @@ jobs:
           git remote add upstream https://github.com/ubicloud/ubicloud.git
           git fetch upstream
 
-      # Provides PostgreSQL 17, Ruby per .tool-versions, bundle install, and
+      # Provides PostgreSQL 17, Ruby per mise.toml, bundle install, and
       # the `clover` DB role. Required by 01_initiate.sh's refresh_schema_caches
       # helper (`bundle exec rake test_up`).
       - name: Setup Clover (Postgres + Ruby + bundle)

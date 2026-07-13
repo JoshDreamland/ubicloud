@@ -9,12 +9,12 @@ on:
     branches:
       - main
     paths:
-      - '.tool-versions'
+      - 'mise.toml'
       - 'kubernetes/csi/**'
       - '.github/workflows/kubernetes-csi-ci.yml'
   pull_request:
     paths:
-      - '.tool-versions'
+      - 'mise.toml'
       - 'kubernetes/csi/**'
       - '.github/workflows/kubernetes-csi-ci.yml'
 
