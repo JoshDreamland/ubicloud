@@ -527,6 +527,12 @@ module UbicloudSetup
     Clog.emit "Enabling AWS Postgres management SSH over IPv6 [postgres_aws_ssh_ipv6]"
     project.set_ff_postgres_aws_ssh_ipv6(true)
 
+    Clog.emit "Enabling weekly Postgres maintenance window days [postgres_enable_maintenance_window_days]"
+    project.set_ff_postgres_enable_maintenance_window_days(true)
+
+    Clog.emit "Restricting Postgres maintenance windows to platform-only events [postgres_maintenance_window_platform_only]"
+    project.set_ff_postgres_maintenance_window_platform_only(true)
+
     # Enable per-subnet (dedicated) GCP VPCs by default for the project, so each GCP
     # resource gets its own VPC instead of a shared per-location VPC. Column, not a ff.
     Clog.emit "Enabling GCP dedicated subnet VPCs [gcp_dedicated_subnet_vpcs]"
