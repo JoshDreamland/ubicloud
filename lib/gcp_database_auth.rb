@@ -1,9 +1,5 @@
 # frozen_string_literal: true
 
-require "sequel"
-require "uri"
-require "time"
-
 module GcpDatabaseAuth
   SCOPE = "https://www.googleapis.com/auth/sqlservice.login"
   SA_SUFFIX = ".gserviceaccount.com"
@@ -42,6 +38,37 @@ module GcpDatabaseAuth
       end
     end
 
+    def connect_opts_proc(sa_by_role)
+      lambda do |opts|
+        role = opts[:user]
+        service_account = sa_by_role[role]
+        raise Error, "no CloudSQL IAM SA mapped for role #{role.inspect}" unless service_account
+        opts[:user] = db_user_for(service_account)
+        opts[:password] = access_token(service_account:)
+        opts[:driver_options] = (opts[:driver_options] || {}).merge(options: role_connect_option(role))
+      end
+    end
+
+    # The CloudSQL IAM db username for a service account: the SA email minus its
+    # .gserviceaccount.com suffix.
+    def db_user_for(service_account) = service_account.delete_suffix(SA_SUFFIX)
+
+    # The Postgres role from the connection URL. Delegates to Sequel's own parser
+    # so the result always matches opts[:user] — userinfo or ?user= query param,
+    # percent-decoded. options_from_uri is a private class method (Sequel exposes
+    # no public URI->options parser), hence send.
+    def url_user(url)
+      Sequel::Database.send(:options_from_uri, URI.parse(url))[:user]
+    end
+
+    # libpq options value that SETs the active role at connection startup. nil for
+    # a blank role; a bare identifier is validated (fail-closed) otherwise.
+    def role_connect_option(role)
+      return nil if role.nil? || role.empty?
+      raise ArgumentError, "invalid role identifier: #{role.inspect}" unless role.match?(/\A[a-z_][a-z0-9_]*\z/)
+      "-c role=#{role}"
+    end
+
     private
 
     # A still-valid cached token for the SA (> 5 minutes to expiry), else nil.
@@ -70,58 +97,4 @@ module GcpDatabaseAuth
       raise e.class, "generateAccessToken for #{sa_email.inspect} failed: #{e.message}: #{e.body}", e.backtrace
     end
   end
-
-  # The CloudSQL IAM db username for a service account: the SA email minus its
-  # .gserviceaccount.com suffix. Used by the hook as the libpq login user.
-  def self.db_user_for(sa) = sa.delete_suffix(SA_SUFFIX)
-
-  # The Postgres role from the connection URL. Delegates to Sequel's own parser
-  # so the result always matches opts[:user] — userinfo or ?user= query param,
-  # percent-decoded. options_from_uri is a private class method (Sequel exposes
-  # no public URI->options parser), hence send.
-  def self.url_user(url)
-    Sequel::Database.send(:options_from_uri, URI.parse(url))[:user]
-  end
-
-  # Switch the active role at startup to back what was in the original opts
-  def self.role_connect_option(role)
-    return nil if role.nil? || role.empty?
-    raise ArgumentError, "invalid role identifier: #{role.inspect}" unless role.match?(/\A[a-z_][a-z0-9_]*\z/)
-    "-c role=#{role}"
-  end
-
-  # Prepended onto Sequel::Postgres::Database. For a connection carrying the
-  # role->SA map in its driver_options, the connection's :user names the desired
-  # role: impersonate that role's SA for the token (password), connect as the SA's
-  # db username, and switch the active role via the native option. Connections without the
-  # map pass through untouched.
-  module ServerOptsInjection
-    def server_opts(server)
-      opts = super
-      map = opts.dig(:driver_options, :gcp_cloudsql_iam_sa_by_role)
-      return opts unless map
-
-      role = opts[:user]
-      service_account = map[role]
-      raise Error, "no CloudSQL IAM SA mapped for role #{role.inspect}" unless service_account
-
-      opts = opts.dup
-      driver_options = opts[:driver_options].dup
-      driver_options.delete(:gcp_cloudsql_iam_sa_by_role)
-      opts[:user] = GcpDatabaseAuth.db_user_for(service_account)
-      opts[:password] = GcpDatabaseAuth.access_token(service_account:)
-      # role is the connection's user (a matched map key, always present), so
-      # role_connect_option returns the option string here
-      opts[:driver_options] = driver_options.merge(options: GcpDatabaseAuth.role_connect_option(role))
-      opts
-    end
-  end
 end
-
-# Activate the injection. load_adapter ensures Sequel::Postgres::Database exists
-# even though db.rb only requires "sequel/core" (adapters are otherwise lazy) —
-# a bare `if defined?` guard would silently skip the prepend at this point and
-# the token would never be injected. The prepend is marker-gated, so it is inert
-# on connections without the role->SA map (incl. all customer-DB connections).
-Sequel::Database.load_adapter(:postgres)
-Sequel::Postgres::Database.prepend(GcpDatabaseAuth::ServerOptsInjection)

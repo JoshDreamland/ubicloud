@@ -145,45 +145,31 @@ RSpec.describe GcpDatabaseAuth do
     end
   end
 
-  describe GcpDatabaseAuth::ServerOptsInjection do
-    before { GcpDatabaseAuth.reset_cache! }
+  describe ".connect_opts_proc" do
+    before { described_class.reset_cache! }
 
     let(:sa) { "clover-sa@my-project.iam.gserviceaccount.com" }
-    let(:map) { {"clover" => sa} }
+    let(:opts_proc) { described_class.connect_opts_proc({"clover" => sa}) }
 
-    # Build a throwaway Database-like class whose #server_opts returns the given
-    # hash, then prepend the injection and call through it.
-    def hooked(server_opts_hash)
-      klass = Class.new do
-        define_method(:server_opts) { |_server| server_opts_hash }
-      end
-      klass.prepend(GcpDatabaseAuth::ServerOptsInjection)
-      klass.new.server_opts(nil)
-    end
-
-    it "injects the token + login user + role option for a mapped role, stripping the marker" do
+    it "rewrites opts with the SA login user, minted-token password, and role option" do
       stub_iam_credentials { |_resource| "minted-token" }
-      out = hooked(user: "clover", driver_options: {gcp_cloudsql_iam_sa_by_role: map})
-      expect(out[:user]).to eq("clover-sa@my-project.iam")
-      expect(out[:password]).to eq("minted-token")
-      expect(out[:driver_options][:options]).to eq("-c role=clover")
-      expect(out[:driver_options]).not_to have_key(:gcp_cloudsql_iam_sa_by_role)
+      opts = {user: "clover"}
+      opts_proc.call(opts)
+      expect(opts[:user]).to eq("clover-sa@my-project.iam")
+      expect(opts[:password]).to eq("minted-token")
+      expect(opts[:driver_options][:options]).to eq("-c role=clover")
     end
 
     it "raises a GcpDatabaseAuth::Error for a role not in the map" do
-      expect { hooked(user: "nope", driver_options: {gcp_cloudsql_iam_sa_by_role: map}) }
+      expect { opts_proc.call({user: "nope"}) }
         .to raise_error(GcpDatabaseAuth::Error, /no CloudSQL IAM SA mapped for role "nope"/)
     end
 
-    it "passes opts through untouched when the marker is absent (customer DBs / legacy)" do
-      expect(hooked(user: "u")).to eq(user: "u")
-    end
-
-    it "does not mutate the caller's driver_options hash" do
+    it "does not mutate the caller's existing driver_options hash" do
       stub_iam_credentials { |_resource| "minted-token" }
-      driver_options = {gcp_cloudsql_iam_sa_by_role: map}
-      hooked(user: "clover", driver_options:)
-      expect(driver_options).to eq(gcp_cloudsql_iam_sa_by_role: map)
+      driver_options = {}
+      opts_proc.call({user: "clover", driver_options:})
+      expect(driver_options).to eq({})
     end
   end
 end
