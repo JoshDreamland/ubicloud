@@ -86,13 +86,20 @@ RSpec.describe PrivateSubnet do
       expect(ps.random_private_ipv4.to_s).to eq "10.9.39.9/32"
     end
 
-    it "does not subtract any reservation for bigger parent subnets" do
+    it "skips the sub-blocks containing the reserved edge addresses for bigger parent subnets" do
       prj = Project.create(name: "big-net-prj")
       ps = described_class.create(name: "big-ps", location_id: Location::HETZNER_FSN1_ID,
         net6: "fd1b:9793:dcef:cd0a::/64", net4: "10.9.0.0/16",
         state: "waiting", project_id: prj.id)
-      expect(SecureRandom).to receive(:random_number).with(256).and_return(5)
-      expect(ps.random_private_ipv4.to_s).to eq "10.9.5.0/24"
+      (1..254).each do |i|
+        Nic.create(private_subnet_id: ps.id, private_ipv4: "10.9.#{i}.0/24",
+          private_ipv6: "fd1b:9793:dcef:cd0a:#{(i * 2).to_s(16)}::/79",
+          mac: format("00:00:00:00:%02x:%02x", i / 256, i % 256),
+          name: "nic-#{i}", state: "active")
+      end
+      # Only the reserved first and last /24 remain free; the allocator
+      # must exhaust its draws rather than ever select one of them.
+      expect { ps.random_private_ipv4 }.to raise_error(RuntimeError, "Could not find random IPv4 after 1000 iterations")
     end
 
     it "returns random private ipv6" do
@@ -455,6 +462,41 @@ RSpec.describe PrivateSubnet do
       expect(ps1.all_nics.map(&:id)).to eq [ps1_nic.id]
     end
 
+    it "connect_subnet signals refresh_keys only on the peer under v1" do
+      ps2 = Prog::Vnet::SubnetNexus.assemble(prj.id, name: "test-ps2", location_id: Location::HETZNER_FSN1_ID).subject
+      ps1.connect_subnet(ps2)
+      expect(ps1.refresh_keys_set?).to be false
+      expect(ps2.refresh_keys_set?).to be true
+    end
+
+    it "connect_subnet signals refresh_keys on both sides under v2" do
+      ps2 = Prog::Vnet::SubnetNexus.assemble(prj.id, name: "test-ps2", location_id: Location::HETZNER_FSN1_ID).subject
+      ps1.update(rekey_protocol: 2)
+      ps2.update(rekey_protocol: 2)
+      ps1.connect_subnet(ps2)
+      expect(ps1.refresh_keys_set?).to be true
+      expect(ps2.refresh_keys_set?).to be true
+    end
+
+    it "connect_subnet downgrades the mesh protocol to v1 only when the joined meshes differ" do
+      ps2 = Prog::Vnet::SubnetNexus.assemble(prj.id, name: "test-ps2", location_id: Location::HETZNER_FSN1_ID).subject
+      ps3 = Prog::Vnet::SubnetNexus.assemble(prj.id, name: "test-ps3", location_id: Location::HETZNER_FSN1_ID).subject
+      ps1.update(rekey_protocol: 2)
+      ps2.update(rekey_protocol: 2)
+      ps1.connect_subnet(ps2)
+      expect([ps1, ps2].map { it.reload.rekey_protocol }).to eq [2, 2]
+      ps2.connect_subnet(ps3)
+      expect([ps1, ps2, ps3].map { it.reload.rekey_protocol }).to eq [1, 1, 1]
+    end
+
+    it "connect_subnet signals only the peer when the merge downgrades the mesh to v1" do
+      ps2 = Prog::Vnet::SubnetNexus.assemble(prj.id, name: "test-ps2", location_id: Location::HETZNER_FSN1_ID).subject
+      ps1.update(rekey_protocol: 2)
+      ps1.connect_subnet(ps2)
+      expect(ps1.refresh_keys_set?).to be false
+      expect(ps2.refresh_keys_set?).to be true
+    end
+
     it "disconnect_subnet does not destroy in subnet tunnels" do
       ps2 = Prog::Vnet::SubnetNexus.assemble(prj.id, name: "test-ps2", location_id: Location::HETZNER_FSN1_ID).subject
       ps1_nic = Prog::Vnet::NicNexus.assemble(ps1.id, name: "test-ps1-nic1").subject
@@ -689,6 +731,35 @@ RSpec.describe PrivateSubnet do
         end
         expect(leader_id).to eq(nics.map(&:private_subnet_id).min)
       end
+    end
+  end
+
+  describe "#flip_mesh_rekey_protocol!" do
+    let(:flip_project) { Project.create(name: "test-flip") }
+
+    def create_subnet(n)
+      ps = PrivateSubnet.create_with_id(format("00000000-0000-0000-0000-%012d", n), name: "psflip#{n}",
+        location_id: Location::HETZNER_FSN1_ID, net6: "fd1b:9793:dcef:#{format("%04x", n)}::/64",
+        net4: "10.#{n}.0.0/16", state: "waiting", project_id: flip_project.id)
+      Strand.create_with_id(ps, prog: "Vnet::Metal::SubnetNexus", label: "wait")
+      ps
+    end
+
+    it "flips every mesh member from any member, including subnets without nics" do
+      s1, s2, s3, bystander = [1, 2, 3, 4].map { create_subnet(it) }
+      Nic.create(private_subnet_id: s1.id, private_ipv6: "fd1b:9793:dcef:1:abc::", private_ipv4: "10.1.0.5", mac: "00:00:00:00:00:00", name: "flip-nic", state: "active")
+      s1.connect_subnet(s2)
+      s2.connect_subnet(s3)
+      s3.flip_mesh_rekey_protocol!(2)
+      expect([s1, s2, s3].map { it.reload.rekey_protocol }).to eq [2, 2, 2]
+      expect(bystander.reload.rekey_protocol).to eq 1
+    end
+
+    it "flips a standalone subnet alone" do
+      s1, other = [1, 2].map { create_subnet(it) }
+      s1.flip_mesh_rekey_protocol!(2)
+      expect(s1.reload.rekey_protocol).to eq 2
+      expect(other.reload.rekey_protocol).to eq 1
     end
   end
 

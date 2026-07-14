@@ -1153,7 +1153,21 @@ RSpec.describe Clover, "postgres" do
     end
 
     describe "ca-certificates" do
-      it "sets maintenance window to nil when empty string is passed" do
+      it "does not show link if certificates are not available, and shows error if they are requested" do
+        visit "#{project.path}#{pg.path}/connection"
+        expect(page).to have_no_content "CA Certificates"
+
+        visit "#{project.path}#{pg.path}/ca-certificates"
+        expect(page).to have_flash_error "Certificate authority certificates for this database have not yet been generated"
+
+        pg.update(hostname_version: "v3")
+        expect(Config).to receive(:acme_email).and_return("acme@example.com").at_least(:once)
+        DnsZone.create(project_id: postgres_project.id, name: "pg.ubicloud.app")
+        visit "#{project.path}#{pg.path}/ca-certificates"
+        expect(page).to have_flash_error "This database uses certificates from a public signed certificate authority"
+      end
+
+      it "downloads certificates if available" do
         pg.update(root_cert_1: "a", root_cert_2: "b")
         pg.strand.update(label: "wait")
         visit "#{project.path}#{pg.path}/connection"
@@ -1182,6 +1196,32 @@ RSpec.describe Clover, "postgres" do
         select "00:00 - 02:00 (UTC)", from: "maintenance_window_start_at"
         click_button "Set"
         expect(pg.reload.maintenance_window_start_at).to eq(0)
+      end
+
+      it "sets maintenance window days" do
+        project.set_ff_postgres_enable_maintenance_window_days(true)
+        visit "#{project.path}#{pg.path}/settings"
+
+        select "09:00 - 11:00 (UTC)", from: "maintenance_window_start_at"
+        check "mon"
+        check "wed"
+        click_button "Set"
+
+        pg.reload
+        expect(pg.maintenance_window_start_at).to eq(9)
+        expect(pg.maintenance_window_day_names).to eq(["mon", "wed"])
+      end
+
+      it "clears maintenance window days when unchecked" do
+        project.set_ff_postgres_enable_maintenance_window_days(true)
+        pg.update(maintenance_window_start_at: 9, maintenance_window_days_bitmask: (1 << 0))
+        visit "#{project.path}#{pg.path}/settings"
+
+        uncheck "mon"
+        click_button "Set"
+
+        pg.reload
+        expect(pg.maintenance_window_days_bitmask).to eq(0)
       end
     end
 

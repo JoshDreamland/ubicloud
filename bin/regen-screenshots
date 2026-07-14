@@ -117,9 +117,6 @@ class RegenScreenshots
     screenshot "github-actions-integration/quickstart-2-screenshot.png"
 
     GithubInstallation.create(installation_id: 123, name: "ubicloud-demo", type: "Organization", project_id: project.id, allocator_preferences: {"family_filter" => ["premium", "standard"]})
-    page.refresh
-    click_link "Settings", class: "text-gray-500"
-    screenshot "github-actions-integration/use-premium-runners-1-screenshot.png"
 
     resize(650)
     click_link "Tokens"
@@ -197,6 +194,7 @@ class RegenScreenshots
       firewall_id: pg_firewall.id,
       cidr: "0.0.0.0/0",
       port_range: 5432..5432)
+    pg_firewall.associate_with_private_subnet(pg_private_subnet, apply_firewalls: false)
 
     PostgresResource.define_method(:connection_string) { "sample-connection-string" }
     PostgresResource.define_method(:ca_certificates) { "certs" }
@@ -342,6 +340,16 @@ class RegenScreenshots
     Config.define_singleton_method(:postgres_service_project_id) { project.id }
 
     pg_resource.add_log_destination(name: "Datadog-prod", type: "otlp", url: "https://otlp.intake.datadoghq.com")
+    DnsZone.create_with_id(UBID.to_uuid("dzxw2srzknzj7gkec0a6f63zzg"),
+      name: pg_resource.hostname_suffix,
+      project_id: pg_resource.project_id)
+    connected_subnet = PrivateSubnet.create_with_id(UBID.to_uuid("psvnqa55gpgp2jwcf2ny6fnq1d"),
+      net6: "1234::/64",
+      net4: "100.200.0.0/16",
+      name: "pg-connected-subnet",
+      project_id: pg_resource.project_id,
+      location_id: pg_resource.location_id)
+    pg_resource.private_subnet.connect_subnet(connected_subnet)
 
     resize(900, width: 1600)
     click_link "PostgreSQL"
@@ -366,6 +374,11 @@ class RegenScreenshots
     end
     screenshot "managed-postgresql/networking-screenshot.png"
 
+    pg_path = page.current_path
+    click_link "manage firewall rules using the firewall for this PostgreSQL database"
+    screenshot "managed-postgresql/firewall-networking-screenshot.png"
+
+    visit pg_path
     resize(1200, width: 1600)
     click_link "Resize"
     screenshot "managed-postgresql/resizing-screenshot.png"

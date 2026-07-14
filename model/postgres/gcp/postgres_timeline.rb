@@ -13,12 +13,19 @@ class PostgresTimeline < Sequel::Model
 GOOGLE_APPLICATION_CREDENTIALS=/etc/postgresql/gcs-sa-key.json
         WALG_CONF
       end
-      <<-WALG_CONF
+      config = <<-WALG_CONF
 WALG_GS_PREFIX=gs://#{ubid}
 #{walg_credentials}
 PGHOST=/var/run/postgresql
 PGDATA=/dat/#{version}/data
       WALG_CONF
+      config + walg_config_env_contents
+    end
+
+    def gcp_walg_config_params
+      return nil unless (vm = leader.vm)
+
+      {vcpu_count: vm.vcpus, memory_mib: vm.memory_gib * 1024}
     end
 
     def gcp_walg_config_region
