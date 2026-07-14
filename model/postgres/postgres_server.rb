@@ -55,6 +55,7 @@ class PostgresServer < Sequel::Model
       "wal_keep_size" => "96MB",
       "wal_compression" => "lz4",
       "default_toast_compression" => "lz4",
+      "recovery_init_sync_method" => "syncfs",
       "random_page_cost" => "1.1",
       "effective_cache_size" => "#{vm.memory_gib * 1024 * 3 / 4}MB",
       "effective_io_concurrency" => "200",
@@ -148,7 +149,7 @@ class PostgresServer < Sequel::Model
       },
       cert_auth_users: resource.cert_auth_users,
       identity: resource.identity,
-      hosts: "#{resource.representative_server.vm.private_ipv4} #{resource.identity}",
+      hosts: "#{resource.representative_server.vm.private_ipv4} #{resource.private_hostname}",
       pgbouncer_instances: (vm.vcpus / 2.0).ceil.clamp(1, 8),
       metrics_config:,
       disk_throughput_baseline_mbps:,
@@ -251,7 +252,7 @@ class PostgresServer < Sequel::Model
   end
 
   def current_lsn
-    run_query(DB.select(Sequel.function(lsn_function_name)))
+    run_query(DB.select(last_lsn_expression))
   end
 
   def data_disk_usage(raise_on_error: false)
@@ -330,14 +331,12 @@ class PostgresServer < Sequel::Model
     primary_slots.reject { |name, lsn| synced[name] && lsn_diff(synced[name], lsn) >= 0 }.map(&:first)
   end
 
-  def lsn_function_name
-    if primary?
-      "pg_current_wal_lsn"
-    elsif standby? && strand.label != "wait_catch_up"
-      "pg_last_wal_receive_lsn"
-    else
-      "pg_last_wal_replay_lsn"
-    end
+  def last_lsn_expression
+    in_recovery_fn = (standby? && strand.label != "wait_catch_up") ? :pg_last_wal_receive_lsn : :pg_last_wal_replay_lsn
+    Sequel.case(
+      [[Sequel.function(:pg_is_in_recovery), Sequel.function(in_recovery_fn)]],
+      Sequel.function(:pg_current_wal_lsn),
+    )
   end
 
   def init_health_monitor_session
@@ -362,7 +361,7 @@ class PostgresServer < Sequel::Model
   def check_pulse(session:, previous_pulse:)
     reading = begin
       session[:db_connection] ||= Sequel.connect(adapter: "postgres", host: health_monitor_socket_path, port: 5432, database: "postgres", user: "postgres", connect_timeout: 4, keep_reference: false)
-      last_known_lsn = session[:db_connection].get(Sequel.function(lsn_function_name).as(:lsn))
+      last_known_lsn = session[:db_connection].get(last_lsn_expression.as(:lsn))
       "up"
     rescue
       "down"

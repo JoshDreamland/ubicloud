@@ -778,6 +778,76 @@ RSpec.describe CloverAdmin do
     expect(page.all(".project-usage-table tbody tr").first.all("td").map(&:text)).to eq ["test-vm", "VmVCpu", "standard", "61 minutes", "$0.047"]
   end
 
+  it "shows hosted resources and utilized VM hosts for a Project as extra" do
+    project = Project.create(name: "some-customer")
+    other_project = Project.create(name: "some-other-customer")
+    service_project = Project.create(name: "internal-service")
+    vm_host = create_vm_host
+    other_vm_host = create_vm_host(location_id: Location::HETZNER_HEL1_ID, allocation_state: "draining")
+
+    # A VM owned by another project on the same host must never appear here.
+    create_vm(vm_host_id: vm_host.id, project_id: other_project.id, name: "other-project-vm")
+
+    reload = -> {
+      visit "/model/Project/#{project.ubid}"
+      page.all("summary").each(&:click)
+    }
+    hosts_rows = -> { page.all(".project-vm-hosts-table tbody tr").map { it.all("td").map(&:text) } }
+    resource_rows = -> { page.all(".project-resources-table tbody tr").map { it.all("td").map(&:text).first(4) }.sort_by { it[2] } }
+
+    # Before any resource is hosted for this project: no resource/host tables.
+    reload.call
+    expect(page).to have_no_css(".project-resources-table")
+    expect(page).to have_no_css(".project-vm-hosts-table")
+
+    # Plain customer VM, owned directly by the project.
+    create_vm(vm_host_id: vm_host.id, project_id: project.id, name: "customer-vm")
+    reload.call
+    expect(page.all(".project-resources-table thead th").map(&:text)).to eq(["Type", "Resource", "VM", "VM Host", "vCPUs", "Created At"])
+    expect(page.all(".project-vm-hosts-table thead th").map(&:text)).to eq(["VM Host", "Location", "State", "VMs", "PostgreSQL", "Kubernetes", "GitHub Runners", "Total"])
+    expect(resource_rows.call).to eq([["VM", "", "customer-vm", vm_host.ubid]])
+    expect(hosts_rows.call).to eq([[vm_host.ubid, "hetzner-fsn1", "accepting", "1", "0", "0", "0", "1"]])
+
+    pg = create_postgres_resource(project:, location_id: vm_host.location_id)
+    pg_vm = create_postgres_server(resource: pg).vm
+    pg_vm.update(vm_host_id: vm_host.id, project_id: service_project.id)
+    reload.call
+    expect(resource_rows.call).to eq([
+      ["VM", "", "customer-vm", vm_host.ubid],
+      ["PostgreSQL", pg.name, pg_vm.name, vm_host.ubid],
+    ].sort_by { it[2] })
+    expect(hosts_rows.call).to eq([[vm_host.ubid, "hetzner-fsn1", "accepting", "1", "1", "0", "0", "2"]])
+
+    k8s_ps = PrivateSubnet.create(name: "k8s-ps", project_id: project.id, location_id: vm_host.location_id, net4: "10.1.0.0/26", net6: "fdfb::/64")
+    cluster = KubernetesCluster.create(project_id: project.id, name: "k8s-cluster", private_subnet_id: k8s_ps.id, location_id: vm_host.location_id, cp_node_count: 1, version: Option.selectable_kubernetes_versions.first, target_node_size: "standard-2")
+    KubernetesNode.create(kubernetes_cluster_id: cluster.id, vm_id: create_vm(vm_host_id: vm_host.id, project_id: service_project.id, name: "k8s-vm").id)
+    reload.call
+    expect(resource_rows.call).to eq([
+      ["VM", "", "customer-vm", vm_host.ubid],
+      ["PostgreSQL", pg.name, pg_vm.name, vm_host.ubid],
+      ["Kubernetes", "k8s-cluster", "k8s-vm", vm_host.ubid],
+    ].sort_by { it[2] })
+    expect(hosts_rows.call).to eq([[vm_host.ubid, "hetzner-fsn1", "accepting", "1", "1", "1", "0", "3"]])
+
+    # The GitHub runner runs on the other host, so a second host row appears.
+    installation = GithubInstallation.create(installation_id: 99, name: "gh-org", type: "Organization", project_id: project.id)
+    gh_vm = create_vm(vm_host_id: other_vm_host.id, project_id: service_project.id, name: "gh-runner-vm")
+    GithubRunner.create(vm_id: gh_vm.id, repository_name: "repo", label: "ubicloud", installation_id: installation.id)
+    reload.call
+    expect(resource_rows.call).to eq([
+      ["VM", "", "customer-vm", vm_host.ubid],
+      ["PostgreSQL", pg.name, pg_vm.name, vm_host.ubid],
+      ["Kubernetes", "k8s-cluster", "k8s-vm", vm_host.ubid],
+      ["GitHub Runner", "gh-org", "gh-runner-vm", other_vm_host.ubid],
+    ].sort_by { it[2] })
+    expect(hosts_rows.call).to eq([
+      [vm_host.ubid, "hetzner-fsn1", "accepting", "1", "1", "1", "0", "3"],
+      [other_vm_host.ubid, "hetzner-hel1", "draining", "0", "0", "0", "1", "1"],
+    ].sort_by(&:first))
+
+    expect(page).to have_no_content("other-project-vm")
+  end
+
   it "converts ubids to link" do
     p = Page.create(summary: "test", tag: "a", details: {"related_resources" => [vm_pool.ubid, "cc489f465gqa5pzq04gch3162h"]})
     fill_in "UBID, UUID, or prefix:term", with: p.ubid
@@ -1405,20 +1475,20 @@ RSpec.describe CloverAdmin do
     click_link "Show Job Log"
     expect(page.title).to eq "Ubicloud Admin - GithubRepository #{repo.ubid}"
 
+    fill_in "job_ids", with: " "
+    click_button "Show Job Log"
+    expect(page).to have_flash_error("Invalid parameter submitted: job_ids")
+
     client = double
     expect(Github).to receive(:installation_client).and_return(client)
-    expect(client).to receive(:workflow_run_job_logs).with("test-org/test-repo", 12345).and_return("https://example.com/logs/12345.zip")
+    expect(client).to receive(:workflow_run_job_logs).with("test-org/test-repo", 12345).and_return("https://example.com/logs/12345")
 
-    fill_in "job_id", with: "bad"
+    fill_in "job_ids", with: "12345"
     click_button "Show Job Log"
-    expect(page).to have_flash_error("Invalid parameter submitted: job_id")
-
-    fill_in "job_id", with: "12345"
-    click_button "Show Job Log"
-    expect(page).to have_link("Download Job Log", href: "https://example.com/logs/12345.zip")
+    expect(page).to have_link("Job 12345: Show Log", href: "https://example.com/logs/12345")
   end
 
-  it "shows job not found for GithubRepository when job id is invalid" do
+  it "supports showing job logs for multiple job ids for GithubRepository" do
     ins = GithubInstallation.create(installation_id: 123, name: "test-org", type: "Organization")
     repo = GithubRepository.create(name: "test-org/test-repo", installation_id: ins.id)
 
@@ -1427,14 +1497,17 @@ RSpec.describe CloverAdmin do
 
     client = double
     expect(Github).to receive(:installation_client).and_return(client)
+    expect(client).to receive(:workflow_run_job_logs).with("test-org/test-repo", 12345).and_return("https://example.com/logs/12345")
     expect(client).to receive(:workflow_run_job_logs).with("test-org/test-repo", 99999).and_raise(Octokit::NotFound)
 
-    fill_in "job_id", with: "99999"
+    fill_in "job_ids", with: "12345, , 99999, bad,"
     click_button "Show Job Log"
-    expect(page).to have_content("Job not found")
+    expect(page).to have_link("Job 12345: Show Log", href: "https://example.com/logs/12345")
+    expect(page).to have_content("Job 99999: Octokit::NotFound: Octokit::NotFound")
+    expect(page).to have_content("Job bad: invalid job ID")
   end
 
-  it "shows job not found for GithubRepository when job id is deprecated" do
+  it "shows GitHub error for GithubRepository when job id is deprecated" do
     ins = GithubInstallation.create(installation_id: 123, name: "test-org", type: "Organization")
     repo = GithubRepository.create(name: "test-org/test-repo", installation_id: ins.id)
 
@@ -1445,9 +1518,9 @@ RSpec.describe CloverAdmin do
     expect(Github).to receive(:installation_client).and_return(client)
     expect(client).to receive(:workflow_run_job_logs).with("test-org/test-repo", 99999).and_raise(Octokit::Deprecated)
 
-    fill_in "job_id", with: "99999"
+    fill_in "job_ids", with: "99999"
     click_button "Show Job Log"
-    expect(page).to have_content("GitHub error: Octokit::Deprecated")
+    expect(page).to have_content("Job 99999: Octokit::Deprecated: Octokit::Deprecated")
   end
 
   it "supports suspending and unsuspending Accounts" do
@@ -1725,16 +1798,19 @@ RSpec.describe CloverAdmin do
       expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutRhizome", "start", "0", st.ubid, "{}", "", "", ""]
     end
 
-    it "allows creation of semaphore increment rollout strands" do
-      select "Page"
-      fill_in "Semaphore", with: "bad"
-      click_button "Start Semaphore Rollout"
-      expect(page).to have_flash_error("invalid semaphore for class")
+    it "shows error for an invalid class/semaphore selection" do
+      # The select only offers valid options, so submit a tampered request directly.
+      csrf = find("#start-semaphore-rollout input[name=_csrf]", visible: false).value
+      page.driver.submit :post, "/rollouts/start/RolloutSemaphore", _csrf: csrf, class_semaphore: "Page bad", increment: "increment", gap: "60"
 
+      expect(page).to have_flash_error("invalid semaphore for class")
+      expect(Strand.first(prog: "RolloutSemaphore")).to be_nil
+    end
+
+    it "allows creation of semaphore increment rollout strands" do
       page_st = Prog::PageNexus.assemble("some problem", %w[a], nil)
 
-      select "Page"
-      fill_in "Semaphore", with: "resolve"
+      select "Page - resolve", from: "Class - Semaphore"
       fill_in "Gap (seconds)", with: "90"
       click_button "Start Semaphore Rollout"
 
@@ -1759,20 +1835,14 @@ RSpec.describe CloverAdmin do
     end
 
     it "allows creation of semaphore increment rollout strands with locations and wait labels" do
-      select "Page"
-      fill_in "Semaphore", with: "bad"
-      click_button "Start Semaphore Rollout"
-      expect(page).to have_flash_error("invalid semaphore for class")
-
       fsn1_vm = create_vm
       hel1_vm = create_vm(location_id: Location::HETZNER_HEL1_ID)
 
       Strand.create_with_id(fsn1_vm.id, prog: "Vm::Metal::Nexus", label: "start")
       Strand.create_with_id(hel1_vm.id, prog: "Vm::Metal::Nexus", label: "start")
 
-      select "Vm"
+      select "Vm - update_firewall_rules", from: "Class - Semaphore"
       select "hetzner-fsn1"
-      fill_in "Semaphore", with: "update_firewall_rules"
       fill_in "Wait Label", with: "wait"
       click_button "Start Semaphore Rollout"
 
@@ -1790,8 +1860,7 @@ RSpec.describe CloverAdmin do
     it "allows creation of semaphore increment without wait rollout strands" do
       page_st = Prog::PageNexus.assemble("some problem", %w[a], nil)
 
-      select "Page"
-      fill_in "Semaphore", with: "resolve"
+      select "Page - resolve", from: "Class - Semaphore"
       choose "Increment Without Waiting"
       click_button "Start Semaphore Rollout"
 
@@ -1813,8 +1882,7 @@ RSpec.describe CloverAdmin do
     it "allows creation of semaphore decrement rollout strands" do
       page_st = Prog::PageNexus.assemble("some problem", %w[a], nil)
 
-      select "Page"
-      fill_in "Semaphore", with: "resolve"
+      select "Page - resolve", from: "Class - Semaphore"
       fill_in "Gap (seconds)", with: "90"
       choose "Decrement"
       click_button "Start Semaphore Rollout"
@@ -3011,5 +3079,208 @@ RSpec.describe CloverAdmin do
     select "accepting", from: "State"
     click_button "Search"
     expect(ubids.call).to eq([x64_48.ubid])
+  end
+
+  it "shows Customer Usage with resources, vcpu usage, and spend, ordered by vcpus" do
+    big = Project.create(name: "big-customer")
+    small = Project.create(name: "small-customer")
+    service_project = Project.create(name: "internal-service")
+    Project.create(name: "empty-customer") # no resources or invoices; never appears
+
+    ac1 = create_account("a@ibi.com", with_project: false)
+    ac2 = create_account("b@ibi.com", with_project: false)
+    ac3 = create_account("c@ibi.com", with_project: false)
+    DB[:access_tag].insert(project_id: big.id, hyper_tag_id: ac1.id)
+    DB[:access_tag].insert(project_id: big.id, hyper_tag_id: ac2.id)
+    DB[:access_tag].insert(project_id: big.id, hyper_tag_id: ac3.id)
+    ac2.update(created_at: Time.now - 100)
+
+    big_label = "big-customer (b@ibi.com)"
+
+    reload = -> { visit "/customer-usage" }
+    rows = -> { page.all(".customer-usage-table tbody tr").map { it.all("td").map(&:text) } }
+
+    # Before any project has resources or invoices, there are no customers.
+    click_link "Customer Usage"
+    expect(page.title).to eq "Ubicloud Admin - Customer Usage"
+    expect(page).to have_no_css(".customer-usage-table")
+    expect(page).to have_content("No data available")
+
+    create_vm(project_id: big.id, vcpus: 8)
+    reload.call
+    expect(page.all(".customer-usage-table thead th").map(&:text)).to eq(["Project", "Reputation", "VMs", "PostgreSQL", "Kubernetes", "Runners", "Total vCPUs", "Total Spend"])
+    expect(rows.call).to eq([[big_label, "new", "1", "0", "0", "0", "8", "$0.00"]])
+
+    pg = create_postgres_resource(project: big, location_id: Location::HETZNER_FSN1_ID)
+    create_postgres_server(resource: pg).vm.update(project_id: service_project.id)
+    reload.call
+    expect(rows.call).to eq([[big_label, "new", "1", "1", "0", "0", "10", "$0.00"]])
+
+    k8s_ps = PrivateSubnet.create(name: "k8s-ps", project_id: big.id, location_id: Location::HETZNER_FSN1_ID, net4: "10.1.0.0/26", net6: "fdfb::/64")
+    kc = KubernetesCluster.create(project_id: big.id, name: "k8s-cluster", private_subnet_id: k8s_ps.id, location_id: Location::HETZNER_FSN1_ID, cp_node_count: 1, version: Option.selectable_kubernetes_versions.first, target_node_size: "standard-2")
+    KubernetesNode.create(kubernetes_cluster_id: kc.id, vm_id: create_vm(project_id: service_project.id, vcpus: 4, name: "k8s-node-vm").id)
+    reload.call
+    expect(rows.call).to eq([[big_label, "new", "1", "1", "1", "0", "14", "$0.00"]])
+
+    installation = GithubInstallation.create(installation_id: 99, name: "gh-org", type: "Organization", project_id: big.id)
+    gh_vm = create_vm(project_id: service_project.id, vcpus: 2, name: "gh-runner-vm")
+    GithubRunner.create(vm_id: gh_vm.id, repository_name: "repo", label: "ubicloud", installation_id: installation.id)
+    reload.call
+    expect(rows.call).to eq([[big_label, "new", "1", "1", "1", "1", "16", "$0.00"]])
+
+    Invoice.create(project_id: big.id, invoice_number: "2601-big-01", content: {cost: 10.0}, begin_time: "2025-01-01", end_time: "2025-02-01")
+    Invoice.create(project_id: big.id, invoice_number: "2602-big-02", content: {cost: 5.5}, begin_time: "2025-02-01", end_time: "2025-03-01")
+    reload.call
+    expect(rows.call).to eq([[big_label, "new", "1", "1", "1", "1", "16", "$15.50"]])
+
+    create_vm(project_id: small.id, vcpus: 2)
+    Invoice.create(project_id: small.id, invoice_number: "2601-small-01", content: {cost: 1.0}, begin_time: "2025-01-01", end_time: "2025-02-01")
+    reload.call
+    expect(rows.call).to eq([
+      [big_label, "new", "1", "1", "1", "1", "16", "$15.50"],
+      ["small-customer", "new", "1", "0", "0", "0", "2", "$1.00"],
+    ])
+
+    DB[:access_tag].insert(project_id: small.id, hyper_tag_id: create_account("x@small.com", with_project: false).id)
+    reload.call
+    expect(rows.call).to eq([
+      [big_label, "new", "1", "1", "1", "1", "16", "$15.50"],
+      ["small-customer (x@small.com)", "new", "1", "0", "0", "0", "2", "$1.00"],
+    ])
+
+    minio_service = Project.create(name: "minio-service")
+    minio_host = create_vm_host(location_id: Location::HETZNER_FSN1_ID)
+    minio_cluster = MinioCluster.create(name: "minio-cluster", project_id: minio_service.id, location_id: minio_host.location_id, admin_user: "admin", admin_password: "dummy-password")
+    minio_pool = MinioPool.create(cluster_id: minio_cluster.id, server_count: 1, drive_count: 1, storage_size_gib: 100, vm_size: "standard-2", start_index: 0)
+    MinioServer.create(minio_pool_id: minio_pool.id, vm_id: create_vm(vm_host_id: minio_host.id, project_id: minio_service.id, name: "minio-vm").id, index: 0)
+
+    reload.call
+    expect(rows.call).to eq([
+      [big_label, "new", "1", "1", "1", "1", "16", "$15.50"],
+      ["small-customer (x@small.com)", "new", "1", "0", "0", "0", "2", "$1.00"],
+      ["minio-service", "new", "1", "0", "0", "0", "2", "$0.00"],
+    ])
+
+    expect(page).to have_no_content("empty-customer")
+    expect(page).to have_no_content("internal-service")
+  end
+
+  it "shows customer resources hosted on a VM host, resolving managed services to the customer" do
+    vm_host = create_vm_host
+    other_vm_host = create_vm_host
+    customer = Project.create(name: "some-customer")
+    service_project = Project.create(name: "internal-service")
+    minio_service = Project.create(name: "minio-service")
+
+    ac1 = create_account("a@someuser.com", with_project: false)
+    ac2 = create_account("b@someuser.com", with_project: false)
+    ac2.update(created_at: ac1.created_at + 100)
+
+    DB[:access_tag].insert(project_id: customer.id, hyper_tag_id: ac1.id)
+    DB[:access_tag].insert(project_id: customer.id, hyper_tag_id: ac2.id)
+    customer_label = "some-customer (a@someuser.com)"
+
+    # A VM on another host must never appear in this host's tables.
+    create_vm(vm_host_id: other_vm_host.id, project_id: customer.id, name: "vm-in-another-host")
+
+    reload = -> {
+      visit "/model/VmHost/#{vm_host.ubid}"
+      page.all("summary").each(&:click)
+    }
+    summary_rows = -> { page.all(".vm-host-customers-summary-table tbody tr").map { it.all("td").map(&:text) }.sort_by(&:first) }
+    # Assert the identifying columns (customer, type, resource, vm), ordered by vm name.
+    resource_rows = -> { page.all(".vm-host-resources-table tbody tr").map { it.all("td").map(&:text).first(4) }.sort_by(&:last) }
+
+    # Before any VM is hosted: only the empty-state message, no tables.
+    reload.call
+    expect(page).to have_content("No customer resources are hosted on this host.")
+    expect(page).to have_no_css(".vm-host-customers-summary-table")
+    expect(page).to have_no_css(".vm-host-resources-table")
+
+    # Plain customer VM, owned directly by the customer project.
+    create_vm(vm_host_id: vm_host.id, project_id: customer.id, name: "customer-vm")
+    reload.call
+    expect(page.all(".vm-host-customers-summary-table thead th").map(&:text)).to eq(["Customer", "VMs", "PostgreSQL", "Kubernetes", "GitHub Runners", "Total"])
+    expect(page.all(".vm-host-resources-table thead th").map(&:text)).to eq(["Customer", "Type", "Resource", "VM", "vCPUs", "Created At"])
+    expect(summary_rows.call).to eq([[customer_label, "1", "0", "0", "0", "1"]])
+    expect(resource_rows.call).to eq([[customer_label, "VM", "", "customer-vm"]])
+
+    # PostgreSQL: the VM is owned by the service project but attributed to the
+    # customer through the postgres resource.
+    pg = create_postgres_resource(project: customer, location_id: vm_host.location_id)
+    pg_vm = create_postgres_server(resource: pg).vm
+    pg_vm.update(vm_host_id: vm_host.id, project_id: service_project.id)
+    reload.call
+    expect(summary_rows.call).to eq([[customer_label, "1", "1", "0", "0", "2"]])
+    expect(resource_rows.call).to eq([
+      [customer_label, "VM", "", "customer-vm"],
+      [customer_label, "PostgreSQL", pg.name, pg_vm.name],
+    ].sort_by(&:last))
+
+    # Kubernetes: attributed to the customer through the cluster.
+    k8s_ps = PrivateSubnet.create(name: "k8s-ps", project_id: customer.id, location_id: vm_host.location_id, net4: "10.1.0.0/26", net6: "fdfb::/64")
+    cluster = KubernetesCluster.create(project_id: customer.id, name: "k8s-cluster", private_subnet_id: k8s_ps.id, location_id: vm_host.location_id, cp_node_count: 1, version: Option.selectable_kubernetes_versions.first, target_node_size: "standard-2")
+    KubernetesNode.create(kubernetes_cluster_id: cluster.id, vm_id: create_vm(vm_host_id: vm_host.id, project_id: service_project.id, name: "k8s-node-vm").id)
+    reload.call
+    expect(summary_rows.call).to eq([[customer_label, "1", "1", "1", "0", "3"]])
+    expect(resource_rows.call).to eq([
+      [customer_label, "VM", "", "customer-vm"],
+      [customer_label, "PostgreSQL", pg.name, pg_vm.name],
+      [customer_label, "Kubernetes", "k8s-cluster", "k8s-node-vm"],
+    ].sort_by(&:last))
+
+    # GitHub runner: attributed to the customer through the installation.
+    installation = GithubInstallation.create(installation_id: 99, name: "gh-org", type: "Organization", project_id: customer.id)
+    gh_vm = create_vm(vm_host_id: vm_host.id, project_id: service_project.id, name: "gh-runner-vm")
+    GithubRunner.create(vm_id: gh_vm.id, repository_name: "repo", label: "ubicloud", installation_id: installation.id)
+    reload.call
+    expect(summary_rows.call).to eq([[customer_label, "1", "1", "1", "1", "4"]])
+    expect(resource_rows.call).to eq([
+      [customer_label, "VM", "", "customer-vm"],
+      [customer_label, "PostgreSQL", pg.name, pg_vm.name],
+      [customer_label, "Kubernetes", "k8s-cluster", "k8s-node-vm"],
+      [customer_label, "GitHub Runner", "gh-org", "gh-runner-vm"],
+    ].sort_by(&:last))
+
+    # Minio server: the VM is owned by the internal Minio service project and is
+    # not mapped to a customer, so it appears under the service project with no
+    # email.
+    minio_cluster = MinioCluster.create(name: "minio-cluster", project_id: minio_service.id, location_id: vm_host.location_id, admin_user: "admin", admin_password: "dummy-password")
+    minio_pool = MinioPool.create(cluster_id: minio_cluster.id, server_count: 1, drive_count: 1, storage_size_gib: 100, vm_size: "standard-2", start_index: 0)
+    MinioServer.create(minio_pool_id: minio_pool.id, vm_id: create_vm(vm_host_id: vm_host.id, project_id: minio_service.id, name: "minio-vm").id, index: 0)
+    reload.call
+    expect(summary_rows.call).to eq([
+      ["minio-service", "1", "0", "0", "0", "1"],
+      [customer_label, "1", "1", "1", "1", "4"],
+    ])
+    expect(resource_rows.call).to eq([
+      [customer_label, "VM", "", "customer-vm"],
+      ["minio-service", "VM", "", "minio-vm"],
+      [customer_label, "PostgreSQL", pg.name, pg_vm.name],
+      [customer_label, "Kubernetes", "k8s-cluster", "k8s-node-vm"],
+      [customer_label, "GitHub Runner", "gh-org", "gh-runner-vm"],
+    ].sort_by(&:last))
+
+    expect(page).to have_no_content("internal-service")
+    expect(page).to have_no_content("vm-in-another-host")
+  end
+
+  it "renders the customer summary when customers have equal resource totals" do
+    vm_host = create_vm_host
+    c1 = Project.create(name: "customer-b")
+    c2 = Project.create(name: "customer-c")
+    c3 = Project.create(name: "customer-a")
+    create_vm(vm_host_id: vm_host.id, project_id: c1.id, name: "vm-one")
+    create_vm(vm_host_id: vm_host.id, project_id: c2.id, name: "vm-two")
+    create_vm(vm_host_id: vm_host.id, project_id: c3.id, name: "vm-three")
+
+    visit "/model/VmHost/#{vm_host.ubid}"
+    page.all("summary").each(&:click)
+    summary = page.all(".vm-host-customers-summary-table tbody tr").map { it.all("td").map(&:text) }.sort_by(&:first)
+    expect(summary).to eq([
+      ["customer-a", "1", "0", "0", "0", "1"],
+      ["customer-b", "1", "0", "0", "0", "1"],
+      ["customer-c", "1", "0", "0", "0", "1"],
+    ])
   end
 end

@@ -100,12 +100,13 @@ class Prog::Github::GithubRunnerNexus < Prog::Base
       size:,
       location_id:,
       boot_image:,
-      storage_volumes: [{size_gib: label_data["storage_size_gib"], encrypted: true}],
+      storage_volumes: [{size_gib: label_data["storage_size_gib"], encrypted: true, track_written: false}],
       enable_ip4: true,
       arch:,
       swap_size_bytes: 4294963200, # ~4096MB, the same value with GitHub hosted runners
       private_subnet_id: ps.id,
       alternative_families:,
+      use_eip: false,
     )
 
     vm_st.subject
@@ -180,6 +181,16 @@ class Prog::Github::GithubRunnerNexus < Prog::Base
 
   def rescue_common_github_api_errors
     yield
+  rescue Octokit::InstallationSuspended
+    # The customer suspended the Ubicloud GitHub App installation, so no
+    # installation access token can be created and every API call will fail
+    # until they unsuspend it. Deregistration is impossible; clean up our
+    # side without talking to the GitHub API.
+    installation_ubid = github_runner.installation.ubid
+    Clog.emit("GitHub installation is suspended", {github_installation_suspended: {installation_ubid:, label: github_runner.label, repository_name: github_runner.repository_name}})
+    github_runner.incr_skip_deregistration
+    github_runner.incr_destroy unless destroying_set?
+    nap 0
   rescue Octokit::Error => e
     installation_ubid = github_runner.installation.ubid
     page_args, email_body = case e.message

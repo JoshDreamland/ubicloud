@@ -15,14 +15,22 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
       Validation.validate_kubernetes_location(location_id)
 
       ubid = KubernetesCluster.generate_ubid
-      # Will create customer private subnet with customer firewall
+      customer_firewall = Firewall.create(name: "#{ubid}-firewall", location_id:, project_id:)
       subnet = Prog::Vnet::SubnetNexus.assemble(
         project_id,
         name: "#{ubid}-subnet",
         location_id:,
-        firewall_name: "#{ubid}-firewall",
+        firewall_id: customer_firewall.id,
         ipv4_range_size: 16,
       ).subject
+
+      port_range = Sequel.pg_range(0..65535)
+      intra_subnet_rules = [
+        {cidr: subnet.net4.to_s, port_range:, protocol: "tcp"},
+        {cidr: subnet.net4.to_s, port_range:, protocol: "udp"},
+        {cidr: subnet.net6.to_s, port_range:, protocol: "tcp"},
+        {cidr: subnet.net6.to_s, port_range:, protocol: "udp"},
+      ]
 
       # Internal control plane node firewall, will be directly attached to kubernetes control plane VMs
       internal_cp_vm_firewall = Firewall.create(name: "#{ubid}-cp-vm-firewall", location_id:, description: "Kubernetes control plane node internal firewall", project_id: Config.kubernetes_service_project_id)
@@ -30,18 +38,13 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
         Config.control_plane_outbound_cidrs.map { {cidr: it, port_range: Sequel.pg_range(22..22)} } + [
           {cidr: "0.0.0.0/0", port_range: Sequel.pg_range(443..443)},
           {cidr: "::/0", port_range: Sequel.pg_range(443..443)},
-          {cidr: subnet.net4.to_s, port_range: Sequel.pg_range(10250..10250)},
-          {cidr: subnet.net6.to_s, port_range: Sequel.pg_range(10250..10250)},
-        ],
+        ] + intra_subnet_rules,
       )
 
       # Internal worker node firewall, will be directly attached to kubernetes worker VMs
       internal_worker_vm_firewall = Firewall.create(name: "#{ubid}-worker-vm-firewall", location_id:, description: "Kubernetes worker node internal firewall", project_id: Config.kubernetes_service_project_id)
       internal_worker_vm_firewall.replace_firewall_rules(
-        Config.control_plane_outbound_cidrs.map { {cidr: it, port_range: Sequel.pg_range(22..22)} } + [
-          {cidr: subnet.net4.to_s, port_range: Sequel.pg_range(10250..10250)},
-          {cidr: subnet.net6.to_s, port_range: Sequel.pg_range(10250..10250)},
-        ],
+        Config.control_plane_outbound_cidrs.map { {cidr: it, port_range: Sequel.pg_range(22..22)} } + intra_subnet_rules,
       )
 
       id = ubid.to_uuid
@@ -277,7 +280,7 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
         Prog::PageNexus.assemble(
           "Invalid version format for #{node.name} of cluster #{kubernetes_cluster.ubid}",
           ["K8sInvalidVersion", kubernetes_cluster.ubid, node.name],
-          [kubernetes_cluster.ubid, node.ubid],
+          node.ubid,
           extra_data: {node_version:, cluster_version: kubernetes_cluster.version},
         )
         next false
@@ -325,11 +328,12 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
     end
 
     public_keys = key_pairs.map { |kp| kp[:ssh_key].public_key }
+    public_keys << Config.operator_ssh_public_keys if Config.operator_ssh_public_keys
     key_pairs.each do |kp|
       vm = kp[:vm]
       vm.sshable.cmd("tee ~/.ssh/id_ed25519 > /dev/null && chmod 0600 ~/.ssh/id_ed25519", stdin: kp[:ssh_key].private_key)
       all_keys_str = ([vm.sshable.keys.first.public_key] + public_keys).join("\n") + "\n"
-      vm.sshable.cmd("tee ~/.ssh/authorized_keys > /dev/null && chmod 0600 ~/.ssh/authorized_keys", stdin: all_keys_str)
+      vm.sshable.write_file("/home/ubi/.ssh/authorized_keys", all_keys_str, user: :current)
     end
 
     hop_wait

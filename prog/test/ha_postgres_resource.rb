@@ -98,16 +98,10 @@ class Prog::Test::HaPostgresResource < Prog::Test::PostgresBase
     hop_destroy
   end
 
-  label def destroy_postgres
-    self.timeline_ids = postgres_resource.servers_dataset.distinct.select_map(:timeline_id)
-    postgres_resource.incr_destroy
-    hop_wait_resources_destroyed
-  end
-
   label def wait_resources_destroyed
     nap 5 if postgres_resource
-    nap_if_private_subnet
     nap_if_gcp_vpc
+    nap_if_private_subnet
     verify_timelines_destroyed(timeline_ids) if timeline_ids
     hop_finish
   end
@@ -115,4 +109,5 @@ class Prog::Test::HaPostgresResource < Prog::Test::PostgresBase
   label :finish
   label :failed
   label :destroy
+  label :destroy_postgres
 end

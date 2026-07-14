@@ -9,7 +9,7 @@ RSpec.describe Prog::Test::Kubernetes do
 
   let(:strand_stack) { [{"kubernetes_cluster_id" => kubernetes_cluster.id}] }
 
-  let(:kubernetes_service_project_id) { "546a1ed8-53e5-86d2-966c-fb782d2ae3aa" }
+  let(:kubernetes_service_project_id) { Project.generate_uuid }
   let(:kubernetes_test_project) { Project.create(name: "Kubernetes-Test-Project") }
   let(:kubernetes_service_project) { Project.create_with_id(kubernetes_service_project_id, name: "Ubicloud-Kubernetes-Resources") }
   let(:session) { Net::SSH::Connection::Session.allocate }
@@ -44,9 +44,8 @@ RSpec.describe Prog::Test::Kubernetes do
     let(:strand_stack) { [{}] }
 
     it "creates test and service projects and a strand" do
-      expect(Config).to receive(:kubernetes_service_project_id).at_least(:once).and_return("4fd01c1a-f022-43e8-bd3d-6dbe214df6ed")
+      expect(Config).to receive(:kubernetes_service_project_id).at_least(:once).and_return(Project.generate_uuid)
       described_class.assemble
-      expect(Project["4fd01c1a-f022-43e8-bd3d-6dbe214df6ed"]).not_to be_nil
       expect(Project.where(name: "Kubernetes-Test-Project").count).to eq(1)
     end
 
@@ -59,7 +58,7 @@ RSpec.describe Prog::Test::Kubernetes do
   end
 
   describe "#start" do
-    let(:strand_stack) { [{"kubernetes_test_project_id" => kubernetes_test_project.id}] }
+    let(:strand_stack) { [{"kubernetes_test_project_id" => kubernetes_test_project.id, "cluster_name" => "kubernetes-test-standard", "worker_node_count" => 3}] }
 
     it "assembles kubernetes cluster and hops to wait_for_kubernetes_bootstrap" do
       expect { kubernetes_test.start }.to hop("wait_for_kubernetes_bootstrap")
@@ -600,7 +599,7 @@ RSpec.describe Prog::Test::Kubernetes do
       expect { kubernetes_test.verify_reboot_nftables }.to nap(5)
     end
 
-    it "hops to test_upgrade when rules match" do
+    it "hops to destroy_kubernetes when rules match" do
       refresh_frame(kubernetes_test, new_values: {
         "reboot_node_id" => node.id,
         "nat_rules_before_reboot" => "table ip nat { ... }",
@@ -610,7 +609,7 @@ RSpec.describe Prog::Test::Kubernetes do
       expect(sshable).to receive(:_cmd).with("uptime").and_return("up")
       expect(sshable).to receive(:_cmd).with("sudo nft list chain ip nat postrouting").and_return("table ip nat { ... }")
       expect(sshable).to receive(:_cmd).with("sudo nft list chain ip6 pod_access ingress_egress_control").and_return("table ip6 pod_access { ... }")
-      expect { kubernetes_test.verify_reboot_nftables }.to hop("test_upgrade")
+      expect { kubernetes_test.verify_reboot_nftables }.to hop("destroy_kubernetes")
     end
 
     it "sets fail_message when ip nat rules changed" do
@@ -637,120 +636,8 @@ RSpec.describe Prog::Test::Kubernetes do
       expect(sshable).to receive(:_cmd).with("uptime").and_return("up")
       expect(sshable).to receive(:_cmd).with("sudo nft list chain ip nat postrouting").and_return("table ip nat { ... }")
       expect(sshable).to receive(:_cmd).with("sudo nft list chain ip6 pod_access ingress_egress_control").and_return("different pod_access rules")
-      expect { kubernetes_test.verify_reboot_nftables }.to hop("test_upgrade")
+      expect { kubernetes_test.verify_reboot_nftables }.to hop("destroy_kubernetes")
       expect(kubernetes_test.strand.stack.first["fail_message"]).to eq("ip6 pod_access rules changed after reboot")
-    end
-  end
-
-  describe "#test_upgrade" do
-    it "fails if no upgrade candidate is available" do
-      kubernetes_test.kubernetes_cluster.update(version: Option.selectable_kubernetes_versions.first)
-      expect { kubernetes_test.test_upgrade }.to hop("destroy_kubernetes")
-      expect(kubernetes_test.strand.stack.first["fail_message"]).to eq("No upgrade candidate available")
-    end
-
-    it "updates version, increments uprades semaphores, and hops to wait_for_upgrade" do
-      target_version = kubernetes_cluster.available_upgrade_version
-      expect { kubernetes_test.test_upgrade }.to hop("wait_for_upgrade")
-
-      kubernetes_cluster.reload
-      expect(kubernetes_cluster.version).to eq(target_version)
-      expect(kubernetes_cluster.upgrade_set?).to be true
-      expect(kubernetes_cluster.nodepools(reload: true).first.upgrade_set?).to be true
-    end
-  end
-
-  describe "#wait_for_upgrade" do
-    it "naps if the cluster is still upgrading" do
-      expect { kubernetes_test.wait_for_upgrade }.to nap(15)
-    end
-
-    it "fails if some nodes are not upgraded" do
-      kubernetes_test.kubernetes_cluster.strand.update(label: "wait")
-      Strand.where(id: kubernetes_test.kubernetes_cluster.nodepools_dataset.select(:id)).update(label: "wait")
-      kubernetes_test.kubernetes_cluster.update(kubeconfig: "stored")
-
-      nodes_json = {
-        "items" => [
-          {"status" => {"nodeInfo" => {"kubeletVersion" => "#{kubernetes_cluster.version}.1"}}},
-          {"status" => {"nodeInfo" => {"kubeletVersion" => "v1.30.1"}}},
-          {"status" => {"nodeInfo" => {"kubeletVersion" => "#{kubernetes_cluster.version}.1"}}},
-        ],
-      }
-      response = Net::SSH::Connection::Session::StringWithExitstatus.new(JSON.generate(nodes_json), 0)
-      expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s get nodes -o json").and_return(response)
-
-      response_raw = Net::SSH::Connection::Session::StringWithExitstatus.new("nodes_raw", 0)
-      expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s get nodes").and_return(response_raw)
-
-      expect { kubernetes_test.wait_for_upgrade }.to hop("destroy_kubernetes")
-      expect(kubernetes_test.strand.stack.first["fail_message"]).to eq("Not all 3 nodes upgraded to #{kubernetes_cluster.version}:\nnodes_raw")
-    end
-
-    it "fails if node count is not 3" do
-      kubernetes_test.kubernetes_cluster.strand.update(label: "wait")
-      Strand.where(id: kubernetes_test.kubernetes_cluster.nodepools_dataset.select(:id)).update(label: "wait")
-      kubernetes_test.kubernetes_cluster.update(kubeconfig: "stored")
-
-      nodes_json = {
-        "items" => [
-          {"status" => {"nodeInfo" => {"kubeletVersion" => "#{kubernetes_test.kubernetes_cluster.version}.1"}}},
-        ],
-      }
-      response = Net::SSH::Connection::Session::StringWithExitstatus.new(JSON.generate(nodes_json), 0)
-      expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s get nodes -o json").and_return(response)
-
-      response_raw = Net::SSH::Connection::Session::StringWithExitstatus.new("nodes_raw", 0)
-      expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s get nodes").and_return(response_raw)
-
-      expect { kubernetes_test.wait_for_upgrade }.to hop("destroy_kubernetes")
-      expect(kubernetes_test.strand.stack.first["fail_message"]).to eq("Not all 1 nodes upgraded to #{kubernetes_test.kubernetes_cluster.version}:\nnodes_raw")
-    end
-
-    it "hops to verify_data_after_upgrade if all 3 nodes are upgraded correctly" do
-      kubernetes_test.kubernetes_cluster.strand.update(label: "wait")
-      Strand.where(id: kubernetes_test.kubernetes_cluster.nodepools_dataset.select(:id)).update(label: "wait")
-      kubernetes_test.kubernetes_cluster.update(kubeconfig: "stored")
-
-      nodes_json = {
-        "items" => [{"status" => {"nodeInfo" => {"kubeletVersion" => "#{kubernetes_test.kubernetes_cluster.version}.0"}}}] * 3,
-      }
-      response = Net::SSH::Connection::Session::StringWithExitstatus.new(JSON.generate(nodes_json), 0)
-      expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s get nodes -o json").and_return(response)
-
-      expect { kubernetes_test.wait_for_upgrade }.to hop("verify_data_after_upgrade")
-    end
-  end
-
-  describe "#verify_data_after_upgrade" do
-    it "naps until pod is running" do
-      response = Net::SSH::Connection::Session::StringWithExitstatus.new("ContainerCreating", 0)
-      expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s get pods ubuntu-statefulset-0 | grep -v NAME | awk '{print $3}'").and_return(response)
-      expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s get events --field-selector involvedObject.name=ubuntu-statefulset-0 --sort-by=.lastTimestamp")
-      expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s get pv,pvc")
-      expect { kubernetes_test.verify_data_after_upgrade }.to nap(5)
-    end
-
-    it "verifies all data hashes and hops to destroy_kubernetes" do
-      refresh_frame(kubernetes_test, new_values: {"read_hashes" => {"random-data-1" => "hash1", "random-data-2" => "hash2", "random-data-3" => "hash3"}})
-      response = Net::SSH::Connection::Session::StringWithExitstatus.new("Running", 0)
-      expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s get pods ubuntu-statefulset-0 | grep -v NAME | awk '{print $3}'").and_return(response)
-      (1..3).each do |i|
-        response = Net::SSH::Connection::Session::StringWithExitstatus.new("hash#{i}", 0)
-        expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s exec -t ubuntu-statefulset-0 -- sh -c sha256sum\\ /etc/data/random-data-#{i}\\ \\|\\ awk\\ \\'\\{print\\ \\$1\\}\\'").and_return(response)
-      end
-      expect { kubernetes_test.verify_data_after_upgrade }.to hop("destroy_kubernetes")
-    end
-
-    it "sets fail_message and hops to destroy_kubernetes if a hash is wrong" do
-      refresh_frame(kubernetes_test, new_values: {"read_hashes" => {"random-data-1" => "hash1", "random-data-2" => "hash2", "random-data-3" => "hash3"}})
-      response = Net::SSH::Connection::Session::StringWithExitstatus.new("Running", 0)
-      expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s get pods ubuntu-statefulset-0 | grep -v NAME | awk '{print $3}'").and_return(response)
-      response = Net::SSH::Connection::Session::StringWithExitstatus.new("corrupted_hash", 0)
-      expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s exec -t ubuntu-statefulset-0 -- sh -c sha256sum\\ /etc/data/random-data-1\\ \\|\\ awk\\ \\'\\{print\\ \\$1\\}\\'").and_return(response)
-
-      expect { kubernetes_test.verify_data_after_upgrade }.to hop("destroy_kubernetes")
-      expect(kubernetes_test.strand.stack.first["fail_message"]).to eq("data hash changed after upgrade for random-data-1, expected: hash1, got: corrupted_hash")
     end
   end
 

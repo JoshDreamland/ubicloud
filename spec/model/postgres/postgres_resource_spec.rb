@@ -34,41 +34,115 @@ RSpec.describe PostgresResource do
     )
   }
 
+  it "#uses_publicly_signed_certificates? is only true if all conditions are met" do
+    expect(postgres_resource.uses_publicly_signed_certificates?).to be false
+
+    postgres_project = Project.create(name: "pg-service-project")
+    expect(Config).to receive(:postgres_service_project_id).and_return(postgres_project.id).at_least(:once)
+    expect(Config).to receive(:acme_email).and_return("acme@example.com").exactly(5)
+    postgres_resource.hostname_version = "v3"
+    dns_zone = DnsZone.create(project_id: postgres_project.id, name: "pg.ubicloud.app")
+    expect(postgres_resource.uses_publicly_signed_certificates?).to be true
+
+    postgres_resource.location.dns_suffix = ".eu"
+    expect(postgres_resource.uses_publicly_signed_certificates?).to be false
+    postgres_resource.location.dns_suffix = nil
+
+    postgres_resource.project.set_ff_postgres_hostname_override(true)
+    expect(postgres_resource.uses_publicly_signed_certificates?).to be false
+    postgres_resource.project.set_ff_postgres_hostname_override(false)
+
+    postgres_resource.hostname_version = "v2"
+    expect(postgres_resource.uses_publicly_signed_certificates?).to be false
+    postgres_resource.hostname_version = "v3"
+
+    dns_zone.destroy
+    postgres_resource.instance_variable_set(:@dns_zone, nil)
+    expect(postgres_resource.uses_publicly_signed_certificates?).to be false
+    DnsZone.create(project_id: postgres_project.id, name: "pg.ubicloud.app")
+
+    expect(postgres_resource.uses_publicly_signed_certificates?).to be true
+    expect(Config).to receive(:acme_email).and_return(nil)
+    expect(postgres_resource.uses_publicly_signed_certificates?).to be false
+  end
+
   it "returns connection string without ubid qualifier" do
     expect(postgres_resource).to receive(:dns_zone).and_return("something").at_least(:once)
     expect(postgres_resource).to receive(:hostname_version).and_return("v1").at_least(:once)
-    expect(postgres_resource.connection_string).to eq("postgres://postgres:dummy-password@pg-name.postgres.ubicloud.com:5432/postgres?channel_binding=require")
+    expect(postgres_resource.connection_string).to eq("postgres://postgres:dummy-password@pg-name.postgres.ubicloud.com:5432/postgres?sslmode=require&channel_binding=require")
   end
 
   it "returns connection string with ubid qualifier" do
     postgres_resource.update(hostname_version: "v2")
     expect(postgres_resource).to receive(:dns_zone).and_return("something").at_least(:once)
-    expect(postgres_resource.connection_string).to eq("postgres://postgres:dummy-password@pg-name.#{postgres_resource.ubid}.postgres.ubicloud.com:5432/postgres?channel_binding=require")
+    expect(postgres_resource.connection_string).to eq("postgres://postgres:dummy-password@pg-name.#{postgres_resource.ubid}.postgres.ubicloud.com:5432/postgres?sslmode=require&channel_binding=require")
+  end
+
+  it "returns connection string for publicly signed certificates" do
+    postgres_resource.update(hostname_version: "v3")
+    postgres_project = Project.create(name: "pg-service-project")
+    expect(Config).to receive(:postgres_service_project_id).and_return(postgres_project.id)
+    DnsZone.create(project_id: postgres_project.id, name: "pg.ubicloud.app")
+    expect(Config).to receive(:acme_email).and_return("acme@example.com")
+    expect(postgres_resource.connection_string).to eq("postgres://postgres:dummy-password@pg-name.#{postgres_resource.ubid}.pg.ubicloud.app:5432/postgres?sslmode=verify-full&channel_binding=require&sslrootcert=system")
+  end
+
+  it "returns private connection string with ubid qualifier" do
+    postgres_resource.update(hostname_version: "v2")
+    expect(postgres_resource).to receive(:dns_zone).and_return("something").at_least(:once)
+    expect(postgres_resource.private_connection_string).to eq("postgres://postgres:dummy-password@private.pg-name.#{postgres_resource.ubid}.postgres.ubicloud.com:5432/postgres?sslmode=require&channel_binding=require")
+  end
+
+  it "returns private connection string for publicly signed certificates" do
+    postgres_resource.update(hostname_version: "v3")
+    postgres_project = Project.create(name: "pg-service-project")
+    expect(Config).to receive(:postgres_service_project_id).and_return(postgres_project.id)
+    DnsZone.create(project_id: postgres_project.id, name: "pg.ubicloud.app")
+    expect(Config).to receive(:acme_email).and_return("acme@example.com")
+    expect(postgres_resource.private_connection_string).to eq("postgres://postgres:dummy-password@pg-name.#{postgres_resource.ubid}.private.pg.ubicloud.app:5432/postgres?sslmode=verify-full&channel_binding=require&sslrootcert=system")
   end
 
   it "returns connection string with ip address if config is not set" do
     vm = create_hosted_vm(project, private_subnet, "pg-vm")
     PostgresServer.create(timeline:, resource_id: postgres_resource.id, vm_id: vm.id, is_representative: true, synchronization_status: "ready", timeline_access: "push", version: "17")
     AssignedVmAddress.create(dst_vm_id: vm.id, ip: "1.2.3.4/32")
-    expect(postgres_resource.connection_string).to eq("postgres://postgres:dummy-password@1.2.3.4:5432/postgres?channel_binding=require")
+    expect(postgres_resource.connection_string).to eq("postgres://postgres:dummy-password@1.2.3.4:5432/postgres?sslmode=require&channel_binding=require")
   end
 
-  it "returns replication_connection_string" do
+  it "returns replication_connection_string for hostname version v1" do
+    postgres_resource.update(hostname_version: "v1")
     expect(postgres_resource).to receive(:dns_zone).and_return(instance_double(DnsZone)).at_least(:once)
     s = postgres_resource.replication_connection_string(application_name: "pgubidstandby")
-    expect(s).to include("ubi_replication@#{postgres_resource.ubid}.postgres.ubicloud.com", "application_name=pgubidstandby", "sslcert=/etc/ssl/certs/client.crt", "tcp_user_timeout=30000")
+    expect(s).to include("ubi_replication@private.pg-name.postgres.ubicloud.com", "application_name=pgubidstandby", "sslcert=/etc/ssl/certs/client.crt", "tcp_user_timeout=30000")
     postgres_resource.set(root_cert_1: "rc1", root_cert_2: "rc2")
     s = postgres_resource.replication_connection_string(application_name: "pgubidstandby")
-    expect(s).to include("ubi_replication@#{postgres_resource.ubid}.postgres.ubicloud.com", "application_name=pgubidstandby", "sslcert=/etc/ssl/certs/client.crt", "tcp_user_timeout=30000", "sslrootcert=/etc/ssl/certs/server-ca.crt")
+    expect(s).to include("ubi_replication@private.pg-name.postgres.ubicloud.com", "application_name=pgubidstandby", "sslcert=/etc/ssl/certs/client.crt", "tcp_user_timeout=30000", "sslrootcert=/etc/ssl/certs/server-ca.crt")
+  end
+
+  it "returns replication_connection_string for hostname version v2" do
+    postgres_resource.update(hostname_version: "v2")
+    expect(postgres_resource).to receive(:dns_zone).and_return(instance_double(DnsZone)).at_least(:once)
+    s = postgres_resource.replication_connection_string(application_name: "pgubidstandby")
+    expect(s).to include("ubi_replication@private.pg-name.#{postgres_resource.ubid}.postgres.ubicloud.com", "application_name=pgubidstandby", "sslcert=/etc/ssl/certs/client.crt", "tcp_user_timeout=30000")
+    postgres_resource.set(root_cert_1: "rc1", root_cert_2: "rc2")
+    s = postgres_resource.replication_connection_string(application_name: "pgubidstandby")
+    expect(s).to include("ubi_replication@private.pg-name.#{postgres_resource.ubid}.postgres.ubicloud.com", "application_name=pgubidstandby", "sslcert=/etc/ssl/certs/client.crt", "tcp_user_timeout=30000", "sslrootcert=/etc/ssl/certs/server-ca.crt")
   end
 
   it "returns replication_connection_string with ip when no dns_zone exists" do
     vm = create_hosted_vm(project, private_subnet, "pg-vm")
     PostgresServer.create(timeline:, resource_id: postgres_resource.id, vm_id: vm.id, is_representative: true, synchronization_status: "ready", timeline_access: "push", version: "17")
-    AssignedVmAddress.create(dst_vm_id: vm.id, ip: "1.2.3.4/32")
+    vm.nics.first.update(private_ipv4: "172.0.0.9/32")
     expect(postgres_resource.dns_zone).to be_nil
     s = postgres_resource.replication_connection_string(application_name: "pgubidstandby")
-    expect(s).to include("ubi_replication@1.2.3.4", "application_name=pgubidstandby", "sslcert=/etc/ssl/certs/client.crt", "tcp_user_timeout=30000")
+    expect(s).to include("ubi_replication@172.0.0.9", "application_name=pgubidstandby", "sslcert=/etc/ssl/certs/client.crt", "tcp_user_timeout=30000")
+  end
+
+  it "returns replication_connection_string for hostname version v3 without root CAs" do
+    expect(postgres_resource).to receive(:dns_zone).and_return(instance_double(DnsZone)).at_least(:once)
+    postgres_resource.update(hostname_version: "v3", root_cert_1: nil, root_cert_2: nil)
+    s = postgres_resource.replication_connection_string(application_name: "pgubidstandby")
+    expect(s).to include("ubi_replication@pg-name.#{postgres_resource.ubid}.private.pg.ubicloud.app", "application_name=pgubidstandby", "sslcert=/etc/ssl/certs/client.crt", "tcp_user_timeout=30000", "sslrootcert=system")
   end
 
   it "returns internal_firewall_rules with SSH from control plane, subnet ports 5432/6432, and configured external CIDRs" do
@@ -817,6 +891,100 @@ RSpec.describe PostgresResource do
     expect(postgres_resource.target_server_count).to eq(2)
     postgres_resource.update(ha_type: PostgresResource::HaType::SYNC)
     expect(postgres_resource.target_server_count).to eq(3)
+  end
+
+  describe "check_all_dns_records" do
+    let(:dns_zone) { DnsZone.create(project_id: project.id, name: "pg.example.com") }
+
+    it "returns empty array if the resource does not have a DNS zone" do
+      expect(postgres_resource.check_all_dns_records).to eq []
+    end
+
+    it "returns empty array if the resource does not have a representative_server" do
+      expect(Config).to receive(:postgres_service_project_id).and_return(project.id)
+      expect(Config).to receive(:postgres_service_hostname).and_return("pg.example.com")
+      dns_zone
+      expect(postgres_resource.check_all_dns_records).to eq []
+    end
+
+    context "with DNS zone" do
+      before do
+        allow(Config).to receive_messages(postgres_service_project_id: project.id, postgres_service_hostname: "pg.example.com")
+        dns_zone
+        vm = create_hosted_vm(project, private_subnet, "pg-vm")
+        PostgresServer.create(timeline:, resource_id: postgres_resource.id, vm_id: vm.id, is_representative: true, synchronization_status: "ready", timeline_access: "push", version: "17")
+      end
+
+      it "resolves using the expected DNS servers" do
+        expect(DnsChecker).to receive(:open).with(contain_exactly("10.0.1.1", "10.0.2.2", "10.1.1.1", "10.1.2.2"))
+        2.times do
+          server = DnsServer.create(name: "ns#{it}.ubicloud.com")
+          dns_zone.add_dns_server(server)
+          vm1 = create_vm(name: "vm#{it}1")
+          vm2 = create_vm(name: "vm#{it}2")
+          add_ipv4_to_vm(vm1, "10.#{it}.1.1")
+          add_ipv4_to_vm(vm2, "10.#{it}.2.2")
+          server.add_vm(vm1)
+          server.add_vm(vm2)
+        end
+        postgres_resource.check_all_dns_records
+      end
+
+      context "with representative server" do
+        let(:checker) { DnsChecker::Checker.new(nil) }
+
+        before do
+          # Currently not needed for these specs, but in case an actual nameserver IP is needed later:
+          # server = DnsServer.create(name: "ns#{it}.ubicloud.com")
+          # dns_zone.add_dns_server(server)
+          # vm = create_vm(name: "vm1")
+          # add_ipv4_to_vm(vm, "10.0.1.1")
+          # server.add_vm(vm)
+          expect(DnsChecker::Checker).to receive(:new).and_return(checker)
+          add_ipv4_to_vm(postgres_resource.representative_server.vm, "10.1.2.3")
+          postgres_resource.representative_server.vm.update(ephemeral_net6: "fe80::/80")
+        end
+
+        it "resolves CNAME record for AWS databases" do
+          location = Location.create(display_name: "a1", name: "a1", ui_name: "a1", visible: true, provider: "aws")
+          postgres_resource.update(location_id: location.id)
+          AwsInstance.create_with_id(postgres_resource.representative_server.vm.id, ipv4_dns_name: "foo")
+          expect(checker).to receive(:check).with(:CNAME, postgres_resource.hostname, "foo.")
+          expect(postgres_resource.check_all_dns_records).to eq []
+        end
+
+        it "resolves A and AAAA records for metal databases" do
+          # AAAA not added by default, need to add it
+          postgres_resource.dns_zone.insert_record(type: "AAAA", record_name: postgres_resource.hostname, data: "fe80::2", ttl: 30)
+
+          expect(checker).to receive(:check).with(:A, postgres_resource.hostname, "10.1.2.3")
+          expect(checker).to receive(:check).with(:AAAA, postgres_resource.hostname, "fe80::2")
+          expect(checker).to receive(:check).with(:A, postgres_resource.private_hostname, postgres_resource.representative_server.vm.private_ipv4_string)
+          expect(checker).to receive(:check).with(:AAAA, postgres_resource.private_hostname, postgres_resource.representative_server.vm.private_ipv6_string)
+          expect(postgres_resource.check_all_dns_records).to eq []
+        end
+
+        it "does not attempt to resolve AAAA public record for old metal databases lacking one" do
+          postgres_resource.update(created_at: Time.utc(2025))
+          expect(checker).to receive(:check).with(:A, postgres_resource.hostname, "10.1.2.3")
+          expect(checker).to receive(:check).with(:A, postgres_resource.private_hostname, postgres_resource.representative_server.vm.private_ipv4_string)
+          expect(checker).to receive(:check).with(:AAAA, postgres_resource.private_hostname, postgres_resource.representative_server.vm.private_ipv6_string)
+          expect(postgres_resource.check_all_dns_records).to eq []
+        end
+
+        it "returns failures" do
+          location = Location.create(display_name: "a1", name: "a1", ui_name: "a1", visible: true, provider: "aws")
+          postgres_resource.update(location_id: location.id)
+          AwsInstance.create_with_id(postgres_resource.representative_server.vm.id, ipv4_dns_name: "foo")
+          expect(checker).to receive(:check) do |type, record_name, expected_value|
+            checker.failures << {type:, record_name:, expected_value:, actual_value: "bar."}
+          end
+          expect(postgres_resource.check_all_dns_records).to eq [
+            {type: :CNAME, record_name: postgres_resource.hostname, expected_value: "foo.", actual_value: "bar."},
+          ]
+        end
+      end
+    end
   end
 
   describe "#ongoing_failover?" do

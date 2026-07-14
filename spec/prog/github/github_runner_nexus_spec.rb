@@ -110,6 +110,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
       picked_vm = nx.pick_vm
       expect(vm.id).not_to eq(picked_vm.id)
       expect(picked_vm.pool_id).to be_nil
+      expect(picked_vm.vm_storage_volumes.first.track_written).to be(false)
     end
 
     it "uses alien vms by given ratio" do
@@ -124,6 +125,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
       expect(picked_vm.location.aws?).to be(true)
       expect(picked_vm.boot_image).to eq(Config.github_ubuntu_2404_x64_aws_ami_version)
       expect(picked_vm.strand.stack.first["alternative_families"]).to eq(["m7i", "m6a"])
+      expect(picked_vm.user_nic.strand.stack.first["use_eip"]).to be(false)
     end
 
     it "does not use alien vms for large vcpu runners" do
@@ -808,6 +810,19 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
       expect { nx.rescue_common_github_api_errors { raise Octokit::TooManyRequests.new({body: "API rate limit exceeded"}) } }.to nap
         .and change { Page.count }.by(1)
       expect(runner.skip_deregistration_set?).to be(true)
+    end
+
+    it "skips the deregistration if the installation is suspended while destroying" do
+      nx.incr_destroying
+      expect { nx.rescue_common_github_api_errors { raise Octokit::InstallationSuspended.new({body: "This installation has been suspended"}) } }.to nap(0)
+      expect(runner.skip_deregistration_set?).to be(true)
+      expect(runner.destroy_set?).to be(false)
+    end
+
+    it "destroys the runner without deregistration if the installation is suspended while provisioning" do
+      expect { nx.rescue_common_github_api_errors { raise Octokit::InstallationSuspended.new({body: "This installation has been suspended"}) } }.to nap(0)
+      expect(runner.skip_deregistration_set?).to be(true)
+      expect(runner.destroy_set?).to be(true)
     end
 
     def add_github_user(email)

@@ -7,7 +7,7 @@ on:
     branches:
       - clickhouse
     paths:
-      - '.tool-versions'
+      - 'mise.toml'
       - 'bin/respirate'
       - 'scheduling/dispatcher.rb'
       - 'model/strand.rb'
@@ -17,7 +17,7 @@ on:
       - '.github/actions/setup-clover/action.yml'
   pull_request:
     paths:
-      - '.tool-versions'
+      - 'mise.toml'
       - 'bin/respirate'
       - 'scheduling/dispatcher.rb'
       - 'model/strand.rb'

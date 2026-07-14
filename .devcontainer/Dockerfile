@@ -79,7 +79,7 @@ RUN useradd -m -s /bin/bash vscode \
 USER vscode
 WORKDIR /home/vscode
 
-# Install mise (tool versions are synced from .tool-versions in a later step)
+# Install mise (tool versions are synced from mise.toml in a later step)
 RUN curl https://mise.run | sh \
     && echo 'eval "$(/home/vscode/.local/bin/mise activate bash)"' >> /home/vscode/.bashrc
 
@@ -90,10 +90,10 @@ ENV PATH="/home/vscode/.local/share/mise/shims:/home/vscode/.local/bin:${PATH}" 
 
 WORKDIR /workspaces/${WORKSPACE_FOLDER_NAME}
 
-# --- Tool version boundary (.tool-versions is the single source of truth) ---
+# --- Tool version boundary (mise.toml is the single source of truth) ---
 # Installs ruby/nodejs/golang/victoria-metrics via mise plus bundler+foreman.
-# Invalidates the cache below whenever .tool-versions or the sync script changes.
-COPY --chown=vscode:vscode .tool-versions .tool-versions
+# Invalidates the cache below whenever mise.toml/mise.lock or the sync script changes.
+COPY --chown=vscode:vscode mise.toml mise.lock ./
 COPY --chown=vscode:vscode .devcontainer/scripts/sync-tool-versions.sh .devcontainer/scripts/sync-tool-versions.sh
 RUN bash .devcontainer/scripts/sync-tool-versions.sh
 

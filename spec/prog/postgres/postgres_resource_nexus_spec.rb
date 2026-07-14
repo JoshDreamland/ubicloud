@@ -178,11 +178,27 @@ RSpec.describe Prog::Postgres::PostgresResourceNexus do
       expect(pg.server_cert).to be_nil
       expect(pg.server_cert_key).to be_nil
       expect(pg.strand.stack[0]["use_publicly_signed_certificates"]).to be true
+      expect(pg.strand.stack[0]["initial_cert_id"]).to eq pg.strand.stack[0]["current_cert_id"]
       cert = Cert.with_pk!(pg.strand.stack[0]["initial_cert_id"])
       expect(cert.hostname).to eq "*.#{pg.ubid}.pg.ubicloud.app"
       expect(cert.private_hostname).to eq "*.#{pg.ubid}.private.pg.ubicloud.app"
       expect(cert.strand.label).to eq "start"
       expect(cert.strand.stack[0]["waiting_strand_id"]).to eq pg.id
+    end
+
+    it "does not use publicly signed certs for hostname version v3 if there is no DNS zone" do
+      allow(Config).to receive_messages(postgres_service_hostname: "pg.ubicloud.app", acme_email: "test@ubicloud.com")
+      expect(PostgresResource.count).to eq 0
+      st = described_class.assemble(project_id: customer_project.id, location_id:, name: "pg-name", target_vm_size: "standard-2", target_storage_size_gib: 128, hostname_version: "v3")
+      pg = st.subject
+      expect(PostgresResource.count).to eq 1
+      expect(pg.project_id).to eq customer_project.id
+      expect(pg.hostname).to be_nil
+      expect(pg.hostname_version).to eq "v3"
+      expect(pg.server_cert).to be_nil
+      expect(pg.server_cert_key).to be_nil
+      expect(pg.strand.stack[0]).not_to have_key("use_publicly_signed_certificates")
+      expect(pg.strand.stack[0]).not_to have_key("initial_cert_id")
     end
 
     it "sets use_different_az semaphore for AWS locations when FF is set" do
@@ -595,6 +611,7 @@ RSpec.describe Prog::Postgres::PostgresResourceNexus do
       expect(postgres_resource.server_cert).to eq short_server_cert_pem
       expect(postgres_resource.server_cert_key).to eq short_server_key_pem
       expect(Semaphore.where(strand_id: postgres_server.strand.id, name: "refresh_certificates").first).to exist
+      expect(postgres_resource.strand.stack[0]["refresh_cert_id"]).to eq postgres_resource.strand.stack[0]["current_cert_id"]
       cert = Cert.with_pk!(postgres_resource.strand.stack[0]["refresh_cert_id"])
       expect(cert.hostname).to eq "*.#{postgres_resource.ubid}.pg.ubicloud.app"
       expect(cert.private_hostname).to eq "*.#{postgres_resource.ubid}.private.pg.ubicloud.app"
@@ -814,13 +831,15 @@ RSpec.describe Prog::Postgres::PostgresResourceNexus do
         Firewall.create(name: "#{postgres_resource.ubid}-internal-firewall", location_id:, project: postgres_project)
       end
 
-      it "triggers server deletion and waits until it is deleted" do
+      it "triggers server and cert deletion and waits until it is deleted" do
         postgres_server
         expect(Config).to receive(:postgres_service_hostname).and_return("pg.example.com").at_least(:once)
-        DnsZone.create(project_id: postgres_project.id, name: "pg.example.com")
+        dns_zone = DnsZone.create(project_id: postgres_project.id, name: "pg.example.com")
+        cert = Prog::Vnet::CertNexus.assemble("test.postgres.exampe.com", dns_zone.id)
+        refresh_frame(nx, new_values: {"current_cert_id" => cert.id})
 
         expect { nx.wait_children_destroyed }.to exit({"msg" => "postgres resource is deleted"})
-        expect(Semaphore.where(strand_id: postgres_server.strand.id, name: "destroy").first).to exist
+        expect(Semaphore.where(name: "destroy").select_order_map(:strand_id)).to eq [postgres_server.id, cert.id].sort
         expect(postgres_resource).not_to exist
       end
 

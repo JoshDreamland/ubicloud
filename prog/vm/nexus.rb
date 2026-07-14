@@ -13,7 +13,7 @@ class Prog::Vm::Nexus < Prog::Base
     hugepages: true, hypervisor: nil, ch_version: nil, firmware_version: nil, new_private_subnet_name: nil,
     exclude_availability_zones: [], availability_zone: nil, alternative_families: [],
     allow_private_subnet_in_other_project: false, init_script: nil, exclude_data_centers: [],
-    use_separate_management_nic: false)
+    use_separate_management_nic: false, use_eip: true)
 
     unless (project = Project[project_id])
       fail "No existing project"
@@ -39,9 +39,7 @@ class Prog::Vm::Nexus < Prog::Base
       volume[:vring_workers] ||= vm_size.vring_workers
       volume[:encrypted] = true if !volume.has_key? :encrypted
       if !volume.has_key? :track_written
-        volume[:track_written] = !!project.get_ff_machine_image &&
-          storage_volumes.length == 1 &&
-          volume[:size_gib] <= Config.machine_image_max_size_gib
+        volume[:track_written] = !volume[:read_only]
       end
       volume[:boot] = disk_index == boot_disk_index
 
@@ -104,9 +102,8 @@ class Prog::Vm::Nexus < Prog::Base
         else
           subnet = project.default_private_subnet(location)
         end
-
         availability_zone = Prog::Vnet::NicNexus.select_aws_subnet(subnet, availability_zone, exclude_availability_zones).az_suffix if use_separate_management_nic
-        nic = Prog::Vnet::NicNexus.assemble(subnet.id, name: "#{name}-nic", exclude_availability_zones:, availability_zone:).subject
+        nic = Prog::Vnet::NicNexus.assemble(subnet.id, name: "#{name}-nic", exclude_availability_zones:, availability_zone:, use_eip:).subject
       end
 
       vm = Vm.create(

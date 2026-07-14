@@ -120,6 +120,8 @@ module Config
   optional :hetzner_user, string, clear: true
   optional :hetzner_password, string, clear: true
   override :hetzner_connection_string, "https://robot-ws.your-server.de", string
+  optional :leaseweb_api_key, string, clear: true
+  override :leaseweb_connection_string, "https://api.leaseweb.com", string
   override :managed_service, false, bool
   override :sanctioned_countries, "CU,IR,KP,SY", array(string)
   override :hetzner_ssh_public_key, nil, string
@@ -201,6 +203,7 @@ module Config
   override :postgres_boot_disk_size_gib, 16, int
   override :postgres_service_hostname, "postgres.ubicloud.com", string
   override :postgres_service_hostname_v3, "pg.ubicloud.app", string
+  override :postgres_hostname_version_default, "v2", string
   override :postgres_monitor_database_url, Config.clover_database_url, string
   optional :postgres_monitor_database_root_certs, string
   optional :postgres_paradedb_notification_email, string
@@ -263,6 +266,10 @@ module Config
   optional :e2e_aws_assume_role, string
   optional :e2e_gcp_credentials_base64_json, string, clear: true
   optional :e2e_cache_proxy_download_url, string
+  optional :e2e_machine_images_endpoint, string
+  optional :e2e_machine_images_bucket, string
+  optional :e2e_machine_images_access_key, string, clear: true
+  optional :e2e_machine_images_secret_key, string, clear: true
 
   # Local e2e
   optional :local_e2e_postgres_test_project_id, uuid
@@ -274,6 +281,7 @@ module Config
   optional :load_balancer_service_project_id, uuid
   optional :load_balancer_service_hostname, string
   override :load_balancer_service_hostname_v2, Config.load_balancer_service_hostname, string
+  override :load_balancer_hostname_version_default, 2, int
 
   # ACME
   # The following are optional because they are only needed in production.

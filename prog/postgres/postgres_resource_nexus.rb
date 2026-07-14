@@ -8,16 +8,17 @@ class Prog::Postgres::PostgresResourceNexus < Prog::Base
   subject_is :postgres_resource
 
   frame_reader :initial_cert_id
-  frame_accessor :refresh_cert_id
+  frame_accessor :refresh_cert_id, :current_cert_id
 
   extend Forwardable
 
-  def_delegators :postgres_resource, :servers, :representative_server
+  def_delegators :postgres_resource, :representative_server
 
   def self.assemble(project_id:, location_id:, name:, target_vm_size:, target_storage_size_gib:,
     target_version: PostgresResource::DEFAULT_VERSION, flavor: PostgresResource::Flavor::STANDARD,
     ha_type: PostgresResource::HaType::NONE, parent_id: nil, tags: [], restore_target: nil, with_firewall_rules: true,
-    user_config: {}, pgbouncer_user_config: {}, private_subnet_name: nil, init_script: nil, hostname_version: "v2")
+    user_config: {}, pgbouncer_user_config: {}, private_subnet_name: nil, init_script: nil,
+    hostname_version: Config.postgres_hostname_version_default)
 
     unless (project = Project[project_id])
       fail "No existing project"
@@ -52,8 +53,16 @@ class Prog::Postgres::PostgresResourceNexus < Prog::Base
         [parent.superuser_password, parent.timeline.id, "fetch", parent.version]
       end
 
-      if hostname_version == "v3" && Config.acme_email && location.dns_suffix.to_s.empty? && !project.get_ff_postgres_hostname_override
-        strand_args = {stack: ["use_publicly_signed_certificates" => true]}
+      # Copy of conditions from PostgresResource#uses_publicly_signed_certificates?
+      use_publicly_signed_certificates = hostname_version == "v3" &&
+        Config.acme_email &&
+        location.dns_suffix.to_s.empty? &&
+        !project.get_ff_postgres_hostname_override &&
+        DnsZone[project_id: Config.postgres_service_project_id, name: Config.postgres_service_hostname_v3]
+
+      if use_publicly_signed_certificates
+        strand_frame = {"use_publicly_signed_certificates" => true}
+        strand_args = {stack: [strand_frame]}
 
         postgres_resource_id, cert_id = DB[:presigned_postgres_cert]
           .where(postgres_resource_id: DB[:presigned_postgres_cert]
@@ -82,7 +91,7 @@ class Prog::Postgres::PostgresResourceNexus < Prog::Base
         superuser_password:, ha_type:, target_version:, flavor:, parent_id:, tags:, restore_target:, hostname_version:, user_config:, pgbouncer_user_config:)
 
       if need_initial_cert_id
-        strand_args[:stack][0]["initial_cert_id"] = Prog::Vnet::CertNexus.assemble(
+        strand_frame["current_cert_id"] = strand_frame["initial_cert_id"] = Prog::Vnet::CertNexus.assemble(
           postgres_resource.cert_hostname,
           postgres_resource.dns_zone.id,
           private_hostname: postgres_resource.cert_private_hostname,
@@ -227,13 +236,13 @@ class Prog::Postgres::PostgresResourceNexus < Prog::Base
     if !use_publicly_signed_certificates? && OpenSSL::X509::Certificate.new(postgres_resource.root_cert_1).not_after < Time.now + 60 * 60 * 24 * 30 * 5
       postgres_resource.root_cert_1, postgres_resource.root_cert_key_1 = postgres_resource.root_cert_2, postgres_resource.root_cert_key_2
       postgres_resource.root_cert_2, postgres_resource.root_cert_key_2 = Util.create_root_certificate(common_name: "#{postgres_resource.ubid} Root Certificate Authority", duration: 60 * 60 * 24 * 365 * 10)
-      servers.each(&:incr_refresh_certificates)
+      PostgresServer.incr_refresh_certificates(server_ids_dataset)
     end
 
     if OpenSSL::X509::Certificate.new(postgres_resource.client_root_cert_1).not_after < Time.now + 60 * 60 * 24 * 30 * 5
       postgres_resource.client_root_cert_1, postgres_resource.client_root_cert_key_1 = postgres_resource.client_root_cert_2, postgres_resource.client_root_cert_key_2
       postgres_resource.client_root_cert_2, postgres_resource.client_root_cert_key_2 = Util.create_root_certificate(common_name: "#{postgres_resource.ubid} Client Certificate Authority", duration: 60 * 60 * 24 * 365 * 10)
-      servers.each(&:incr_refresh_certificates)
+      PostgresServer.incr_refresh_certificates(server_ids_dataset)
     end
 
     refresh = false
@@ -248,14 +257,14 @@ class Prog::Postgres::PostgresResourceNexus < Prog::Base
         postgres_resource.server_cert, postgres_resource.server_cert_key = create_certificate
       end
       postgres_resource.client_cert, postgres_resource.client_cert_key = create_client_certificate
-      servers.each(&:incr_refresh_certificates)
+      PostgresServer.incr_refresh_certificates(server_ids_dataset)
     end
 
     postgres_resource.certificate_last_checked_at = Time.now
     postgres_resource.save_changes
 
     if use_publicly_signed_certificates? && OpenSSL::X509::Certificate.new(postgres_resource.server_cert).not_after < Time.now + 60 * 60 * 24 * 13
-      self.refresh_cert_id = Prog::Vnet::CertNexus.assemble(
+      self.current_cert_id = self.refresh_cert_id = Prog::Vnet::CertNexus.assemble(
         postgres_resource.cert_hostname,
         postgres_resource.dns_zone.id,
         private_hostname: postgres_resource.cert_private_hostname,
@@ -271,13 +280,13 @@ class Prog::Postgres::PostgresResourceNexus < Prog::Base
   label def wait_refresh_public_cert
     wait_for_public_cert("refresh_cert_id")
     postgres_resource.save_changes
-    servers.each(&:incr_refresh_certificates)
+    PostgresServer.incr_refresh_certificates(server_ids_dataset)
     decr_refresh_certificates
     hop_wait
   end
 
   label def wait_servers
-    nap 5 if servers.any? { it.strand.label != "wait" }
+    nap 5 unless Strand.where(id: server_ids_dataset).exclude(label: "wait").empty?
     hop_update_billing_records
   end
 
@@ -368,7 +377,7 @@ class Prog::Postgres::PostgresResourceNexus < Prog::Base
 
     decr_destroy
 
-    Semaphore.incr(strand.children_dataset.select(:id), "destroy")
+    PostgresResource.incr_destroy(strand.children_dataset.select(:id))
     hop_wait_children_destroyed
   end
 
@@ -376,7 +385,7 @@ class Prog::Postgres::PostgresResourceNexus < Prog::Base
     reap(nap: 5) do
       postgres_resource.private_subnet.incr_destroy_if_only_used_internally(
         ubid: postgres_resource.ubid,
-        vm_ids: servers.map(&:vm_id),
+        vm_ids: postgres_resource.servers_dataset.select(:vm_id),
       )
 
       postgres_resource.internal_firewall.destroy
@@ -388,8 +397,8 @@ class Prog::Postgres::PostgresResourceNexus < Prog::Base
         client.delete_role(role_name: postgres_resource.ubid)
       end
 
-      servers.each(&:incr_destroy)
-
+      PostgresServer.incr_destroy(server_ids_dataset)
+      Cert.incr_destroy(current_cert_id) if current_cert_id
       postgres_resource.dns_zone&.delete_record(record_name: postgres_resource.hostname)
       postgres_resource.destroy
 
@@ -419,6 +428,10 @@ class Prog::Postgres::PostgresResourceNexus < Prog::Base
       issuer_cert:,
       issuer_key:,
     ).map(&:to_pem)
+  end
+
+  def server_ids_dataset
+    postgres_resource.servers_dataset.select(:id)
   end
 
   def use_publicly_signed_certificates?

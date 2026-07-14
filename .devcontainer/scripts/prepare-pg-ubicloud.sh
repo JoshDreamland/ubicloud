@@ -33,9 +33,9 @@ if [ ${#REGIONS[@]} -eq 0 ]; then
 fi
 
 # 0. Sync mise-managed tools (ruby/nodejs/golang/victoria-metrics) from
-#    .tool-versions and re-bundle if Ruby was bumped by an upstream merge.
+#    mise.toml and re-bundle if Ruby was bumped by an upstream merge.
 echo ""
-echo "=== Syncing mise tools from .tool-versions ==="
+echo "=== Syncing mise tools from mise.toml ==="
 "$SCRIPT_DIR/sync-tool-versions.sh"
 # After a tool-version bump, the parent shell's PATH still points at the
 # previously-active versions. Refresh this script's env so the remaining
