@@ -83,7 +83,7 @@ WORKDIR /home/vscode
 RUN curl https://mise.run | sh \
     && echo 'eval "$(/home/vscode/.local/bin/mise activate bash)"' >> /home/vscode/.bashrc
 
-# Use mise shims for version-independent PATH.
+# Use mise shims for version-independent PATH
 ENV PATH="/home/vscode/.local/share/mise/shims:/home/vscode/.local/bin:${PATH}" \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
