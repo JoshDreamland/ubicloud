@@ -252,10 +252,8 @@ jobs:
               " 2>/dev/null
             ' > /tmp/ci-logs/strand-state.log 2>/dev/null || true
 
-      # NOTE: temporarily `always()` to verify the triage step end-to-end on a
-      # passing run; revert to `failure()` before merge.
       - name: Triage failure with Claude
-        if: always()
+        if: failure()
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
