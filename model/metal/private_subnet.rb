@@ -27,6 +27,27 @@ class PrivateSubnet < Sequel::Model
     # responsible for coordinating rekeying for the entire mesh. A
     # standalone subnet is its own leader.
     def connected_leader_id
+      mesh_dataset.order(:id).get(:id)
+    end
+
+    # All subnets transitively connected to this one, itself included.
+    def mesh_member_ids
+      mesh_dataset.select_map(:id)
+    end
+
+    # Operator cutover tool: flip a whole mesh's rekey protocol in one
+    # transaction, derived from any member, so partial-mesh flips are
+    # impossible. A concurrent connect_subnet can still leave a mixed
+    # mesh; re-running repairs it. Removed with v1.
+    def flip_mesh_rekey_protocol!(to)
+      PrivateSubnet.where(id: mesh_member_ids).update(rekey_protocol: to)
+    end
+
+    private
+
+    # The mesh as a dataset: this subnet plus everything transitively
+    # reachable over connected_subnet edges.
+    def mesh_dataset
       DB[:subnet]
         .with_recursive(:subnet,
           this.select(:id),
@@ -35,18 +56,26 @@ class PrivateSubnet < Sequel::Model
             .select(Sequel.case({subnet_id_1: :subnet_id_2}, :subnet_id_1, Sequel[:subnet][:id])),
           cycle: {columns: :id})
         .exclude(:is_cycle)
-        .order(:id)
-        .get(:id)
     end
-
-    private
 
     def metal_connect_subnet(subnet)
       ConnectedSubnet.create(subnet_hash(subnet))
       nics.each do |nic|
         create_tunnels(subnet.nics, nic)
       end
+      normalize_mesh_rekey_protocol
       subnet.incr_refresh_keys
+      incr_refresh_keys if reload.rekey_protocol == 2
+    end
+
+    # Transitional: the rekey protocol must be uniform across a
+    # connected mesh because the coordinator and the claimed NICs span
+    # the whole mesh. When meshes with differing protocols are joined,
+    # v1 wins: a customer-initiated connect can shrink the v2 canary
+    # but never silently expand it. Removed with v1.
+    def normalize_mesh_rekey_protocol
+      ds = PrivateSubnet.where(id: mesh_member_ids)
+      ds.update(rekey_protocol: 1) unless ds.where(rekey_protocol: 1).empty?
     end
 
     def metal_disconnect_subnet(subnet)

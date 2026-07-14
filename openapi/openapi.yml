@@ -2103,6 +2103,10 @@ paths:
               properties:
                 maintenance_window_start_at:
                   type: integer
+                maintenance_window_days:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/MaintenanceWindowDay'
               additionalProperties: false
       responses:
         '200':
@@ -3020,6 +3024,16 @@ components:
       schema:
         $ref: '#/components/schemas/Reference'
   schemas:
+    MaintenanceWindowDay:
+      type: string
+      enum:
+        - mon
+        - tue
+        - wed
+        - thu
+        - fri
+        - sat
+        - sun
     Kubeconfig:
       description: Raw YAML content of a Kubernetes cluster configuration file
       type: string
@@ -3709,6 +3723,11 @@ components:
           description: Maintenance window start time
           type: integer
           nullable: true
+        maintenance_window_days:
+          description: Days of the week the maintenance window applies to (empty list means every day)
+          type: array
+          items:
+            $ref: '#/components/schemas/MaintenanceWindowDay'
         read_replica:
           description: If the database is a read replica or not
           type: boolean
