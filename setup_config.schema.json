@@ -102,7 +102,7 @@
         "dns_suffix": {
           "type": "string",
           "minLength": 1,
-          "description": "Per-location DNS subdomain. Required for aws locations; omitted for gcp locations, which fall back to publicly-signed certificates (DNS server provisioning is not yet supported on gcp)."
+          "description": "Per-location DNS subdomain. Required for all locations; DNS server VMs are provisioned for it and postgres hostnames/certificates are derived from it."
         },
         "gcp_project_id": {
           "type": "string",
@@ -136,12 +136,12 @@
           "required": ["role", "dns_suffix"]
         },
         {
-          "description": "GCP location: service-account impersonation; capacity_reservation and dns_suffix do not apply.",
+          "description": "GCP location: service-account impersonation; capacity_reservation does not apply.",
           "properties": {
             "provider": { "enum": ["gcp"] },
             "region": { "pattern": "^gcp-[a-z]+-[a-z0-9]+$" }
           },
-          "required": ["provider", "gcp_project_id", "service_account_email"]
+          "required": ["provider", "gcp_project_id", "service_account_email", "dns_suffix"]
         }
       ]
     },

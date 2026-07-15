@@ -96,7 +96,7 @@ module UbicloudSetup
   def self.add_location(location)
     provider = location.provider || "aws"
     # nil (not "") so PostgresResource#hostname_suffix's compact drops it instead of
-    # producing a leading-dot hostname. GCP locations omit dns_suffix entirely.
+    # producing a leading-dot hostname.
     dns_suffix = location.dns_suffix.to_s.empty? ? nil : location.dns_suffix
     DB.transaction do
       Clog.emit "Checking if location #{location.account_name}:#{location.region} already exists"
@@ -294,7 +294,7 @@ module UbicloudSetup
     end
   end
 
-  def self.setup_dns_for_location(project_id, location, dns_vm_ami: nil)
+  def self.setup_dns_for_location(project_id, location, vm_size:, boot_image:)
     if location.dns_suffix.nil? || location.dns_suffix.empty?
       Clog.emit "Location #{location.account_name}:#{location.region} has no dns_suffix, not creating dns server"
       fail "Location #{location.account_name}:#{location.region} has no dns_suffix"
@@ -316,7 +316,6 @@ module UbicloudSetup
 
       # Provision DNS server VMs
       target_vm_count = 2
-      fail "dns_vm_ami is required for location #{location.region}" if dns_vm_ami.nil? || dns_vm_ami.empty?
 
       # Count existing VMs (force evaluation to integer)
       existing_vm_count = Integer(dns_server.vms.count)
@@ -336,9 +335,10 @@ module UbicloudSetup
         vms_to_provision.times do
           Prog::DnsZone::SetupDnsServerVm.assemble(
             dns_server,
-            vm_size: "m7i.large",
+            vm_size:,
             location_id: ex_location.id,
-            boot_image: dns_vm_ami,
+            boot_image:,
+            restrict_ssh_to_control_plane: true,
           )
         end
       else
@@ -488,17 +488,15 @@ module UbicloudSetup
     setup_config.locations.each do |location|
       add_location(location)
       setup_capacity_reservation(location)
-      # TODO: GCP DNS server provisioning is not yet implemented (no AWS AMI / no
-      # SSD-free GCP machine type wired up). Skip it for now; remove this guard when
-      # GCP DNS support lands. GCP postgres falls back to publicly-signed certs.
-      if location.provider == "gcp"
-        Clog.emit "Skipping DNS server provisioning for GCP location #{location.account_name}:#{location.region} (not yet supported)"
-        next
+      vm_size, boot_image = if location.provider == "gcp"
+        ["c4a-standard-4", "ubuntu-noble"]
+      else
+        # Get DNS AMI for this region (x64 arch required)
+        dns_ami = setup_config.dns_server_amis.dig(location.region, :arch_x64)
+        fail "DNS AMI not configured for region #{location.region}" if dns_ami.nil? || dns_ami.empty?
+        ["m7i.large", dns_ami]
       end
-      # Get DNS AMI for this region (x64 arch required)
-      dns_ami = setup_config.dns_server_amis.dig(location.region, :arch_x64)
-      fail "DNS AMI not configured for region #{location.region}" if dns_ami.nil? || dns_ami.empty?
-      setup_dns_for_location(project_id, location, dns_vm_ami: dns_ami)
+      setup_dns_for_location(project_id, location, vm_size:, boot_image:)
     end
 
     setup_config.pg_amis.each do |region, versions|

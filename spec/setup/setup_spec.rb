@@ -468,7 +468,7 @@ RSpec.describe "UbicloudSetup" do
       expect(DnsServer.count).to eq 0
       expect(DnsZone.count).to eq 0
       expect {
-        UbicloudSetup.setup_dns_for_location(project_id, UbicloudSetup::LocationConfig.new(account_name: "account_name", name: "test-location", region: "region", role: "role", dns_suffix: ""))
+        UbicloudSetup.setup_dns_for_location(project_id, UbicloudSetup::LocationConfig.new(account_name: "account_name", name: "test-location", region: "region", role: "role", dns_suffix: ""), vm_size: "m7i.large", boot_image: "ami-test123")
       }.to raise_error(RuntimeError, /no dns_suffix/)
       expect(DnsServer.count).to eq 0
       expect(DnsZone.count).to eq 0
@@ -479,7 +479,7 @@ RSpec.describe "UbicloudSetup" do
       expect(Config).to receive("postgres_service_hostname").at_least(:once).and_return(postgres_service_hostname)
       expect(DnsServer.count).to eq 0
       expect(DnsZone.count).to eq 0
-      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: location.ui_name, name: location.display_name, region: location.name, role: location_credential.assume_role, dns_suffix: location.dns_suffix), dns_vm_ami: "ami-test123")
+      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: location.ui_name, name: location.display_name, region: location.name, role: location_credential.assume_role, dns_suffix: location.dns_suffix), vm_size: "m7i.large", boot_image: "ami-test123")
       expect(DnsServer.count).to eq 1
       expect(DnsZone.count).to eq 1
       # Match Location, DNS Server and DnsZone 1:1
@@ -504,7 +504,7 @@ RSpec.describe "UbicloudSetup" do
       dns_server = DnsServer.create(name: "dns_suffix2.pg.clickhouse-tests.com")
       expect(DnsZone.count).to eq 0
       expect(DnsServer.count).to eq 1
-      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: location.ui_name, name: location.display_name, region: location.name, role: location_credential.assume_role, dns_suffix: location.dns_suffix), dns_vm_ami: "ami-test123")
+      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: location.ui_name, name: location.display_name, region: location.name, role: location_credential.assume_role, dns_suffix: location.dns_suffix), vm_size: "m7i.large", boot_image: "ami-test123")
       expect(DnsZone.count).to eq 1
       expect(DnsServer.count).to eq 1
       dns_zone = DnsZone.where(name: "dns_suffix2.pg.clickhouse-tests.com", project_id: project.id).first
@@ -522,7 +522,7 @@ RSpec.describe "UbicloudSetup" do
       expect(DnsZone.count).to eq 1
       expect(DnsServer.count).to eq 1
       expect(dns_server.dns_zones.length).to eq 0
-      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: location.ui_name, name: location.display_name, region: location.name, role: location_credential.assume_role, dns_suffix: location.dns_suffix), dns_vm_ami: "ami-test123")
+      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: location.ui_name, name: location.display_name, region: location.name, role: location_credential.assume_role, dns_suffix: location.dns_suffix), vm_size: "m7i.large", boot_image: "ami-test123")
       expect(DnsZone.count).to eq 1
       expect(DnsServer.count).to eq 1
       expect(DnsServer.first).to eq dns_server
@@ -539,7 +539,7 @@ RSpec.describe "UbicloudSetup" do
       expect(DnsZone.count).to eq 1
       expect(DnsServer.count).to eq 1
       expect(dns_server.dns_zones.length).to eq 1
-      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: location.ui_name, name: location.display_name, region: location.name, role: location_credential.assume_role, dns_suffix: location.dns_suffix), dns_vm_ami: "ami-test123")
+      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: location.ui_name, name: location.display_name, region: location.name, role: location_credential.assume_role, dns_suffix: location.dns_suffix), vm_size: "m7i.large", boot_image: "ami-test123")
       expect(DnsZone.count).to eq 1
       expect(DnsServer.count).to eq 1
       expect(dns_server.dns_zones).to eq [dns_zone]
@@ -556,28 +556,12 @@ RSpec.describe "UbicloudSetup" do
       expect(DnsServer.count).to eq 1
       expect(dns_server.dns_zones).to eq [dns_zone]
       expect(dns_server.dns_zones.length).to eq 1
-      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: location.ui_name, name: location.display_name, region: location.name, role: location_credential.assume_role, dns_suffix: location.dns_suffix), dns_vm_ami: "ami-test123")
+      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: location.ui_name, name: location.display_name, region: location.name, role: location_credential.assume_role, dns_suffix: location.dns_suffix), vm_size: "m7i.large", boot_image: "ami-test123")
       expect(DnsZone.count).to eq 1
       expect(DnsServer.count).to eq 1
       expect(dns_server.dns_zones).to eq [dns_zone]
       expect(dns_server.dns_zones.length).to eq 1
       expect(Strand[dns_zone.id]).to eq strand
-    end
-
-    it "fail on missing dns_vm_ami" do
-      Location.create(name: "region", ui_name: "account_name", display_name: "test-location", provider: "aws", visible: true, project_id: nil, dns_suffix: "dns_suffix2")
-      expect(Config).to receive("postgres_service_hostname").at_least(:once).and_return(postgres_service_hostname)
-      expect {
-        UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: "account_name", name: "test-location", region: "region", role: "role", dns_suffix: "dns_suffix2"), dns_vm_ami: nil)
-      }.to raise_error(/dns_vm_ami is required/)
-    end
-
-    it "fail on empty dns_vm_ami" do
-      Location.create(name: "region", ui_name: "account_name", display_name: "test-location", provider: "aws", visible: true, project_id: nil, dns_suffix: "dns_suffix2")
-      expect(Config).to receive("postgres_service_hostname").at_least(:once).and_return(postgres_service_hostname)
-      expect {
-        UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: "account_name", name: "test-location", region: "region", role: "role", dns_suffix: "dns_suffix2"), dns_vm_ami: "")
-      }.to raise_error(/dns_vm_ami is required/)
     end
 
     it "provisions VMs when count is below target" do
@@ -587,7 +571,20 @@ RSpec.describe "UbicloudSetup" do
       dns_zone.add_dns_server dns_server
 
       expect(Prog::DnsZone::SetupDnsServerVm).to receive(:assemble).twice
-      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: location.ui_name, name: location.display_name, region: location.name, role: location_credential.assume_role, dns_suffix: location.dns_suffix), dns_vm_ami: "ami-test123")
+        .with(dns_server, vm_size: "m7i.large", location_id: location.id, boot_image: "ami-test123", restrict_ssh_to_control_plane: true)
+      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: location.ui_name, name: location.display_name, region: location.name, role: location_credential.assume_role, dns_suffix: location.dns_suffix), vm_size: "m7i.large", boot_image: "ami-test123")
+    end
+
+    it "provisions gcp VMs with the caller-provided size and image" do
+      gcp_location = Location.create(name: "gcp-us-central1", ui_name: "gcp-account", display_name: "GCP US Central 1", provider: "gcp", visible: true, project_id: nil, dns_suffix: "gcp-central")
+      expect(Config).to receive("postgres_service_hostname").at_least(:once).and_return(postgres_service_hostname)
+
+      expect(Prog::DnsZone::SetupDnsServerVm).to receive(:assemble).twice
+        .with(an_instance_of(DnsServer), vm_size: "c4a-standard-4", location_id: gcp_location.id, boot_image: "ubuntu-noble", restrict_ssh_to_control_plane: true)
+      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: "gcp-account", name: "GCP US Central 1", region: "gcp-us-central1", provider: "gcp", dns_suffix: "gcp-central"), vm_size: "c4a-standard-4", boot_image: "ubuntu-noble")
+
+      expect(DnsServer.where(name: "gcp-central.pg.clickhouse-tests.com").count).to eq 1
+      expect(DnsZone.where(name: "gcp-central.pg.clickhouse-tests.com", project_id: project.id).count).to eq 1
     end
 
     it "does not provision VMs when target is already met" do
@@ -615,7 +612,7 @@ RSpec.describe "UbicloudSetup" do
       end
 
       expect(Prog::DnsZone::SetupDnsServerVm).not_to receive(:assemble)
-      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: location.ui_name, name: location.display_name, region: location.name, role: location_credential.assume_role, dns_suffix: location.dns_suffix), dns_vm_ami: "ami-test123")
+      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: location.ui_name, name: location.display_name, region: location.name, role: location_credential.assume_role, dns_suffix: location.dns_suffix), vm_size: "m7i.large", boot_image: "ami-test123")
     end
 
     it "counts running strands towards target" do
@@ -645,7 +642,7 @@ RSpec.describe "UbicloudSetup" do
 
       # Should not provision any more VMs (1 existing + 1 running = 2 target)
       expect(Prog::DnsZone::SetupDnsServerVm).not_to receive(:assemble)
-      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: location.ui_name, name: location.display_name, region: location.name, role: location_credential.assume_role, dns_suffix: location.dns_suffix), dns_vm_ami: "ami-test123")
+      UbicloudSetup.setup_dns_for_location(project.id, UbicloudSetup::LocationConfig.new(account_name: location.ui_name, name: location.display_name, region: location.name, role: location_credential.assume_role, dns_suffix: location.dns_suffix), vm_size: "m7i.large", boot_image: "ami-test123")
     end
   end
 
@@ -775,14 +772,19 @@ RSpec.describe "UbicloudSetup" do
       expect { UbicloudSetup.run_ch_ubi }.to raise_error(RuntimeError, /no dns_suffix/)
     end
 
-    it "creates gcp locations, skips dns provisioning, and gates UI visibility via project_visible" do
+    it "fails for gcp locations without a dns_suffix" do
       stub_setup_yaml("setup_test_gcp.yaml")
+      expect { UbicloudSetup.run_ch_ubi }.to raise_error(RuntimeError, /has no dns_suffix/)
+    end
+
+    it "creates gcp locations and gates UI visibility via project_visible" do
+      stub_setup_yaml("setup_test_gcp_dns.yaml")
       UbicloudSetup.run_ch_ubi
       central = Location.where(name: "gcp-us-central1", ui_name: "dev-gcp-us-central1-clickgres").first
       east = Location.where(name: "gcp-us-east4", ui_name: "dev-gcp-us-east4-clickgres").first
       expect(central).not_to be_nil
       expect(central.provider).to eq "gcp"
-      expect(central.dns_suffix).to be_nil
+      expect(central.dns_suffix).to eq "gcp-central"
       expect(LocationCredentialGcp[central.id]).to have_attributes(
         project_id: "my-gcp-project",
         service_account_email: "clickgres-cell@my-gcp-project.iam.gserviceaccount.com",
@@ -790,9 +792,6 @@ RSpec.describe "UbicloudSetup" do
       )
       expect(east).not_to be_nil
       expect(LocationCredentialGcp[east.id]).not_to be_nil
-      expect(Prog::DnsZone::SetupDnsServerVm).not_to have_received(:assemble)
-      expect(DnsServer.count).to eq 0
-
       # project_visible drives the per-project visible_postgres_locations ff (the gcp UI gate):
       # central is visible, east is not.
       project = Project.where(name: "clickgres-development").first
@@ -801,6 +800,23 @@ RSpec.describe "UbicloudSetup" do
 
       expect(PgGceImage.where(arch: "x64", gce_image_name: "postgres-ubuntu-2404-x64-20260218").first&.pg_versions).to eq(["16", "17", "18"])
       expect(PgGceImage.where(arch: "arm64", gce_image_name: "postgres-ubuntu-2404-arm64-20260218").first&.pg_versions).to eq(["16", "17", "18"])
+    end
+
+    it "provisions dns for gcp locations that declare a dns_suffix" do
+      stub_setup_yaml("setup_test_gcp_dns.yaml")
+      UbicloudSetup.run_ch_ubi
+      central = Location.where(name: "gcp-us-central1", ui_name: "dev-gcp-us-central1-clickgres").first
+      east = Location.where(name: "gcp-us-east4", ui_name: "dev-gcp-us-east4-clickgres").first
+      expect(central.dns_suffix).to eq "gcp-central"
+      expect(east.dns_suffix).to eq "gcp-east"
+
+      [["gcp-central", central], ["gcp-east", east]].each do |suffix, loc|
+        dns_hostname = "#{suffix}.#{Config.postgres_service_hostname}"
+        expect(DnsServer.where(name: dns_hostname).count).to eq 1
+        expect(DnsZone.where(name: dns_hostname).count).to eq 1
+        expect(Prog::DnsZone::SetupDnsServerVm).to have_received(:assemble).twice
+          .with(an_instance_of(DnsServer), vm_size: "c4a-standard-4", location_id: loc.id, boot_image: "ubuntu-noble", restrict_ssh_to_control_plane: true)
+      end
     end
 
     it "no cleanup default locations" do
@@ -854,13 +870,13 @@ RSpec.describe "UbicloudSetup" do
     schema = JsonSchema.parse!(JSON.parse(File.read(schema_path)))
     schema.expand_references!
 
-    # Configs that should fail schema validation. setup_test_no_dns_suffix.yaml
-    # was authored to exercise the runtime dns_suffix-missing failure path;
-    # setup_test_disabled.yaml drives the `enabled: false` no-op path and
-    # happens to also omit dns_suffix on its locations (those locations are
-    # never read at runtime). Both have aws-shaped locations missing dns_suffix,
-    # so they satisfy neither branch of the provider oneOf (aws requires
-    # dns_suffix; gcp requires provider + gcp_project_id + service_account_email).
+    # Configs that should fail schema validation: their locations omit
+    # dns_suffix, which both provider branches of the oneOf require.
+    # setup_test_no_dns_suffix.yaml and setup_test_gcp.yaml were authored to
+    # exercise the runtime dns_suffix-missing failure paths (aws and gcp
+    # respectively); setup_test_disabled.yaml drives the `enabled: false`
+    # no-op path and happens to also omit dns_suffix on its locations (those
+    # locations are never read at runtime).
     location_one_of_failed = {type: :one_of_failed, message: /No subschema in "oneOf" matched/}
     invalid_configs = {
       "setup_test_no_dns_suffix.yaml" => [
@@ -868,6 +884,10 @@ RSpec.describe "UbicloudSetup" do
         location_one_of_failed.merge(path: ["#", "locations", 1]),
       ],
       "setup_test_disabled.yaml" => [
+        location_one_of_failed.merge(path: ["#", "locations", 0]),
+        location_one_of_failed.merge(path: ["#", "locations", 1]),
+      ],
+      "setup_test_gcp.yaml" => [
         location_one_of_failed.merge(path: ["#", "locations", 0]),
         location_one_of_failed.merge(path: ["#", "locations", 1]),
       ],
