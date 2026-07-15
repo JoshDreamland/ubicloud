@@ -135,8 +135,7 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
   label def bootstrap_control_plane_nodes
     nap 5 unless kubernetes_cluster.endpoint
 
-    ready_to_bootstrap_workers = kubernetes_cluster.nodes.count >= 1
-    kubernetes_cluster.nodepools.each(&:incr_start_bootstrapping) if ready_to_bootstrap_workers
+    KubernetesNodepool.incr_start_bootstrapping(kubernetes_cluster.nodepools_dataset.select(:id)) if kubernetes_cluster.nodes_dataset.count == 1
 
     hop_wait_nodes if kubernetes_cluster.nodes.count >= kubernetes_cluster.cp_node_count
 
@@ -250,6 +249,18 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
 
     when_sync_kubeconfig_set? do
       hop_sync_kubeconfig
+    end
+
+    when_upgrade_nodepools_set? do
+      nap 30 if kubernetes_cluster.nodepools(eager: :semaphores).any?(&:upgrading?)
+
+      if (nodepool = kubernetes_cluster.nodepools.find(&:upgrade_requested_set?))
+        nodepool.decr_upgrade_requested
+        nodepool.incr_upgrade
+        nap 30
+      end
+
+      decr_upgrade_nodepools
     end
 
     renew_expiring_cp_certs

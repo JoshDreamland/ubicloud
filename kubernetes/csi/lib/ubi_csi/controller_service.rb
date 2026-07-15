@@ -25,11 +25,18 @@ module Csi
         @logger = logger
         @volume_store = {} # Maps volume name to volume details
         @mutex = Mutex.new
+        start_capacity_manager
         start_stuck_volume_detector
       end
 
       def shutdown!
+        @capacity_manager&.shutdown!
         @stuck_volume_detector&.shutdown!
+      end
+
+      def start_capacity_manager
+        @capacity_manager = Csi::CapacityManager.new(logger: @logger, max_volume_size:)
+        @capacity_manager.start
       end
 
       def start_stuck_volume_detector
@@ -67,7 +74,7 @@ module Csi
         selected ||= requisite.find { |topo| !topo.segments["kubernetes.io/hostname"].start_with?("kc") }
 
         if selected.nil?
-          raise GRPC::FailedPrecondition.new("No suitable worker node topology found", GRPC::Core::StatusCodes::FAILED_PRECONDITION)
+          raise GRPC::FailedPrecondition.new("No suitable worker node topology found")
         end
 
         selected
@@ -129,19 +136,29 @@ module Csi
 
           if existing
             if req.accessibility_requirements.requisite.first != existing[:accessible_topology]
-              raise GRPC::FailedPrecondition.new("Existing volume has incompatible topology", GRPC::Core::StatusCodes::FAILED_PRECONDITION)
+              raise GRPC::FailedPrecondition.new("Existing volume has incompatible topology")
             end
             if existing[:capacity_bytes] != req.capacity_range.required_bytes
-              raise GRPC::FailedPrecondition.new("Volume with same name but different size exists", GRPC::Core::StatusCodes::FAILED_PRECONDITION)
+              raise GRPC::FailedPrecondition.new("Volume with same name but different size exists")
             end
             if existing[:parameters] != req.parameters.to_h
-              raise GRPC::FailedPrecondition.new("Volume with same name but different parameters exists", GRPC::Core::StatusCodes::FAILED_PRECONDITION)
+              raise GRPC::FailedPrecondition.new("Volume with same name but different parameters exists")
             end
 
             existing_capabilities = existing[:capabilities].sort_by(&:to_json)
             new_capabilities = req.volume_capabilities.map(&:to_h).sort_by(&:to_json)
             if existing_capabilities != new_capabilities
-              raise GRPC::FailedPrecondition.new("Volume with same name but different capabilities exists", GRPC::Core::StatusCodes::FAILED_PRECONDITION)
+              raise GRPC::FailedPrecondition.new("Volume with same name but different capabilities exists")
+            end
+          else
+            reserved = @capacity_manager.reserve(
+              hostname: selected_topology.segments["kubernetes.io/hostname"],
+              vol_id: new_volume_id,
+              size_bytes: req.capacity_range.required_bytes,
+            )
+            unless reserved
+              @mutex.synchronize { @volume_store.delete(req.name) }
+              raise GRPC::ResourceExhausted.new("Insufficient capacity on node")
             end
           end
 
@@ -160,7 +177,7 @@ module Csi
 
       def delete_volume(req, _call)
         log_request_response(req, "delete_volume") do |req_id|
-          raise GRPC::InvalidArgument.new("Volume ID is required", GRPC::Core::StatusCodes::INVALID_ARGUMENT) if req.volume_id.nil? || req.volume_id.empty?
+          raise GRPC::InvalidArgument.new("Volume ID is required") if req.volume_id.nil? || req.volume_id.empty?
 
           client = KubernetesClient.new(req_id:, logger: @logger)
           # Since we would have at most 8 PVCs per node, searching by value will not cause overhead
@@ -187,6 +204,7 @@ module Csi
             raise GRPC::Internal, "Could not delete the PV's backing file"
           end
           @mutex.synchronize { @volume_store.delete(pv_name) }
+          @capacity_manager.release(vol_id: req.volume_id)
 
           DeleteVolumeResponse.new
         rescue GRPC::BadStatus => e

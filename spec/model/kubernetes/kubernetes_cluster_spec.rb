@@ -53,27 +53,15 @@ RSpec.describe KubernetesCluster do
     expect(kc.display_state).to eq "upgrading"
 
     kc.strand.update(label: "wait")
-    np.strand.update(label: "upgrade")
-    kc.reload
-    np.reload
-    expect(kc.display_state).to eq "upgrading"
-
-    np.strand.update(label: "wait_upgrade")
-    kc.reload
-    np.reload
-    expect(kc.display_state).to eq "upgrading"
-
-    np.strand.update(label: "wait")
     kc.incr_upgrade
     kc.reload
     expect(kc.display_state).to eq "upgrading"
     Semaphore.where(strand_id: kc.id, name: "upgrade").destroy
 
-    np.incr_upgrade
+    kc.incr_upgrade_nodepools
     kc.reload
-    np.reload
     expect(kc.display_state).to eq "upgrading"
-    Semaphore.where(strand_id: np.id, name: "upgrade").destroy
+    Semaphore.where(strand_id: kc.id, name: "upgrade_nodepools").destroy
 
     kc.incr_destroy
     kc.reload
@@ -82,6 +70,58 @@ RSpec.describe KubernetesCluster do
     kc.incr_destroying
     kc.reload
     expect(kc.display_state).to eq "deleting"
+  end
+
+  it "#ready_for_upgrade? is true only when an upgrade is available and the whole cluster is idle" do
+    np1 = Prog::Kubernetes::KubernetesNodepoolNexus.assemble(name: "np1", node_count: 1, kubernetes_cluster_id: kc.id).subject
+    np2 = Prog::Kubernetes::KubernetesNodepoolNexus.assemble(name: "np2", node_count: 1, kubernetes_cluster_id: kc.id).subject
+    kc.strand.update(label: "wait")
+    np1.strand.update(label: "wait")
+    np2.strand.update(label: "wait")
+    expect(kc.reload.ready_for_upgrade?).to be false
+
+    kc.update(version: Option.selectable_kubernetes_versions[1])
+    expect(kc.reload.ready_for_upgrade?).to be true
+
+    np2.strand.update(label: "bootstrap_worker_nodes")
+    expect(kc.reload.ready_for_upgrade?).to be false
+
+    np2.strand.update(label: "upgrade")
+    expect(kc.reload.ready_for_upgrade?).to be false
+
+    np2.strand.update(label: "wait")
+    kc.incr_upgrade
+    expect(kc.reload.ready_for_upgrade?).to be false
+
+    Semaphore.where(strand_id: kc.id, name: "upgrade").destroy
+    kc.incr_upgrade_nodepools
+    expect(kc.reload.ready_for_upgrade?).to be false
+
+    Semaphore.where(strand_id: kc.id, name: "upgrade_nodepools").destroy
+    np2.incr_upgrade_requested
+    expect(kc.reload.ready_for_upgrade?).to be false
+
+    Semaphore.where(strand_id: np2.id, name: "upgrade_requested").destroy
+    np2.incr_scale_worker_count
+    expect(kc.reload.ready_for_upgrade?).to be false
+
+    Semaphore.where(strand_id: np2.id, name: "scale_worker_count").destroy
+    kc.incr_sync_kubeconfig
+    expect(kc.reload.ready_for_upgrade?).to be true
+  end
+
+  it "#upgrade_to_version stamps the cluster and nodepool versions and requests nodepool upgrades" do
+    kc.update(version: Option.selectable_kubernetes_versions[1])
+    nps = ["np1", "np2"].map { Prog::Kubernetes::KubernetesNodepoolNexus.assemble(name: it, node_count: 1, kubernetes_cluster_id: kc.id).subject }
+
+    kc.upgrade_to_version(Option.selectable_kubernetes_versions.first)
+
+    expect(kc.version).to eq(Option.selectable_kubernetes_versions.first)
+    expect(kc.upgrade_set?).to be true
+    expect(kc.upgrade_nodepools_set?).to be true
+    expect(nps.map { it.reload.version }).to eq([Option.selectable_kubernetes_versions.first] * 2)
+    expect(nps.map(&:upgrade_requested_set?)).to eq([true, true])
+    expect(nps.map(&:upgrade_set?)).to eq([false, false])
   end
 
   describe "#kubeadm_recorded_version" do
@@ -328,7 +368,7 @@ RSpec.describe KubernetesCluster do
       extra_vm = Prog::Vm::Nexus.assemble("k y", kc.project.id, name: "extra-vm", private_subnet_id: kc.private_subnet.id).subject
       missing_vm = Prog::Vm::Nexus.assemble("k y", kc.project.id, name: "missing-vm", private_subnet_id: kc.private_subnet.id).subject
       lb.add_vm(extra_vm)
-      kn = KubernetesNodepool.create(name: "np", node_count: 1, kubernetes_cluster_id: kc.id, target_node_size: "standard-2")
+      kn = Prog::Kubernetes::KubernetesNodepoolNexus.assemble(name: "np", node_count: 1, kubernetes_cluster_id: kc.id, target_node_size: "standard-2").subject
       KubernetesNode.create(vm_id: missing_vm.id, kubernetes_cluster_id: kc.id, kubernetes_nodepool_id: kn.id)
       extra_vms, missing_vms = kc.vm_diff_for_lb(lb)
       expect(extra_vms.count).to eq(1)
@@ -400,7 +440,7 @@ RSpec.describe KubernetesCluster do
     let(:session) { Net::SSH::Connection::Session.allocate }
 
     before do
-      kn = KubernetesNodepool.create(name: "np", node_count: 2, kubernetes_cluster_id: kc.id, target_node_size: "standard-2")
+      kn = Prog::Kubernetes::KubernetesNodepoolNexus.assemble(name: "np", node_count: 2, kubernetes_cluster_id: kc.id, target_node_size: "standard-2").subject
       KubernetesNode.create(vm_id: create_vm.id, kubernetes_cluster_id: kc.id)
       KubernetesNode.create(vm_id: create_vm.id, kubernetes_cluster_id: kc.id, kubernetes_nodepool_id: kn.id)
       KubernetesNode.create(vm_id: create_vm.id, kubernetes_cluster_id: kc.id, kubernetes_nodepool_id: kn.id)

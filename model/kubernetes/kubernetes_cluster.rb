@@ -20,7 +20,7 @@ class KubernetesCluster < Sequel::Model
   dataset_module Pagination
 
   plugin ResourceMethods, encrypted_columns: :kubeconfig
-  plugin SemaphoreMethods, :destroy, :sync_kubernetes_services, :upgrade, :install_metrics_server, :sync_worker_mesh, :install_csi, :update_billing_records, :sync_internal_dns_config, :sync_kubeconfig
+  plugin SemaphoreMethods, :destroy, :sync_kubernetes_services, :upgrade, :upgrade_nodepools, :install_metrics_server, :sync_worker_mesh, :install_csi, :update_billing_records, :sync_internal_dns_config, :sync_kubeconfig
   include HealthMonitorMethods
 
   def validate
@@ -224,18 +224,28 @@ class KubernetesCluster < Sequel::Model
     nodepools(eager: :mesh_nodes).flat_map(&:mesh_nodes)
   end
 
-  def ready_for_upgrade?
-    !upgrading? && available_upgrade_version && strand.label == "wait" \
-    && !nodepools.empty? && nodepools.first.strand.label == "wait"
-  end
+  UPGRADE_LABELS = %w[upgrade wait_upgrade].freeze
 
   def upgrading?
-    upgrade_labels = %w[upgrade wait_upgrade].freeze
-    return true if upgrade_labels.include?(strand.label) || upgrade_set?
+    UPGRADE_LABELS.include?(strand.label) || upgrade_set? || upgrade_nodepools_set?
+  end
 
-    return false if nodepools.empty?
-    nodepool = nodepools.first
-    upgrade_labels.include?(nodepool.strand.label) || nodepool.upgrade_set?
+  IDLE_BLOCKING_SEMAPHORES = %w[destroy destroying upgrade upgrade_nodepools].freeze
+
+  def idle?
+    strand.label == "wait" && semaphores.none? { IDLE_BLOCKING_SEMAPHORES.include?(it.name) } && nodepools(eager: :semaphores).all?(&:idle?)
+  end
+
+  def ready_for_upgrade?
+    !available_upgrade_version.nil? && idle?
+  end
+
+  def upgrade_to_version(version)
+    update(version:)
+    incr_upgrade
+    nodepools_dataset.update(version:)
+    KubernetesNodepool.incr_upgrade_requested(nodepools_dataset.select(:id))
+    incr_upgrade_nodepools
   end
 end
 

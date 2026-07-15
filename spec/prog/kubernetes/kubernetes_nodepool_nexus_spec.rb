@@ -53,10 +53,10 @@ RSpec.describe Prog::Kubernetes::KubernetesNodepoolNexus do
     end
 
     it "creates a kubernetes nodepool" do
-      st = described_class.assemble(name: "k8stest-np", node_count: 2, kubernetes_cluster_id: kc.id, target_node_size: "standard-4", target_node_storage_size_gib: 37)
+      st = described_class.assemble(name: "k8stest-np2", node_count: 2, kubernetes_cluster_id: kc.id, target_node_size: "standard-4", target_node_storage_size_gib: 37)
       kn = st.subject
 
-      expect(kn.name).to eq "k8stest-np"
+      expect(kn.name).to eq "k8stest-np2"
       expect(kn.ubid).to start_with("kn")
       expect(kn.kubernetes_cluster_id).to eq kc.id
       expect(kn.node_count).to eq 2
@@ -66,7 +66,7 @@ RSpec.describe Prog::Kubernetes::KubernetesNodepoolNexus do
     end
 
     it "can have null as storage size" do
-      st = described_class.assemble(name: "k8stest-np", node_count: 2, kubernetes_cluster_id: kc.id, target_node_size: "standard-4", target_node_storage_size_gib: nil)
+      st = described_class.assemble(name: "k8stest-np2", node_count: 2, kubernetes_cluster_id: kc.id, target_node_size: "standard-4", target_node_storage_size_gib: nil)
 
       expect(st.subject.target_node_storage_size_gib).to be_nil
     end
@@ -77,10 +77,12 @@ RSpec.describe Prog::Kubernetes::KubernetesNodepoolNexus do
       expect { nx.start }.to nap(10)
     end
 
-    it "registers a deadline and hops if the cluster is ready" do
-      expect(nx).to receive(:when_start_bootstrapping_set?).and_yield
-      expect(nx).to receive(:register_deadline)
-      expect { nx.start }.to hop("bootstrap_worker_nodes")
+    it "registers a deadline, consumes the semaphore and hops if the cluster is ready" do
+      kn.incr_start_bootstrapping
+      prog = described_class.new(kn.strand)
+      expect { prog.start }.to hop("bootstrap_worker_nodes")
+        .and change { Semaphore.where(strand_id: kn.id, name: "start_bootstrapping").count }.from(1).to(0)
+      expect(Time.parse(prog.strand.stack.first["deadline_at"])).to be_within(60).of(Time.now + 120 * 60)
     end
   end
 
@@ -146,22 +148,6 @@ RSpec.describe Prog::Kubernetes::KubernetesNodepoolNexus do
       "v#{major}.#{minor + 1}"
     }
 
-    it "naps when cluster strand is in upgrade label" do
-      kc.strand.update(label: "upgrade")
-      expect { nx.upgrade }.to nap(10)
-    end
-
-    it "naps when cluster strand is in wait_upgrade label" do
-      kc.strand.update(label: "wait_upgrade")
-      expect { nx.upgrade }.to nap(10)
-    end
-
-    it "naps when cluster upgrade semaphore is set" do
-      kc.strand.update(label: "wait")
-      kc.incr_upgrade
-      expect { nx.upgrade }.to nap(10)
-    end
-
     context "when cluster is not upgrading" do
       before do
         kc.strand.update(label: "wait")
@@ -192,6 +178,14 @@ RSpec.describe Prog::Kubernetes::KubernetesNodepoolNexus do
         expect { nx.upgrade }.to hop("wait")
       end
 
+      it "selects a node one minor version behind the nodepool version" do
+        kn.update(version: older_version)
+        expect(client).to receive(:version).and_return(much_older_version)
+        expect { nx.upgrade }.to hop("wait_upgrade")
+        st = Strand[prog: "Kubernetes::UpgradeKubernetesNode"]
+        expect(st.stack.first).to eq({"nodepool_id" => kn.id, "old_node_id" => first_node.id, "subject_id" => kn.cluster.id})
+      end
+
       it "skips nodes with invalid version formats and creates a page" do
         expect(client).to receive(:version).and_return("invalid", "invalid")
         expect { nx.upgrade }.to hop("wait")
@@ -200,7 +194,7 @@ RSpec.describe Prog::Kubernetes::KubernetesNodepoolNexus do
         expect(page).not_to be_nil
         expect(page.summary).to eq "Invalid version format for #{first_node.name} of cluster #{kc.ubid}"
         expect(page.details["node_version"]).to eq "invalid"
-        expect(page.details["cluster_version"]).to eq Option.selectable_kubernetes_versions.first
+        expect(page.details["nodepool_version"]).to eq kn.version
       end
 
       it "selects the first node that is one minor version behind" do
