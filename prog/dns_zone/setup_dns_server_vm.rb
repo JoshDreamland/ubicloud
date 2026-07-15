@@ -15,13 +15,18 @@ class Prog::DnsZone::SetupDnsServerVm < Prog::Base
     fail "Existing DNS Server VMs are not in sync, try again later" unless vms_in_sync?(dns_server.vms)
 
     name ||= "#{dns_server.ubid}-#{SecureRandom.alphanumeric(8).downcase}"
-    arch = Option::VmSizes.find { it.name == vm_size }&.arch
+    arches = Option::VmSizes.select { it.name == vm_size }.map(&:arch)
+    arch = arches.include?("x64") ? "x64" : arches.first
 
     DB.transaction do
       private_subnet_id = if restrict_ssh_to_control_plane
-        subnet = project.default_private_subnet(location)
-        ssh_rules = Config.control_plane_outbound_cidrs.map { {cidr: it, port_range: Sequel.pg_range(22..22)} }
-        subnet.firewalls.each { it.replace_firewall_rules(ssh_rules) }
+        subnet_name = "dns-#{location.display_name}"
+        subnet = project.private_subnets_dataset.first(location_id:, name: subnet_name)
+        unless subnet
+          firewall = Firewall.create(name: subnet_name, location_id:, project_id: project.id)
+          Config.control_plane_outbound_cidrs.each { firewall.add_firewall_rule(cidr: it, port_range: 22..22) }
+          subnet = Prog::Vnet::SubnetNexus.assemble(project.id, name: subnet_name, location_id:, firewall_id: firewall.id).subject
+        end
         subnet.id
       end
 
@@ -38,7 +43,7 @@ class Prog::DnsZone::SetupDnsServerVm < Prog::Base
         boot_image:,
         enable_ip4: true,
         private_subnet_id:,
-        exclude_host_ids: Config.allow_unspread_servers ? [] : dns_server.vms_dataset.where(location_id:).select_map(:vm_host_id).compact,
+        exclude_host_ids: Config.allow_unspread_servers ? [] : dns_server.vms_dataset.where(location_id:).exclude(vm_host_id: nil).select_map(:vm_host_id),
       )
 
       Strand.create(prog: "DnsZone::SetupDnsServerVm", label: "start", stack: [{subject_id: vm_st.id, dns_server_id: dns_server.id}])
