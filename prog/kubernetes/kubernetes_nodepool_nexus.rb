@@ -3,19 +3,15 @@
 class Prog::Kubernetes::KubernetesNodepoolNexus < Prog::Base
   subject_is :kubernetes_nodepool
 
-  def cluster
-    @cluster ||= kubernetes_nodepool.cluster
-  end
-
   def self.assemble(name:, node_count:, kubernetes_cluster_id:, target_node_size: "standard-2", target_node_storage_size_gib: nil)
     DB.transaction do
-      unless KubernetesCluster[kubernetes_cluster_id]
+      unless (cluster = KubernetesCluster[kubernetes_cluster_id])
         fail "No existing cluster"
       end
 
       Validation.validate_kubernetes_worker_node_count(node_count)
 
-      kn = KubernetesNodepool.create(name:, node_count:, kubernetes_cluster_id:, target_node_size:, target_node_storage_size_gib:)
+      kn = KubernetesNodepool.create(name:, node_count:, kubernetes_cluster_id:, target_node_size:, target_node_storage_size_gib:, version: cluster.version)
 
       Strand.create_with_id(kn, prog: "Kubernetes::KubernetesNodepoolNexus", label: "start")
     end
@@ -24,6 +20,7 @@ class Prog::Kubernetes::KubernetesNodepoolNexus < Prog::Base
   label def start
     register_deadline("wait", 120 * 60)
     when_start_bootstrapping_set? do
+      decr_start_bootstrapping
       hop_bootstrap_worker_nodes
     end
     nap 10
@@ -64,24 +61,22 @@ class Prog::Kubernetes::KubernetesNodepoolNexus < Prog::Base
   label def upgrade
     decr_upgrade
 
-    nap 10 if %w[upgrade wait_upgrade].freeze.include?(cluster.strand.label) || cluster.upgrade_set?
-
     node_to_upgrade = kubernetes_nodepool.nodes.find do |node|
       node_version = kubernetes_nodepool.cluster.client(session: node.sshable.connect).version
       node_minor_version = node_version.match(/^v\d+\.(\d+)$/)&.captures&.first&.to_i
-      cluster_minor_version = kubernetes_nodepool.cluster.version.match(/^v\d+\.(\d+)$/).captures.first.to_i
+      nodepool_minor_version = kubernetes_nodepool.version.match(/^v\d+\.(\d+)$/).captures.first.to_i
 
       unless node_minor_version
         Prog::PageNexus.assemble(
           "Invalid version format for #{node.name} of cluster #{kubernetes_nodepool.cluster.ubid}",
           ["K8sInvalidVersion", kubernetes_nodepool.cluster.ubid, node.name],
           node.ubid,
-          extra_data: {node_version:, cluster_version: kubernetes_nodepool.cluster.version},
+          extra_data: {node_version:, nodepool_version: kubernetes_nodepool.version},
         )
         next false
       end
 
-      node_minor_version == cluster_minor_version - 1
+      node_minor_version == nodepool_minor_version - 1
     end
 
     hop_wait unless node_to_upgrade

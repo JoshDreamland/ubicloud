@@ -264,11 +264,11 @@ RSpec.describe Prog::Kubernetes::KubernetesClusterNexus do
       expect(child.stack.first["subject_id"]).to eq kubernetes_cluster.id
     end
 
-    it "incrs start_bootstrapping on KubernetesNodepool on 3 node control plane setup" do
-      assemble_cp_node
+    it "incrs start_bootstrapping on KubernetesNodepool when the first control plane node is up" do
+      kubernetes_cluster.nodes.last.destroy
       kubernetes_cluster.reload
-      expect(kubernetes_cluster.nodes.count).to eq 3
-      expect { nx.bootstrap_control_plane_nodes }.to hop("wait_nodes")
+      expect(kubernetes_cluster.nodes_dataset.count).to eq 1
+      expect { nx.bootstrap_control_plane_nodes }.to hop("wait_control_plane_node")
       expect(kubernetes_cluster.nodepools.first.start_bootstrapping_set?).to be true
     end
 
@@ -276,9 +276,17 @@ RSpec.describe Prog::Kubernetes::KubernetesClusterNexus do
       kubernetes_cluster.update(cp_node_count: 1)
       kubernetes_cluster.nodes.last.destroy
       kubernetes_cluster.reload
-      expect(kubernetes_cluster.nodes.count).to eq 1
+      expect(kubernetes_cluster.nodes_dataset.count).to eq 1
       expect { nx.bootstrap_control_plane_nodes }.to hop("wait_nodes")
       expect(kubernetes_cluster.nodepools.first.start_bootstrapping_set?).to be true
+    end
+
+    it "incrs start_bootstrapping only for the first control plane node" do
+      assemble_cp_node
+      kubernetes_cluster.reload
+      expect(kubernetes_cluster.nodes.count).to eq 3
+      expect { nx.bootstrap_control_plane_nodes }.to hop("wait_nodes")
+      expect(kubernetes_cluster.nodepools.first.start_bootstrapping_set?).to be false
     end
 
     it "hops wait_nodes if the target number of CP nodes is reached" do
@@ -449,6 +457,37 @@ RSpec.describe Prog::Kubernetes::KubernetesClusterNexus do
     it "hops to upgrade when semaphore is set" do
       nx.incr_upgrade
       expect { nx.wait }.to hop("upgrade")
+    end
+
+    it "sequences requested nodepool upgrades one at a time and consumes the semaphore when done" do
+      np1 = kubernetes_cluster.nodepools.first
+      np2 = Prog::Kubernetes::KubernetesNodepoolNexus.assemble(name: "cluster-np2", node_count: 1, kubernetes_cluster_id: kubernetes_cluster.id).subject
+      nps = [np1, np2]
+      nps.each { it.strand.update(label: "wait") }
+      nps.each(&:incr_upgrade_requested)
+      nx.incr_upgrade_nodepools
+
+      expect { nx.wait }.to nap(30)
+      expect(nps.map { it.reload.upgrade_requested_set? }).to eq([false, true])
+      expect(nps.map(&:upgrade_set?)).to eq([true, false])
+
+      np1.strand.update(label: "upgrade")
+      Semaphore.where(strand_id: np1.id, name: "upgrade").destroy
+      kubernetes_cluster.nodepools(reload: true)
+      expect { nx.wait }.to nap(30)
+      expect(np2.reload.upgrade_set?).to be false
+
+      np1.strand.update(label: "wait")
+      kubernetes_cluster.nodepools(reload: true)
+      expect { nx.wait }.to nap(30)
+      expect(np2.reload.upgrade_requested_set?).to be false
+      expect(np2.upgrade_set?).to be true
+
+      np2.strand.update(label: "wait")
+      Semaphore.where(strand_id: np2.id, name: "upgrade").destroy
+      kubernetes_cluster.nodepools(reload: true)
+      expect { nx.wait }.to nap(6 * 60 * 60)
+      expect(kubernetes_cluster.reload.upgrade_nodepools_set?).to be false
     end
 
     it "hops to install_metrics_server when semaphore is set" do

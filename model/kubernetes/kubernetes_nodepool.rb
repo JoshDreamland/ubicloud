@@ -11,10 +11,22 @@ class KubernetesNodepool < Sequel::Model
   one_to_many :mesh_nodes, class: :KubernetesNode, order: :created_at, conditions: {state: ["active", "renewing_certs", "draining"]}, read_only: true
 
   plugin ResourceMethods
-  plugin SemaphoreMethods, :destroy, :start_bootstrapping, :upgrade, :scale_worker_count
+  plugin SemaphoreMethods, :destroy, :start_bootstrapping, :upgrade, :upgrade_requested, :scale_worker_count
 
   def path
     "#{cluster.path}/nodepool/#{ubid}"
+  end
+
+  def upgrading?
+    KubernetesCluster::UPGRADE_LABELS.include?(strand.label) || upgrade_set?
+  end
+
+  def idle?
+    strand.label == "wait" && semaphores.empty?
+  end
+
+  def ready_for_upgrade?
+    version != cluster.version && cluster.idle?
   end
 end
 
@@ -27,8 +39,10 @@ end
 #  kubernetes_cluster_id        | uuid                     | NOT NULL
 #  target_node_size             | text                     | NOT NULL
 #  target_node_storage_size_gib | bigint                   |
+#  version                      | text                     | NOT NULL
 # Indexes:
-#  kubernetes_nodepool_pkey | PRIMARY KEY btree (id)
+#  kubernetes_nodepool_pkey                           | PRIMARY KEY btree (id)
+#  kubernetes_nodepool_kubernetes_cluster_id_name_key | UNIQUE btree (kubernetes_cluster_id, name)
 # Foreign key constraints:
 #  kubernetes_nodepool_kubernetes_cluster_id_fkey | (kubernetes_cluster_id) REFERENCES kubernetes_cluster(id)
 # Referenced By:
