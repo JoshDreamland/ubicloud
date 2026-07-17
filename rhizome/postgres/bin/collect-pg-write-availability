@@ -46,7 +46,7 @@ rescue CommandFail
 end
 
 lines = []
-lines << "# HELP pg_write_availability_applicable 1 on a writable primary with >=1 replication slot (where the write probe applies); 0 on a standby, a read-only server, or a primary with no slots\n"
+lines << "# HELP pg_write_availability_applicable 1 on a writable server (where the write probe applies); 0 on a standby, a read replica, a PITR restore, or a read-only/locked-out server\n"
 lines << "# TYPE pg_write_availability_applicable gauge\n"
 lines << "pg_write_availability_applicable #{applicable ? 1 : 0}\n"
 
