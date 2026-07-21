@@ -4,14 +4,21 @@ require_relative "../model/spec_helper"
 
 RSpec.describe Prog::Base do
   it "does not allow failure of one child strand inside donate to affect other strands" do
-    parent = Strand.create(prog: "Test", label: "reap_exit_no_children")
+    parent = Strand.create(prog: "Test", label: "reap_emit_reaped_children")
     popper = Strand.create(parent_id: parent.id, prog: "Test", label: "popper")
     failer = Strand.create(parent_id: parent.id, prog: "Test", label: "failer", schedule: Time.now + 5)
     Strand.create(parent_id: parent.id, prog: "Test", label: "napper", lease: Time.now + 10)
 
+    messages = []
+    expect(Clog).to receive(:emit).twice.and_wrap_original do |method, message, metadata = {}|
+      messages << [message, metadata.dig(:strand_exited, :strand)]
+      method.call(message, metadata)
+    end
+
     expect(Sshable).to receive(:repl?).and_return(true).at_least(:once)
     expect { parent.run(10) }.to raise_error(RuntimeError)
-    expect(popper.this.get(:exitval)).to eq("msg" => "popped")
+    expect(messages).to eq [["exited", popper.ubid], ["child exit", ["popped", popper.ubid]]]
+    expect(popper).not_to exist
     expect(failer.this.get(:exitval)).to be_nil
   end
 
@@ -93,13 +100,21 @@ RSpec.describe Prog::Base do
     }.from(false).to(true)
   end
 
+  it "failures when running child strand in reap affect try in child but not in parent" do
+    parent = Strand.create(prog: "Test", label: "reaper")
+    child = Strand.create(parent_id: parent.id, prog: "Test", label: "failer")
+    expect { parent.run }.to raise_error(Strand::RunError)
+    expect(child.reload.try).to eq 1
+    expect(parent.reload.try).to eq 0
+  end
+
   it "keeps children array state in sync even in consecutive-run mode" do
     parent = Strand.create(prog: "Test", label: "reap_exit_no_children")
     child = Strand.create(parent_id: parent.id, prog: "Test", label: "napper")
     prg = parent.load
     expect(parent).to receive(:load).twice.and_return(prg)
 
-    expect(prg).to receive(:nap).and_raise(Prog::Base::Nap.new(1))
+    expect(prg).to receive(:nap).and_throw(:prog_return, Prog::Base::Nap.new(1))
     expect(parent.run(10)).to be_a Prog::Base::Nap
     expect(parent.associations).to be_empty
 
@@ -208,7 +223,7 @@ RSpec.describe Prog::Base do
     prg = instance_double(Prog::Vm::Aws::Nexus)
     expect(st).to receive(:load).and_return(prg)
     expect(prg).to receive(:before_run)
-    expect(prg).to receive(:wait).and_raise(Prog::Base::Nap.new(30))
+    expect(prg).to receive(:wait).and_throw(:prog_return, Prog::Base::Nap.new(30))
     st.unsynchronized_run
   end
 
@@ -234,6 +249,11 @@ RSpec.describe Prog::Base do
 
     it "can render nap" do
       expect(described_class::Nap.new("10").to_s).to eq("nap for 10 seconds")
+    end
+
+    it "can render child run error" do
+      error = RuntimeError.new("bad")
+      expect(described_class::ChildRunError.new(10, error).to_s).to eq("error running child strand: RuntimeError: bad, nap for 10 seconds")
     end
 
     it "can render exit" do
