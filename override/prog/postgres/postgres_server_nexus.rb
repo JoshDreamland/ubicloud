@@ -29,11 +29,13 @@ class Prog::Postgres::PostgresServerNexus
     end
 
     # Super's success path rewrites pg_hba.conf → re-lock via the post-success Hop.
+    # Base progs signal control flow with throw(:prog_return, ...) (Hop/Nap/Exit),
+    # not exceptions, so intercept the throw, re-lock on a Hop, then re-throw so the
+    # strand runner still processes the transition.
     def configure
-      super
-    rescue Prog::Base::Hop
-      reapply_lockout_if_still_deactivated
-      raise
+      flow_control = catch(:prog_return) { super }
+      reapply_lockout_if_still_deactivated if flow_control.is_a?(Prog::Base::Hop)
+      throw(:prog_return, flow_control)
     end
 
     # Refresh + dataset-query: cached association can lag the concurrent resource-strand writes.

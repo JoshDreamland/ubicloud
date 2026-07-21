@@ -213,6 +213,11 @@ class PostgresResource < Sequel::Model
     end
   end
 
+  # Whether the primary must run synchronous replication (ANY-1 quorum commit).
+  def needs_sync_replication?
+    ha_type == HaType::SYNC
+  end
+
   def needs_convergence?
     needs_upgrade = version.to_i < target_version.to_i && !ongoing_failover?
     servers.any? { it.needs_recycling? } || servers.count != target_server_count || needs_upgrade
@@ -656,6 +661,8 @@ class PostgresResource < Sequel::Model
         .flat_map { |h| h.values.flatten }
     storage_size_options.uniq!
     options.add_option(name: "storage_size", values: storage_size_options, parent: "size") do |flavor, location, family, size, storage_size|
+      # Temporary capacity constraint. TODO: remove when resolved.
+      next false if storage_size == 4096 && location.id == Location::HETZNER_FSN1_ID
       vcpu_count = Option::POSTGRES_SIZE_OPTIONS[size].vcpu_count
       storage_sizes(location, family, vcpu_count).include?(storage_size)
     end

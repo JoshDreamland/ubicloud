@@ -688,7 +688,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus::PrependMethods do # rubocop:
       project.set_ff_chc_postgres_deactivate_lockout(true)
     end
 
-    it "delegates to super on success and invokes the rescue handler before re-raising" do
+    it "re-locks on super's success hop, then re-throws the hop" do
       postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
       expect(postgres_server).to receive(:apply_lockout)
       expect { nx.configure }.to hop("wait")
@@ -697,6 +697,13 @@ RSpec.describe Prog::Postgres::PostgresServerNexus::PrependMethods do # rubocop:
     it "passes through when not deactivated (no extra lockout)" do
       expect(postgres_server).not_to receive(:apply_lockout)
       expect { nx.configure }.to hop("wait")
+    end
+
+    it "does not re-lock when super naps instead of hopping" do
+      postgres_resource.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
+      allow(sshable).to receive(:d_check).with("configure_postgres").and_return("InProgress")
+      expect(postgres_server).not_to receive(:apply_lockout)
+      expect { nx.configure }.to nap(5)
     end
   end
 end

@@ -178,7 +178,7 @@ RSpec.describe Clover, "postgres" do
 
         expect(page.title).to eq("Ubicloud - Create PostgreSQL Database")
         expect(page).to have_flash_error("Validation failed for following fields: storage_size")
-        expect(page).to have_content("Invalid storage size. Available options: 1024, 2048, 4096")
+        expect(page).to have_content("Invalid storage size. Available options: 1024, 2048")
         expect(PostgresResource.count).to eq(0)
       end
 
@@ -1203,8 +1203,8 @@ RSpec.describe Clover, "postgres" do
         visit "#{project.path}#{pg.path}/settings"
 
         select "09:00 - 11:00 (UTC)", from: "maintenance_window_start_at"
-        check "mon"
-        check "wed"
+        check "Monday"
+        check "Wednesday"
         click_button "Set"
 
         pg.reload
@@ -1217,7 +1217,8 @@ RSpec.describe Clover, "postgres" do
         pg.update(maintenance_window_start_at: 9, maintenance_window_days_bitmask: (1 << 0))
         visit "#{project.path}#{pg.path}/settings"
 
-        uncheck "mon"
+        expect(page).to have_checked_field("Monday")
+        uncheck "Monday"
         click_button "Set"
 
         pg.reload

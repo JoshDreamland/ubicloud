@@ -129,8 +129,12 @@ end
     end
   end
 
+  def prog_return(flow_control)
+    throw(:prog_return, flow_control)
+  end
+
   def nap(seconds = 30)
-    fail Nap.new(seconds)
+    prog_return Nap.new(seconds)
   end
 
   def pop(arg)
@@ -156,7 +160,7 @@ end
       old_label = strand.label
       prog, label = link
 
-      fail Hop.new(old_prog, old_label,
+      prog_return Hop.new(old_prog, old_label,
         {retval: outval,
          stack: Sequel.pg_jsonb_wrap(@strand.stack[1..]),
          prog:, label:})
@@ -169,61 +173,55 @@ end
       # Child strand with zero or one stack frames, set exitval. Clear
       # retval to avoid confusion, as it would have been set in a
       # previous intra-strand stack pop.
-      fail Exit.new(strand, outval)
+      prog_return Exit.new(strand, outval)
     end
   end
 
-  class FlowControl < RuntimeError; end
-
-  EMPTY_ARRAY = [].freeze
-
-  class Exit < FlowControl
-    attr_reader :exitval
-
-    def initialize(strand, exitval)
-      @strand = strand
-      @exitval = exitval
-      set_backtrace EMPTY_ARRAY
-    end
-
+  Exit = Data.define(:strand, :exitval) do
     def to_s
-      "Strand exits from #{@strand.prog}##{@strand.label} with #{@exitval}"
+      "Strand exits from #{strand.prog}##{strand.label} with #{exitval}"
     end
   end
 
-  class Hop < FlowControl
-    attr_reader :strand_update_args, :old_prog
-
-    def initialize(old_prog, old_label, strand_update_args)
-      @old_prog = old_prog
-      @old_label = old_label
-      @strand_update_args = strand_update_args
-      set_backtrace EMPTY_ARRAY
-    end
-
+  Hop = Data.define(:old_prog, :old_label, :strand_update_args) do
     def new_label
-      @strand_update_args[:label] || @old_label
+      strand_update_args[:label] || old_label
     end
 
     def new_prog
-      @strand_update_args[:prog] || @old_prog
+      strand_update_args[:prog] || old_prog
     end
 
     def to_s
-      "hop #{@old_prog}##{@old_label} -> #{new_prog}##{new_label}"
+      "hop #{old_prog}##{old_label} -> #{new_prog}##{new_label}"
     end
   end
 
-  class Nap < FlowControl
+  class Nap
     attr_reader :seconds
 
     def initialize(seconds)
       @seconds = seconds
-      set_backtrace EMPTY_ARRAY
+      freeze
     end
 
     def to_s
       "nap for #{seconds} seconds"
+    end
+  end
+
+  # Subclass of Nap used by #reap to pass the exception raised by a child strand
+  # run through as a Nap, and have it later be reraised inside Strand#run.
+  class ChildRunError < Nap
+    attr_reader :exception
+
+    def initialize(seconds, exception)
+      @exception = exception
+      super(seconds)
+    end
+
+    def to_s
+      "error running child strand: #{exception.class}: #{exception.message}, #{super}"
     end
   end
 
@@ -240,7 +238,7 @@ end
     old_label = strand.label
     new_frame = {"subject_id" => @subject_id, "link" => [strand.prog, old_label]}.merge(new_frame)
 
-    fail Hop.new(old_prog, old_label,
+    prog_return Hop.new(old_prog, old_label,
       {prog: Strand.prog_verify(prog), label:,
        stack: [new_frame] + strand.stack, retval: nil})
   end
@@ -313,33 +311,45 @@ end
         nap(nap)
       else
         active_children.each do |child|
-          if (result = child.run)
-            if result.is_a?(Nap)
-              seconds = if active_children.length == 1
-                # For a single active child napping, parent can nap for as long as the child naps,
-                # since the expectation is there will not be anything to do until then.
-                result.seconds
-              else
-                # For multiple active children, if a single child is napping, it's possible the
-                # other children are immediately runnable. However, you don't want to busy
-                # wait on multiple children. Nap until the time of the earliest scheduled child
-                # that isn't currently running. If all children are running, nap for 120 seconds
-                strand.children_dataset
-                  .where(Sequel[:lease] < Sequel::CURRENT_TIMESTAMP)
-                  .min(Sequel.extract(:epoch, Sequel[:schedule] - Sequel::CURRENT_TIMESTAMP)) || 121
-              end
+          begin
+            result = child.run
+          rescue => ex
+            nil
+          else
+            next unless result
+          end
 
-              # Remove a 10th of a second so it is likely the parent will run the child.
-              seconds -= 0.1
-
-              # Nap for a minimum of 0.1 seconds and a maximum of 120 seconds in any case.
-              # The 0.1 seconds is to avoid busy waiting.
-              nap(seconds.clamp(0.1, 120))
+          if result.is_a?(Nap) || ex
+            seconds = if active_children.length == 1 && ex.nil?
+              # For a single active child napping, parent can nap for as long as the child naps,
+              # since the expectation is there will not be anything to do until then.
+              result.seconds
             else
-              # A non-nap (e.g. Exit or Hop) happened, so the state changed, and
-              # it makes sense to rerun the strand immediately.
-              nap 0
+              # For multiple active children, if a single child is napping, it's possible the
+              # other children are immediately runnable. However, you don't want to busy
+              # wait on multiple children. Nap until the time of the earliest scheduled child
+              # that isn't currently running. If all children are running, nap for 120 seconds
+              strand.children_dataset
+                .where(Sequel[:lease] < Sequel::CURRENT_TIMESTAMP)
+                .min(Sequel.extract(:epoch, Sequel[:schedule] - Sequel::CURRENT_TIMESTAMP)) || 121
             end
+
+            # Remove a 10th of a second so it is likely the parent will run the child.
+            seconds -= 0.1
+
+            # Nap for a minimum of 0.1 seconds and a maximum of 120 seconds in any case.
+            # The 0.1 seconds is to avoid busy waiting.
+            seconds = seconds.clamp(0.1, 120)
+
+            if ex
+              prog_return(ChildRunError.new(seconds, ex))
+            else
+              nap(seconds)
+            end
+          else
+            # A non-nap (e.g. Exit or Hop) happened, so the state changed, and
+            # it makes sense to rerun the strand immediately.
+            nap 0
           end
         end
 
@@ -377,7 +387,7 @@ end
     raise Strand::InternalError, "BUG: not valid hop target" unless self.class.labels.include? label
 
     label = label.to_s
-    fail Hop.new(@strand.prog, @strand.label, {label:, retval: nil})
+    prog_return Hop.new(@strand.prog, @strand.label, {label:, retval: nil})
   end
 
   private def time_string(time)
