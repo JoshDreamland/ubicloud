@@ -210,7 +210,6 @@ module Config
   optional :postgres_lantern_notification_email, string
   optional :postgres_notification_email, string
   override :aws_postgres_iam_access, false, bool
-<<<<<<< HEAD
   override :gcp_postgres_iam_access, false, bool
   override :aws_vm_attach_ssm_permissions, false, bool
   optional :aws_s3_custom_builds_bucket_names, array(string)
@@ -219,8 +218,6 @@ module Config
   optional :postgres_otel_otlp_export_additional_metadata_field, string
   override :postgres_walg_optimized_config, false, bool
   override :postgres_walg_direct_io_enabled, false, bool
-=======
->>>>>>> 33ecb95292034a7b57a54d6a67f4525744abc9b7
   override :postgres_internal_firewall_cidrs, "", array(string)
   optional :postgres_timeseries_match_name_export_regex, string
 
