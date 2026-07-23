@@ -304,6 +304,7 @@ service:
     resource:
       service.otelcol.location: 'postgres_resource'
       service.instance.id: '#{postgres_server.ubid}'
+      service.name: 'otel-vm-agent'
     logs:
       encoding: console
     metrics:
