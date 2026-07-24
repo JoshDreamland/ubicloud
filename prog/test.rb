@@ -101,6 +101,16 @@ class Prog::Test < Prog::Base
     nap(123)
   end
 
+  label def late_signal_napper
+    Semaphore.incr(strand.id, "late_signal")
+    nap(123)
+  end
+
+  label def snap_signal_napper
+    incr_test_semaphore
+    nap(123)
+  end
+
   label def popper
     pop({msg: "popped"})
   end

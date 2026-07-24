@@ -464,6 +464,8 @@ RSpec.describe PrivateSubnet do
 
     it "connect_subnet signals refresh_keys only on the peer under v1" do
       ps2 = Prog::Vnet::SubnetNexus.assemble(prj.id, name: "test-ps2", location_id: Location::HETZNER_FSN1_ID).subject
+      ps1.update(rekey_protocol: 1)
+      ps2.update(rekey_protocol: 1)
       ps1.connect_subnet(ps2)
       expect(ps1.refresh_keys_set?).to be false
       expect(ps2.refresh_keys_set?).to be true
@@ -471,8 +473,6 @@ RSpec.describe PrivateSubnet do
 
     it "connect_subnet signals refresh_keys on both sides under v2" do
       ps2 = Prog::Vnet::SubnetNexus.assemble(prj.id, name: "test-ps2", location_id: Location::HETZNER_FSN1_ID).subject
-      ps1.update(rekey_protocol: 2)
-      ps2.update(rekey_protocol: 2)
       ps1.connect_subnet(ps2)
       expect(ps1.refresh_keys_set?).to be true
       expect(ps2.refresh_keys_set?).to be true
@@ -481,8 +481,7 @@ RSpec.describe PrivateSubnet do
     it "connect_subnet downgrades the mesh protocol to v1 only when the joined meshes differ" do
       ps2 = Prog::Vnet::SubnetNexus.assemble(prj.id, name: "test-ps2", location_id: Location::HETZNER_FSN1_ID).subject
       ps3 = Prog::Vnet::SubnetNexus.assemble(prj.id, name: "test-ps3", location_id: Location::HETZNER_FSN1_ID).subject
-      ps1.update(rekey_protocol: 2)
-      ps2.update(rekey_protocol: 2)
+      ps3.update(rekey_protocol: 1)
       ps1.connect_subnet(ps2)
       expect([ps1, ps2].map { it.reload.rekey_protocol }).to eq [2, 2]
       ps2.connect_subnet(ps3)
@@ -491,7 +490,7 @@ RSpec.describe PrivateSubnet do
 
     it "connect_subnet signals only the peer when the merge downgrades the mesh to v1" do
       ps2 = Prog::Vnet::SubnetNexus.assemble(prj.id, name: "test-ps2", location_id: Location::HETZNER_FSN1_ID).subject
-      ps1.update(rekey_protocol: 2)
+      ps2.update(rekey_protocol: 1)
       ps1.connect_subnet(ps2)
       expect(ps1.refresh_keys_set?).to be false
       expect(ps2.refresh_keys_set?).to be true
@@ -740,7 +739,7 @@ RSpec.describe PrivateSubnet do
     def create_subnet(n)
       ps = PrivateSubnet.create_with_id(format("00000000-0000-0000-0000-%012d", n), name: "psflip#{n}",
         location_id: Location::HETZNER_FSN1_ID, net6: "fd1b:9793:dcef:#{format("%04x", n)}::/64",
-        net4: "10.#{n}.0.0/16", state: "waiting", project_id: flip_project.id)
+        net4: "10.#{n}.0.0/16", state: "waiting", project_id: flip_project.id, rekey_protocol: 1)
       Strand.create_with_id(ps, prog: "Vnet::Metal::SubnetNexus", label: "wait")
       ps
     end

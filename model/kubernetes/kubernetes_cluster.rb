@@ -233,19 +233,16 @@ class KubernetesCluster < Sequel::Model
   IDLE_BLOCKING_SEMAPHORES = %w[destroy destroying upgrade upgrade_nodepools].freeze
 
   def idle?
-    strand.label == "wait" && semaphores.none? { IDLE_BLOCKING_SEMAPHORES.include?(it.name) } && nodepools(eager: :semaphores).all?(&:idle?)
+    strand.label == "wait" && semaphores.none? { IDLE_BLOCKING_SEMAPHORES.include?(it.name) } && nodepools(eager: [:strand, :semaphores]).all?(&:idle?)
+  end
+
+  def nodepools_within_version_skew?
+    cluster_minor = Option.kubernetes_minor_version(version)
+    nodepools_dataset.select_map(:version).all? { Option.kubernetes_minor_version(it) >= cluster_minor - 2 }
   end
 
   def ready_for_upgrade?
     !available_upgrade_version.nil? && idle?
-  end
-
-  def upgrade_to_version(version)
-    update(version:)
-    incr_upgrade
-    nodepools_dataset.update(version:)
-    KubernetesNodepool.incr_upgrade_requested(nodepools_dataset.select(:id))
-    incr_upgrade_nodepools
   end
 end
 

@@ -110,18 +110,16 @@ RSpec.describe KubernetesCluster do
     expect(kc.reload.ready_for_upgrade?).to be true
   end
 
-  it "#upgrade_to_version stamps the cluster and nodepool versions and requests nodepool upgrades" do
-    kc.update(version: Option.selectable_kubernetes_versions[1])
-    nps = ["np1", "np2"].map { Prog::Kubernetes::KubernetesNodepoolNexus.assemble(name: it, node_count: 1, kubernetes_cluster_id: kc.id).subject }
+  it "#nodepools_within_version_skew? is true only when every nodepool is within two minor versions of the cluster" do
+    np1 = Prog::Kubernetes::KubernetesNodepoolNexus.assemble(name: "np1", node_count: 1, kubernetes_cluster_id: kc.id).subject
+    Prog::Kubernetes::KubernetesNodepoolNexus.assemble(name: "np2", node_count: 1, kubernetes_cluster_id: kc.id)
+    expect(kc.nodepools_within_version_skew?).to be true
 
-    kc.upgrade_to_version(Option.selectable_kubernetes_versions.first)
+    np1.update(version: Option.kubernetes_versions[3])
+    expect(kc.nodepools_within_version_skew?).to be false
 
-    expect(kc.version).to eq(Option.selectable_kubernetes_versions.first)
-    expect(kc.upgrade_set?).to be true
-    expect(kc.upgrade_nodepools_set?).to be true
-    expect(nps.map { it.reload.version }).to eq([Option.selectable_kubernetes_versions.first] * 2)
-    expect(nps.map(&:upgrade_requested_set?)).to eq([true, true])
-    expect(nps.map(&:upgrade_set?)).to eq([false, false])
+    np1.update(version: Option.kubernetes_versions[2])
+    expect(kc.nodepools_within_version_skew?).to be true
   end
 
   describe "#kubeadm_recorded_version" do

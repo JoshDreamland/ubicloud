@@ -2,7 +2,7 @@
 
 Gem::Specification.new do |spec|
   spec.name = "ubi-csi"
-  spec.version = "0.11.0"
+  spec.version = "0.12.0"
   spec.authors = ["Ubicloud"]
   spec.email = ["support@ubicloud.com"]
 
@@ -19,8 +19,8 @@ Gem::Specification.new do |spec|
 
   spec.add_dependency "base64"
   spec.add_dependency "logger"
-  spec.add_dependency "grpc", "1.78.1"
-  spec.add_dependency "grpc-tools", "1.78.1"
+  spec.add_dependency "grpc", "1.83.0"
+  spec.add_dependency "grpc-tools", "1.83.0"
 
   spec.add_development_dependency "rspec", "~> 3.12"
   spec.add_development_dependency "simplecov", "~> 0.22"
