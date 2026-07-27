@@ -18,6 +18,10 @@ runs:
     - name: Install system dependencies
       shell: bash
       run: |
+        # The runner image ships a NodeSource apt source (node_20.x) whose CDN
+        # intermittently returns 403, which makes apt-get update fail fatally.
+        # Node is provided by actions/setup-node, not apt, so drop the source.
+        sudo rm -f /etc/apt/sources.list.d/nodesource.list /etc/apt/sources.list.d/nodesource.sources
         sudo apt-get update
         sudo apt-get install -y libssl-dev libffi-dev libpq-dev build-essential locales psmisc
 
