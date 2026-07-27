@@ -2290,7 +2290,8 @@ RSpec.describe CloverAdmin do
       strand = assemble_cr
       cr_location.destroy
       page.refresh
-      expect(page.all(".capacity-reservations-table td").map(&:text)).to eq ["CapacityReservation", "start", "0", strand.ubid, strand.stack[0]["location_id"], "{}", "", ""]
+      location_id = strand.stack[0]["location_id"]
+      expect(page.all(".capacity-reservations-table td").map(&:text)).to eq ["CapacityReservation", "start", "0", strand.ubid, "#{location_id} [#{UBID.to_ubid(location_id)}]", "{}", "", ""]
     end
 
     it "allows pausing and unpausing strands" do
