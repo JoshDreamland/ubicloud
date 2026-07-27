@@ -21,12 +21,28 @@ class KubernetesNodepool < Sequel::Model
     KubernetesCluster::UPGRADE_LABELS.include?(strand.label) || upgrade_set?
   end
 
+  def destroying?
+    destroy_set? || strand.label == "destroy"
+  end
+
+  def display_state
+    return "deleting" if destroying?
+    return "upgrading" if upgrading? || upgrade_requested_set?
+    return "resizing" if scale_worker_count_set?
+    return "running" if strand.label == "wait"
+    "creating"
+  end
+
   def idle?
     strand.label == "wait" && semaphores.empty?
   end
 
+  def available_upgrade_version
+    cluster.version if Option.kubernetes_minor_version(version) < Option.kubernetes_minor_version(cluster.version)
+  end
+
   def ready_for_upgrade?
-    version != cluster.version && cluster.idle?
+    !available_upgrade_version.nil? && cluster.idle?
   end
 end
 

@@ -13,8 +13,23 @@ module Ubicloud
       adapter.get(_path("/kubeconfig"))
     end
 
+    def create_nodepool(name, node_size:, node_count:)
+      adapter.post(_path("/nodepool"), {name:, node_size:, node_count:})
+    end
+
+    def destroy_nodepool(nodepool_ref)
+      check_no_slash(nodepool_ref, "invalid nodepool reference")
+      adapter.delete(_path("/nodepool/#{nodepool_ref}"))
+    end
+
     def resize_nodepool(nodepool_ref, node_count)
+      check_no_slash(nodepool_ref, "invalid nodepool reference")
       adapter.post(_path("/nodepool/#{nodepool_ref}/resize"), {node_count:})
+    end
+
+    def upgrade_nodepool(nodepool_ref)
+      check_no_slash(nodepool_ref, "invalid nodepool reference")
+      adapter.post(_path("/nodepool/#{nodepool_ref}/upgrade"))
     end
 
     def retire_node(node_name)

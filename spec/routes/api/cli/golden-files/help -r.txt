@@ -336,17 +336,20 @@ Usage:
     ubi kc (location/kc-name | kc-id) post-command [...]
 
 Commands:
-    list               List Kubernetes clusters
+    list                List Kubernetes clusters
 
 Post Commands:
-    create             Create a Kubernetes cluster
-    destroy            Destroy a Kubernetes cluster
-    kubeconfig         Print kubeconfig.yaml for a Kubernetes cluster
-    rename             Rename a Kubernetes cluster
-    resize-nodepool    Resize a Kubernetes cluster nodepool
-    retire-node        Retire a worker node from a Kubernetes cluster
-    show               Show details for a Kubernetes cluster
-    upgrade            Upgrade a Kubernetes cluster to the next supported version
+    create              Create a Kubernetes cluster
+    create-nodepool     Create a nodepool on a Kubernetes cluster
+    destroy             Destroy a Kubernetes cluster
+    destroy-nodepool    Destroy a nodepool of a Kubernetes cluster
+    kubeconfig          Print kubeconfig.yaml for a Kubernetes cluster
+    rename              Rename a Kubernetes cluster
+    resize-nodepool     Resize a Kubernetes cluster nodepool
+    retire-node         Retire a worker node from a Kubernetes cluster
+    show                Show details for a Kubernetes cluster
+    upgrade             Upgrade a Kubernetes cluster to the next supported version
+    upgrade-nodepool    Upgrade a nodepool of a Kubernetes cluster to the cluster's version
 
 
 List Kubernetes clusters
@@ -363,6 +366,12 @@ Allowed Option Values:
     Fields: location name id display_state version cp_node_count
 
 
+Create a nodepool on a Kubernetes cluster
+
+Usage:
+    ubi kc (location/kc-name | kc-id) create-nodepool np-name node-size node-count
+
+
 Create a Kubernetes cluster
 
 Usage:
@@ -377,6 +386,15 @@ Options:
 Allowed Option Values:
     Version: v1.36 v1.35
     Control Plane Node Count: 1 3
+
+
+Destroy a nodepool of a Kubernetes cluster
+
+Usage:
+    ubi kc (location/kc-name | kc-id) destroy-nodepool [options] (np-name | np-id)
+
+Options:
+    -f, --force                      do not require confirmation
 
 
 Destroy a Kubernetes cluster
@@ -425,9 +443,15 @@ Options:
 Allowed Option Values:
     Fields: id name location display-state cp-node-count node-size version
             nodepools cp-vms
-    Nodepool Fields: id name node-count node-size vms
+    Nodepool Fields: id name node-count node-size version vms
     Virtual Machine Fields: id name state location size unix-user
                             storage-size-gib ip6 ip4-enabled ip4
+
+
+Upgrade a nodepool of a Kubernetes cluster to the cluster's version
+
+Usage:
+    ubi kc (location/kc-name | kc-id) upgrade-nodepool (np-name | np-id)
 
 
 Upgrade a Kubernetes cluster to the next supported version

@@ -174,7 +174,7 @@ module Config
   # VictoriaMetrics
   optional :victoria_metrics_service_project_id, uuid
   override :victoria_metrics_host_name, "metrics.ubicloud.com", string
-  override :victoria_metrics_version, "v1.113.0", string
+  override :victoria_metrics_version, "v1.148.0", string
   optional :victoria_metrics_endpoint_override, string
 
   # Spdk
@@ -203,7 +203,7 @@ module Config
   override :postgres_boot_disk_size_gib, 16, int
   override :postgres_service_hostname, "postgres.ubicloud.com", string
   override :postgres_service_hostname_v3, "pg.ubicloud.app", string
-  override :postgres_hostname_version_default, "v2", string
+  override :postgres_hostname_version_default, "v3", string
   override :postgres_monitor_database_url, Config.clover_database_url, string
   optional :postgres_monitor_database_root_certs, string
   optional :postgres_paradedb_notification_email, string
@@ -259,6 +259,7 @@ module Config
   override :allocator_target_host_utilization, 0.72, float
   override :allocator_target_premium_host_utilization, 0.85, float
   override :allocator_max_random_score, 0.1, float
+  override :allocator_large_storage_device_gib, 4096, int
 
   # e2e
   override :e2e_hetzner_server_id, nil, string

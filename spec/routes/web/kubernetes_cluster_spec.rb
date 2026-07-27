@@ -267,11 +267,9 @@ RSpec.describe Clover, "Kubernetes" do
         expect(page).to have_no_content "Waiting for cluster to be ready..."
         expect(page).to have_content "Download"
 
-        within("#kubernetes-cluster-submenu") { click_link "Nodes" }
+        within("#kubernetes-cluster-submenu") { click_link "Nodepools" }
 
-        expect(page).to have_content "cp1"
-        expect(page).to have_content "cp2"
-        expect(page).to have_content "node1"
+        expect(page).to have_content kn.name
 
         kc.incr_destroy
         kc.reload
@@ -413,42 +411,222 @@ RSpec.describe Clover, "Kubernetes" do
     end
 
     describe "resize" do
-      it "can resize kubernetes cluster" do
-        visit "#{project.path}#{kc.path}/settings"
-        expect(kc.nodepools.first.reload.node_count).not_to eq(4)
+      it "can resize a nodepool from its settings page" do
+        kn = kc.nodepools.first
+        kc.strand.update(label: "wait")
+        kn.strand.update(label: "wait")
+        visit "#{project.path}#{kn.path}/settings"
+        expect(kn.reload.node_count).not_to eq(4)
         find('select#node_count option[value="4"]:not([disabled])').select_option
         click_button "Resize"
 
         expect(page).to have_flash_notice("myk8s node pool kn will be resized")
-        expect(kc.nodepools.first.reload.node_count).to eq(4)
+        expect(page).to have_current_path("#{project.path}#{kn.path}/settings")
+        expect(kn.reload.node_count).to eq(4)
+      end
+
+      it "shows a message instead of the resize form while the nodepool is busy" do
+        visit "#{project.path}#{kc.nodepools.first.path}/settings"
+
+        expect(page).to have_content("The nodepool is not ready to be resized. Please wait for ongoing operations to complete.")
+        expect(page).to have_no_button("Resize")
       end
 
       it "does not show resize option without permissions" do
         AccessControlEntry.create(project_id: project_wo_permissions.id, subject_id: user.id, action_id: ActionType::NAME_MAP["KubernetesCluster:view"])
-        visit "#{project_wo_permissions.path}#{kc_no_perm.path}/settings"
+        visit "#{project_wo_permissions.path}#{kc_no_perm.nodepools.first.path}/settings"
         expect(page).to have_no_content("Resize")
       end
     end
 
-    describe "retire node" do
-      it "can retire a worker node from the nodes tab" do
-        node = assemble_worker_node(kc, "node1")
-        kc.nodepools.first.strand.update(label: "wait")
+    describe "nodepools" do
+      it "lists nodepools with a link to their overview page" do
+        kn = kc.nodepools.first
+        visit "#{project.path}#{kc.path}/nodepools"
 
-        visit "#{project.path}#{kc.path}/nodes"
+        within("#nodepool-#{kn.ubid}") do
+          expect(page).to have_content(kn.target_node_size)
+          expect(page).to have_content(kn.version)
+          click_link kn.name
+        end
+
+        expect(page).to have_current_path("#{project.path}#{kn.path}/overview")
+        expect(page).to have_link(kc.name, href: "#{project.path}#{kc.path}/overview")
+        expect(page).to have_link("Nodepools", href: "#{project.path}#{kc.path}/nodepools")
+        expect(page).to have_content(kn.ubid)
+        expect(page).to have_content(kn.node_count)
+        expect(page).to have_content(kn.target_node_size)
+        expect(page).to have_content(kn.version)
+      end
+
+      it "can rename a nodepool" do
+        kn = kc.nodepools.first
+        visit "#{project.path}#{kn.path}/settings"
+        fill_in "name", with: "kn-renamed"
+        click_button "Rename"
+
+        expect(page).to have_flash_notice("Name updated")
+        expect(kn.reload.name).to eq("kn-renamed")
+      end
+
+      it "shows an error when renaming to an existing nodepool name" do
+        kn = kc.nodepools.first
+        Prog::Kubernetes::KubernetesNodepoolNexus.assemble(name: "kn2", node_count: 1, kubernetes_cluster_id: kc.id)
+        visit "#{project.path}#{kn.path}/settings"
+        fill_in "name", with: "kn2"
+        click_button "Rename"
+
+        expect(page).to have_content("kubernetes_cluster_id and name is already taken")
+        expect(kn.reload.name).to eq("kn")
+      end
+
+      it "can delete a nodepool" do
+        kn2 = Prog::Kubernetes::KubernetesNodepoolNexus.assemble(name: "kn2", node_count: 1, kubernetes_cluster_id: kc.id).subject
+        visit "#{project.path}#{kn2.path}/settings"
+
+        within("#kn-delete-#{kn2.ubid}") do
+          click_button "Delete"
+        end
+
+        expect(page).to have_flash_notice("kn2 nodepool is scheduled for deletion")
+        expect(page).to have_current_path("#{project.path}#{kc.path}/nodepools")
+        expect(kn2.destroy_set?).to be true
+      end
+
+      it "does not show the deletion section for the last nodepool" do
+        kn = kc.nodepools.first
+        visit "#{project.path}#{kn.path}/settings"
+
+        expect(page).to have_no_content("Danger Zone")
+        expect(page).to have_no_button("Delete")
+      end
+
+      it "can create a nodepool from the nodepools page" do
+        kc.strand.update(label: "wait")
+        kc.nodepools.first.strand.update(label: "wait")
+        visit "#{project.path}#{kc.path}/nodepools"
+
+        fill_in "name", with: "kn2"
+        find('select#node_count option[value="3"]:not([disabled])').select_option
+        click_button "Create"
+
+        expect(page).to have_flash_notice("'kn2' nodepool will be added to the cluster")
+        kn2 = kc.nodepools_dataset.first(name: "kn2")
+        expect(page).to have_current_path("#{project.path}#{kn2.path}/overview")
+        expect(kn2.node_count).to eq(3)
+        expect(kn2.target_node_size).to eq("standard-2")
+        expect(kn2.start_bootstrapping_set?).to be true
+      end
+
+      it "shows an error when creating a nodepool with a taken name" do
+        kc.strand.update(label: "wait")
+        kc.nodepools.first.strand.update(label: "wait")
+        visit "#{project.path}#{kc.path}/nodepools"
+
+        fill_in "name", with: "kn"
+        find('select#node_count option[value="1"]:not([disabled])').select_option
+        click_button "Create"
+
+        expect(page).to have_content("A nodepool with the name \"kn\" already exists in this cluster")
+        expect(kc.nodepools_dataset.count).to eq(1)
+      end
+
+      it "shows a message instead of the create form while the cluster is busy" do
+        visit "#{project.path}#{kc.path}/nodepools"
+
+        expect(page).to have_content("The cluster is not ready to add a nodepool. Please wait for ongoing operations to complete.")
+        expect(page).to have_no_button("Create")
+      end
+
+      it "does not show the create nodepool form without permissions" do
+        AccessControlEntry.create(project_id: project_wo_permissions.id, subject_id: user.id, action_id: ActionType::NAME_MAP["KubernetesCluster:view"])
+        visit "#{project_wo_permissions.path}#{kc_no_perm.path}/nodepools"
+
+        expect(page).to have_content(kc_no_perm.nodepools.first.name)
+        expect(page).to have_no_button("Create")
+      end
+
+      it "can upgrade a nodepool from its settings page" do
+        kn = kc.nodepools.first
+        kn.update(version: Option.kubernetes_versions[1])
+        kc.strand.update(label: "wait")
+        kn.strand.update(label: "wait")
+
+        visit "#{project.path}#{kn.path}/settings"
+        expect(page).to have_content "can be upgraded to version"
+        click_button "Upgrade"
+
+        expect(page).to have_flash_notice("myk8s node pool kn will be upgraded to #{Option.kubernetes_versions[0]}")
+        expect(page).to have_current_path("#{project.path}#{kn.path}/settings")
+        expect(page).to have_content "is currently in progress"
+        expect(kn.reload.version).to eq(Option.kubernetes_versions[0])
+        expect(kn.upgrade_requested_set?).to be true
+        expect(kc.upgrade_nodepools_set?).to be true
+      end
+
+      it "shows upgrading in progress while the nodepool strand is upgrading" do
+        kn = kc.nodepools.first
+        kn.strand.update(label: "upgrade")
+
+        visit "#{project.path}#{kn.path}/settings"
+        expect(page).to have_content "is currently in progress"
+      end
+
+      it "shows not ready when an upgrade is available but the cluster is busy" do
+        kn = kc.nodepools.first
+        kn.update(version: Option.kubernetes_versions[1])
+        kc.strand.update(label: "upgrade")
+        kn.strand.update(label: "wait")
+
+        visit "#{project.path}#{kn.path}/settings"
+        expect(page).to have_content "Nodepool is not ready for upgrade"
+        expect(page).to have_no_button "Upgrade"
+      end
+
+      it "shows up to date when the nodepool matches the cluster version" do
+        kn = kc.nodepools.first
+        kc.strand.update(label: "wait")
+        kn.strand.update(label: "wait")
+
+        visit "#{project.path}#{kn.path}/settings"
+        expect(page).to have_content "Your nodepool is up to date on version"
+        expect(page).to have_content kn.version
+      end
+
+      it "points to the control plane upgrade when the nodepool matches a cluster that can be upgraded" do
+        kn = kc.nodepools.first
+        kc.update(version: Option.selectable_kubernetes_versions[1])
+        kn.update(version: Option.selectable_kubernetes_versions[1])
+        kc.strand.update(label: "wait")
+        kn.strand.update(label: "wait")
+
+        visit "#{project.path}#{kn.path}/settings"
+        expect(page).to have_content "A newer kubernetes version becomes available for the nodepool once the control plane is upgraded."
+        expect(page).to have_no_button "Upgrade"
+      end
+    end
+
+    describe "retire node" do
+      it "can retire a worker node from the nodepool nodes tab" do
+        node = assemble_worker_node(kc, "node1")
+        kn = kc.nodepools.first
+        kn.strand.update(label: "wait")
+
+        visit "#{project.path}#{kn.path}/nodes"
         expect(page).to have_content("node1")
 
         click_button "Retire"
 
         expect(page).to have_flash_notice("Node node1 is scheduled to be retired")
+        expect(page).to have_current_path("#{project.path}#{kn.path}/nodes")
         expect(node.reload.retire_set?).to be true
-        expect(kc.nodepools.first.reload.node_count).to eq(1)
+        expect(kn.reload.node_count).to eq(1)
       end
 
       it "does not show a retire button until the nodepool finishes bootstrapping" do
         assemble_worker_node(kc, "node1")
 
-        visit "#{project.path}#{kc.path}/nodes"
+        visit "#{project.path}#{kc.nodepools.first.path}/nodes"
         expect(page).to have_content("node1")
         expect(page).to have_no_button("Retire")
       end
@@ -458,16 +636,16 @@ RSpec.describe Clover, "Kubernetes" do
         assemble_worker_node(kc, "node1")
         kc.nodepools.first.strand.update(label: "wait")
 
-        visit "#{project.path}#{kc.path}/nodes"
+        visit "#{project.path}#{kc.nodepools.first.path}/nodes"
         expect(page).to have_content("node1")
         expect(page).to have_no_button("Retire")
       end
 
-      it "shows a disabled button for a node that is already retiring" do
+      it "shows the retiring state for a node that is already retiring" do
         assemble_worker_node(kc, "node1").update(state: "draining")
 
-        visit "#{project.path}#{kc.path}/nodes"
-        expect(page).to have_button("Retiring...", disabled: true)
+        visit "#{project.path}#{kc.nodepools.first.path}/nodes"
+        expect(page).to have_content("Retiring...")
         expect(page).to have_no_button("Retire")
       end
 
@@ -475,7 +653,7 @@ RSpec.describe Clover, "Kubernetes" do
         AccessControlEntry.create(project_id: project_wo_permissions.id, subject_id: user.id, action_id: ActionType::NAME_MAP["KubernetesCluster:view"])
         assemble_worker_node(kc_no_perm, "node1")
 
-        visit "#{project_wo_permissions.path}#{kc_no_perm.path}/nodes"
+        visit "#{project_wo_permissions.path}#{kc_no_perm.nodepools.first.path}/nodes"
         expect(page).to have_content("node1")
         expect(page).to have_no_button("Retire")
       end
@@ -488,7 +666,7 @@ RSpec.describe Clover, "Kubernetes" do
         kc.nodepools.first.strand.update(label: "wait")
 
         visit "#{project.path}#{kc.path}/settings"
-        expect(page).to have_content "Upgrade Cluster & Nodepool"
+        expect(page).to have_content "Upgrade Control Plane"
         expect(page).to have_content "can be upgraded to version"
         expect(page).to have_content Option.selectable_kubernetes_versions.first
         expect(page).to have_button "Upgrade"
@@ -499,9 +677,8 @@ RSpec.describe Clover, "Kubernetes" do
         kc.nodepools.first.strand.update(label: "wait")
 
         visit "#{project.path}#{kc.path}/settings"
-        expect(page).to have_content "Upgrade Cluster & Nodepool"
+        expect(page).to have_content "Upgrade Control Plane"
         expect(page).to have_content "is currently in progress"
-        expect(page).to have_button "Upgrading...", disabled: true
       end
 
       it "shows upgrading in progress when nodepools are being upgraded" do
@@ -511,7 +688,18 @@ RSpec.describe Clover, "Kubernetes" do
 
         visit "#{project.path}#{kc.path}/settings"
         expect(page).to have_content "is currently in progress"
-        expect(page).to have_button "Upgrading...", disabled: true
+      end
+
+      it "shows a nodepool skew warning when a nodepool is more than two minor versions behind" do
+        kc.update(version: Option.selectable_kubernetes_versions[1])
+        kn = kc.nodepools.first
+        kn.update(version: "v1.#{Option.kubernetes_minor_version(kc.version) - 3}")
+        kc.strand.update(label: "wait")
+        kn.strand.update(label: "wait")
+
+        visit "#{project.path}#{kc.path}/settings"
+        expect(page).to have_content "all nodepools must be upgraded to within two minor versions of the cluster first"
+        expect(page).to have_no_button "Upgrade"
       end
 
       it "shows not ready when upgrade is available but strands are busy" do
@@ -521,7 +709,7 @@ RSpec.describe Clover, "Kubernetes" do
 
         visit "#{project.path}#{kc.path}/settings"
         expect(page).to have_content "Cluster is not ready for upgrade"
-        expect(page).to have_button "Upgrade", disabled: true
+        expect(page).to have_no_button "Upgrade"
       end
 
       it "shows up to date when no upgrade is available" do

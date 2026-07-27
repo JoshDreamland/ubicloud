@@ -9,11 +9,14 @@ class Prog::Kubernetes::KubernetesNodepoolNexus < Prog::Base
         fail "No existing cluster"
       end
 
+      Validation.validate_kubernetes_name(name)
       Validation.validate_kubernetes_worker_node_count(node_count)
 
       kn = KubernetesNodepool.create(name:, node_count:, kubernetes_cluster_id:, target_node_size:, target_node_storage_size_gib:, version: cluster.version)
 
-      Strand.create_with_id(kn, prog: "Kubernetes::KubernetesNodepoolNexus", label: "start")
+      strand = Strand.create_with_id(kn, prog: "Kubernetes::KubernetesNodepoolNexus", label: "start")
+      kn.incr_start_bootstrapping if cluster.strand.label == "wait"
+      strand
     end
   end
 
@@ -23,6 +26,7 @@ class Prog::Kubernetes::KubernetesNodepoolNexus < Prog::Base
       decr_start_bootstrapping
       hop_bootstrap_worker_nodes
     end
+    hop_bootstrap_worker_nodes if kubernetes_nodepool.cluster.strand.label == "wait"
     nap 10
   end
 
@@ -43,6 +47,7 @@ class Prog::Kubernetes::KubernetesNodepoolNexus < Prog::Base
 
   label def wait_worker_node
     reap do
+      decr_scale_worker_count
       hop_wait
     end
   end
@@ -52,7 +57,6 @@ class Prog::Kubernetes::KubernetesNodepoolNexus < Prog::Base
       hop_upgrade
     end
     when_scale_worker_count_set? do
-      decr_scale_worker_count
       hop_bootstrap_worker_nodes
     end
     nap 6 * 60 * 60
@@ -64,7 +68,6 @@ class Prog::Kubernetes::KubernetesNodepoolNexus < Prog::Base
     node_to_upgrade = kubernetes_nodepool.nodes.find do |node|
       node_version = kubernetes_nodepool.cluster.client(session: node.sshable.connect).version
       node_minor_version = node_version.match(/^v\d+\.(\d+)$/)&.captures&.first&.to_i
-      nodepool_minor_version = kubernetes_nodepool.version.match(/^v\d+\.(\d+)$/).captures.first.to_i
 
       unless node_minor_version
         Prog::PageNexus.assemble(
@@ -76,7 +79,7 @@ class Prog::Kubernetes::KubernetesNodepoolNexus < Prog::Base
         next false
       end
 
-      node_minor_version == nodepool_minor_version - 1
+      node_minor_version < Option.kubernetes_minor_version(kubernetes_nodepool.version)
     end
 
     hop_wait unless node_to_upgrade
