@@ -85,6 +85,8 @@ module Prog::DnsZone; end
 
 module Prog::Github; end
 
+module Prog::Hetzner; end
+
 module Prog::Kubernetes; end
 
 module Prog::MachineImage; end
@@ -123,13 +125,13 @@ module Parseable; end
 
 module VictoriaMetrics; end
 
-provider_dirs = %w[aws metal gcp]
+provider_dirs = %w[aws metal gcp].freeze
 autoload_normal.call("model", flat: true, exclude_dirs: provider_dirs)
-%w[lib clover.rb clover_admin.rb].each { autoload_normal.call(it) }
-%w[scheduling prog serializers].each { autoload_normal.call(it, include_first: true) }
+%w[lib clover.rb clover_admin.rb].freeze.each { autoload_normal.call(it) }
+%w[scheduling prog serializers].freeze.each { autoload_normal.call(it, include_first: true) }
 
 if ENV["LOAD_FILES_SEPARATELY_CHECK"] == "1"
-  files = %w[model lib scheduling prog serializers].flat_map { Dir["#{it}/**/*.rb"] }
+  files = %w[model lib scheduling prog serializers].freeze.flat_map { Dir["#{it}/**/*.rb"] }
   files << "clover.rb"
   files << "clover_admin.rb"
 
@@ -253,6 +255,7 @@ def clover_freeze
     Prog::Base::Nap,
     Prog::DnsZone,
     Prog::Github,
+    Prog::Hetzner,
     Prog::Kubernetes,
     Prog::MachineImage,
     Prog::Minio,

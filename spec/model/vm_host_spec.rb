@@ -79,7 +79,7 @@ RSpec.describe VmHost do
     it "has a shortcut to install Rhizome" do
       st = vm_host.install_rhizome
       expect(st.prog).to eq("InstallRhizome")
-      expect(st.stack).to eq(["subject_id" => vm_host.id, "target_folder" => "host", "install_specs" => false])
+      expect(st.stack).to eq(["subject_id" => vm_host.id, "target_folder" => "host"])
     end
   end
 
@@ -100,7 +100,7 @@ RSpec.describe VmHost do
       expect(vm_host.reload.location_id).to eq target_location.id
       download_strands = Strand.where(prog: "DownloadBootImage").all
       downloaded_names = download_strands.map { it.stack.first["image_name"] }.sort
-      expect(downloaded_names).to eq %w[almalinux-9 debian-12 github-ubuntu-2204 github-ubuntu-2404 postgres-ubuntu-2204 ubuntu-jammy ubuntu-noble]
+      expect(downloaded_names).to eq %w[almalinux-9 debian-12 github-ubuntu-2204 github-ubuntu-2404 postgres-ubuntu-2204 ubuntu-jammy ubuntu-noble].freeze
     end
 
     it "downloads github images when moving to github-runners location" do
@@ -111,7 +111,7 @@ RSpec.describe VmHost do
       expect(vm_host.reload.location_id).to eq target_location.id
       download_strands = Strand.where(prog: "DownloadBootImage").all
       downloaded_names = download_strands.map { it.stack.first["image_name"] }.sort
-      expect(downloaded_names).to eq %w[github-ubuntu-2204 github-ubuntu-2404]
+      expect(downloaded_names).to eq %w[github-ubuntu-2204 github-ubuntu-2404].freeze
     end
 
     it "logs and returns early if already in the target location" do

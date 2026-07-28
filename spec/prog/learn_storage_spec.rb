@@ -69,6 +69,23 @@ EOS
       expect(vmh.reload.available_storage_gib).to eq(3)
       expect(vmh.reload.total_storage_gib).to eq(13)
     end
+
+    it "formats the storage disks before reading them when format_storage is set" do
+      vmh = Prog::Vm::HostNexus.assemble("::1").subject
+      ls = described_class.new(Strand.new(stack: [{"subject_id" => vmh.id, "format_storage" => true}]))
+      expect(ls.sshable).to receive(:_cmd).with("sudo host/bin/format-storage-disks").ordered
+      expect(ls.sshable).to receive(:_cmd).with("df -B1 --output=source,target,size,avail").ordered.and_return(<<~EOS)
+        Filesystem     Mounted on                   1B-blocks        Avail
+        /dev/sda       /                            205520896     99571712
+      EOS
+      expect(ls.sshable).to receive(:_cmd).with("df -B1 --output=source,target,size,avail /var/storage").and_return(<<~EOS)
+        Filesystem     Mounted on   1B-blocks        Avail
+        /dev/sda       /            205520896     99571712
+      EOS
+      expect(ls.sshable).to receive(:_cmd).with("ls -l /dev/disk/by-id/ | grep sda\\$ | grep 'wwn-' | sed -E 's/.*(wwn[^ ]*).*/\\1/'").and_return("wwn-some-random-id1")
+
+      expect { ls.start }.to exit({"msg" => "created StorageDevice records"})
+    end
   end
 
   describe Prog::LearnStorage, "#make_model_instances" do
@@ -97,7 +114,7 @@ EOS
       allow(ls.sshable).to receive(:_cmd).with("ls -l /dev/disk/by-id/ | grep sdb\\$ | grep 'wwn-' | sed -E 's/.*(wwn[^ ]*).*/\\1/'").and_return("wwn-some-random-id1")
       expect(ls.sshable).to receive(:_cmd).with("ls -l /dev/disk/by-id/ | grep sdc\\$ | grep 'wwn-' | sed -E 's/.*(wwn[^ ]*).*/\\1/'").and_return("wwn-some-random-id2")
 
-      expect(ls.make_model_instances.map(&:name)).to eq(%w[DEFAULT stor1 stor2])
+      expect(ls.make_model_instances.map(&:name)).to eq(%w[DEFAULT stor1 stor2].freeze)
     end
 
     it "can use any file system that is present at '/var/storage'" do
@@ -120,7 +137,7 @@ Filesystem     Mounted on                   1B-blocks        Avail
 EOS
       allow(ls.sshable).to receive(:_cmd).with("ls -l /dev/disk/by-id/ | grep sda\\$ | grep 'wwn-' | sed -E 's/.*(wwn[^ ]*).*/\\1/'").and_return("wwn-some-random-id1")
 
-      expect(ls.make_model_instances.map(&:name)).to eq(%w[DEFAULT])
+      expect(ls.make_model_instances.map(&:name)).to eq(%w[DEFAULT].freeze)
     end
 
     it "can find underlying unix devices for raided disks" do

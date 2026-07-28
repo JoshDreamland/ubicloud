@@ -59,6 +59,7 @@ RUN before="$(ls config/billing_rates/*.yml | sort)" && \
 ENV RACK_ENV=production
 ENV PORT=3000
 ENV LD_PRELOAD=${JEMALLOC_PATH}
+ENV MALLOC_CONF=narenas:2,background_thread:true
 ARG GIT_COMMIT_HASH
 ENV GIT_COMMIT_HASH=${GIT_COMMIT_HASH}
 
