@@ -42,11 +42,7 @@
 
 # mise "local" dependency specification that shouldn't be committed
 mise.local.toml
-<<<<<<< HEAD
+mise.local.lock
 
 # Project-local Ruby install
 /.ruby
-=======
-mise.local.lock
-
->>>>>>> 1d95e58ac5ae51f706a89a6e2624534b0ee8b0bb
