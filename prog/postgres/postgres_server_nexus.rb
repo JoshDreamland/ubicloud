@@ -351,7 +351,7 @@ TIMER
     vm.sshable.write_file("/etc/systemd/system/postgres-metrics.timer", metrics_timer)
 
     vm.sshable.cmd("sudo mkdir -p /var/lib/node_exporter")
-    vm.sshable.cmd("sudo chown ubi:ubi /var/lib/node_exporter")
+    vm.sshable.cmd("sudo chown ubi_monitoring:ubi_monitoring /var/lib/node_exporter")
 
     pg_metrics_service = <<SERVICE
 [Unit]
@@ -360,7 +360,13 @@ After=postgresql.service
 
 [Service]
 Type=oneshot
-User=ubi
+User=ubi_monitoring
+# group ubi: traverse /home/ubi (0750) to exec the script; ambient
+# capabilities are not in the effective set at execve time.
+SupplementaryGroups=ubi
+# read the postgres-owned pg_wal/archive_status directory without sudo
+AmbientCapabilities=CAP_DAC_READ_SEARCH
+NoNewPrivileges=true
 ExecStart=/home/ubi/postgres/bin/collect-pg-metrics #{postgres_server.version}
 StandardOutput=journal
 StandardError=journal
@@ -384,6 +390,11 @@ TIMER
     setup_override_metrics
     setup_otel if Config.postgres_otel_otlp_export_enabled
     vm.sshable.cmd("sudo systemctl daemon-reload")
+    # The old User=ubi unit leaves its safe_write_to_file lock and possibly
+    # a stale tmp file owned ubi:ubi 0644, which the new user cannot write.
+    vm.sshable.cmd("sudo rm -f :lock_path :tmp_path",
+      lock_path: "/tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock",
+      tmp_path: "/var/lib/node_exporter/pg_metrics.prom.tmp")
 
     when_initial_provisioning_set? do
       vm.sshable.cmd("sudo systemctl enable --now postgres_exporter")
@@ -568,6 +579,7 @@ SQL
 
     case vm.sshable.d_check("migrate")
     when "Succeeded"
+      vm.sshable.d_clean("migrate")
       hop_wait
     when "Failed", "NotStarted"
       vm.sshable.d_run("migrate", "sudo", "postgres/bin/migrate")
