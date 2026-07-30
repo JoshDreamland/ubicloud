@@ -11,39 +11,62 @@ set -e
 
 REPO="ClickHouse/postgres-vm-images"
 
+# Exit status used when the GitHub API itself is unreachable (bad credentials,
+# exhausted quota, network). Callers can treat it as "AMIs not refreshed" and
+# keep going, unlike a genuine failure such as an AMI missing from the logs.
+GH_UNAVAILABLE=78
+
+# Calls gh api and prints the response to stdout only when the request
+# succeeded. On a non-2xx response gh writes the raw JSON error body to stdout
+# (CRLF line endings) as well as a message to stderr, so the body must not be
+# mistaken for a result: piping gh straight into head or grep discards its exit
+# status and lets "{" become the value.
+gh_api() {
+  local path="$1"
+  local body
+  if ! body=$(gh api "$path" "${@:2}"); then
+    echo "Error: gh api ${path} failed" >&2
+    return "$GH_UNAVAILABLE"
+  fi
+  printf '%s\n' "$body"
+}
+
 # Fetch the latest AMI ID from the CI pipeline.
 # Prints only the AMI ID to stdout; all informational messages go to stderr.
 fetch_ami() {
   local region="$1"
   local arch="$2"
 
-  local run_id
   # Fetch the latest successful build run for the PostgreSQL VM Image workflow
-  run_id=$(gh api "repos/${REPO}/actions/runs?branch=main&status=success&per_page=20" \
-    --jq '.workflow_runs[] | select(.name == "Build PostgreSQL VM Image") | .id' | head -1)
+  local runs run_id
+  runs=$(gh_api "repos/${REPO}/actions/runs?branch=main&status=success&per_page=20" \
+    --jq '.workflow_runs[] | select(.name == "Build PostgreSQL VM Image") | .id') || return $?
+  run_id=$(printf '%s\n' "$runs" | head -1)
 
-  if [ -z "$run_id" ]; then
+  if ! [[ "$run_id" =~ ^[0-9]+$ ]]; then
     echo "Error: No successful build run found" >&2
     return 1
   fi
 
   # Fetch the latest job for the architecture
-  local job_id
-  job_id=$(gh api "repos/${REPO}/actions/runs/${run_id}/jobs?per_page=50" \
-    --jq ".jobs[] | select(.name | test(\"${arch}\")) | .id" | head -1)
+  local jobs job_id
+  jobs=$(gh_api "repos/${REPO}/actions/runs/${run_id}/jobs?per_page=50" \
+    --jq ".jobs[] | select(.name | test(\"${arch}\")) | .id") || return $?
+  job_id=$(printf '%s\n' "$jobs" | head -1)
 
-  if [ -z "$job_id" ]; then
-    echo "Error: No job found for arch ${arch}" >&2
+  if ! [[ "$job_id" =~ ^[0-9]+$ ]]; then
+    echo "Error: No job found for arch ${arch} in run ${run_id}" >&2
     return 1
   fi
 
   # Fetch the AMI ID from the job logs
-  local ami_id
-  ami_id=$(gh api "repos/${REPO}/actions/jobs/${job_id}/logs" 2>/dev/null \
-    | grep -oP "Copied AMI to ${region}: \Kami-[0-9a-f]+")
+  local logs ami_id
+  logs=$(gh_api "repos/${REPO}/actions/jobs/${job_id}/logs") || return $?
+  ami_id=$(printf '%s\n' "$logs" \
+    | grep -oP "Copied AMI to ${region}: \Kami-[0-9a-f]+" | head -1)
 
   if [ -z "$ami_id" ]; then
-    echo "Error: No AMI found for region ${region}" >&2
+    echo "Error: No AMI found for region ${region} in logs of job ${job_id}" >&2
     return 1
   fi
 
