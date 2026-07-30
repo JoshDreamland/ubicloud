@@ -25,20 +25,30 @@ This skill bakes those in.
 ```
 
 Options:
-- `--branch <ref>` — postgres-vm-images branch (default: `andreyc/pg-log-compress`)
-- `--suffix <YYYYMMDD.X.Y>` — required; must be unique across past builds
-- `--prefix <name>` — image_prefix (default: `pg-log-test`)
+- `--branch <ref>` — postgres-vm-images branch (default: `andreyc/pg-log-compress`, left over from the log-rotation work; override it)
+- `--suffix <YYYYMMDD.X.Y>` — required unless `--rollout-only`; must be unique across past builds
+- `--prefix <name>` — image_prefix (default: `pg-log-test`; likewise override it)
+- `--rollout-only <run-id>` — skip the build entirely and roll out an existing successful run
 - `--no-wait` — return after triggering, skip the watch+rollout
 - `--no-apply` — skip the `pg_aws_ami` update (just print extracted AMI IDs)
 
-The script blocks for ~35-45 min while watching the build. Use `--no-wait` if you want to walk away.
+The script blocks for ~50-60 min while watching the build. Use `--no-wait` if you want to walk away, then finish with `--rollout-only <run-id>`.
 
 ## What it does
 
 1. Triggers `postgres-vm-image.yml` via `gh workflow run` with prod-matching share config (5 regions, each shared with both 248825820370 and 176778311874).
-2. Watches the run via `gh run watch --exit-status`, retrying on transient `gh api` EOFs.
-3. On success, greps each build job's log for `Registered AMI:` (source us-west-2) and `Copied AMI to <region>:` (other 4 regions) to collect all 10 region+arch AMI IDs.
-4. Updates `pg_aws_ami` rows in the dev DB, matching by `(aws_location_name, arch)` — same pattern as `register-pg-region.sh`. All postgres versions (16/17/18) sharing one AMI get updated together.
+2. Finds its own run by matching the image suffix against the build job names, so a scheduled build starting at the same moment is not mistaken for ours.
+3. Polls the run to completion, tolerating ~10 min of API flakiness. Only a `completed` status with a non-success conclusion counts as a build failure; if the API stays unreachable the script exits 2 and prints the `--rollout-only` command to resume with.
+4. On success, greps each build job's log for `Registered AMI:` (source us-west-2) and `Copied AMI to <region>:` (other 4 regions) to collect all 10 region+arch AMI IDs.
+5. Updates `pg_aws_ami` rows in the dev DB, matching by `(aws_location_name, arch)` — same pattern as `register-pg-region.sh`. All postgres versions (16/17/18) sharing one AMI get updated together.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | build succeeded and (unless `--no-apply`) `pg_aws_ami` was updated |
+| 1 | the build itself failed, or a precondition was wrong |
+| 2 | outcome unknown — the API was unreachable while watching. The build is probably still running; resume with `--rollout-only <run-id>` rather than rebuilding. |
 
 The script does NOT generate a migration file. For PR prep use `.devcontainer/scripts/update-pg-ami-refs.rb --apply` instead.
 
