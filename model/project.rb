@@ -254,6 +254,7 @@ class Project < Sequel::Model
     :postgres_lantern,
     :postgres_maintenance_window_platform_only,
     :postgres_paradedb,
+    :postgres_wal_shadow,
     :private_locations,
     :require_mfa_or_omniauth,
     :skip_runner_pool,

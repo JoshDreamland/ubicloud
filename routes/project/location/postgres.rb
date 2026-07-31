@@ -366,6 +366,86 @@ class Clover
         end
       end
 
+      r.on api?, "wal-shadow" do
+        # view authorizes even the feature-gated 404 path so every branch records
+        # an authorization check; the parent Postgres permissions are reused
+        authorize("Postgres:view", pg)
+        fail CloverError.new(404, "NotFound", "walshadow is not enabled for this project") unless @project.get_ff_postgres_wal_shadow
+        ws = pg.postgres_wal_shadow
+
+        r.is do
+          r.post do
+            authorize("Postgres:edit", pg)
+            fail CloverError.new(400, "InvalidRequest", "walshadow already exists for this database") if ws
+
+            ch_config = typecast_params.nonempty_str!("ch_config")
+            boot_image = typecast_params.nonempty_str!("boot_image")
+            git_ref = typecast_params.nonempty_str("git_ref") || "main"
+            vm_size = typecast_params.nonempty_str("vm_size")
+            storage_size_gib = typecast_params.pos_int("storage_size_gib")
+            data_on_boot_volume = typecast_params.bool("data_on_boot_volume")
+            data_on_boot_volume = true if data_on_boot_volume.nil?
+
+            ws = DB.transaction do
+              wal_shadow = Prog::Postgres::PostgresWalShadowNexus.assemble(pg.id, ch_config:, boot_image:, git_ref:, vm_size:, storage_size_gib:, data_on_boot_volume:).subject
+              audit_log(wal_shadow, "create", pg)
+              wal_shadow
+            end
+
+            Serializers::PostgresWalShadow.serialize(ws, {detailed: true})
+          end
+
+          r.get do
+            check_found_object(ws)
+            Serializers::PostgresWalShadow.serialize(ws, {detailed: true})
+          end
+
+          r.delete do
+            authorize("Postgres:delete", pg)
+            if ws
+              DB.transaction do
+                ws.incr_destroy
+                audit_log(ws, "destroy")
+              end
+            else
+              no_audit_log
+            end
+            204
+          end
+        end
+
+        r.get "status" do
+          check_found_object(ws)
+          Serializers::PostgresWalShadow.serialize_status(ws)
+        end
+
+        r.is "config" do
+          r.get do
+            check_found_object(ws)
+            {config: ws.api_config_hash}
+          end
+
+          r.patch do
+            authorize("Postgres:edit", pg)
+            check_found_object(ws)
+            apply_wal_shadow_config(ws, typecast_params.Hash!("config"))
+            {config: ws.api_config_hash}
+          end
+
+          r.delete do
+            authorize("Postgres:edit", pg)
+            check_found_object(ws)
+            keys = typecast_params.array!(:nonempty_str, "keys")
+            DB.transaction do
+              ws.unset_api_config!(keys)
+              ws.incr_update_config
+              audit_log(ws, "update_config", pg)
+            end
+            {config: ws.api_config_hash}
+          end
+        end
+      end
+
       r.post "read-replica" do
         authorize("Postgres:edit", pg)
         handle_validation_failure("postgres/show") { @page = "read-replica" }

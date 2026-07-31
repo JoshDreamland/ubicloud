@@ -16,6 +16,7 @@ class PostgresResource < Sequel::Model
   many_to_one :location, read_only: true
   one_to_many :read_replicas, class: :PostgresResource, key: :parent_id, conditions: {restore_target: nil}, read_only: true
   one_to_one :init_script, class: :PostgresInitScript, key: :id, read_only: true
+  one_to_one :postgres_wal_shadow, read_only: true
 
   plugin :association_dependencies, metric_destinations: :destroy, log_destinations: :destroy, init_script: :destroy
   dataset_module Pagination

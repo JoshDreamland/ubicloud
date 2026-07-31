@@ -2241,6 +2241,12 @@ paths:
           $ref: '#/components/responses/Error'
       tags:
         - Postgres Database
+  /project/{project_id}/location/{location}/postgres/{postgres_database_reference}/wal-shadow:
+    $ref: './openapi-clickgres.yml#/paths/~1project~1{project_id}~1location~1{location}~1postgres~1{postgres_database_reference}~1wal-shadow'
+  /project/{project_id}/location/{location}/postgres/{postgres_database_reference}/wal-shadow/config:
+    $ref: './openapi-clickgres.yml#/paths/~1project~1{project_id}~1location~1{location}~1postgres~1{postgres_database_reference}~1wal-shadow~1config'
+  /project/{project_id}/location/{location}/postgres/{postgres_database_reference}/wal-shadow/status:
+    $ref: './openapi-clickgres.yml#/paths/~1project~1{project_id}~1location~1{location}~1postgres~1{postgres_database_reference}~1wal-shadow~1status'
   /project/{project_id}/location/{location}/private-subnet:
     get:
       operationId: listLocationPrivateSubnets
@@ -5219,6 +5225,8 @@ tags:
     name: Postgres Metric Destination
   - description: Postgres Log Destination
     name: Postgres Log Destination
+  - description: Postgres Walshadow CDC Operations
+    name: Postgres Walshadow
   - description: Private Subnet Operations
     name: Private Subnet
   - description: Project Operations
