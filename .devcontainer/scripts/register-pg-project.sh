@@ -45,9 +45,15 @@ RACK_ENV=development bundle exec ruby -r ./loader -e '
 
   # Remove shared (non-project-specific) locations — this devcontainer is for
   # the Clickhouse environment which only uses the project-owned AWS location.
+  # Also drop each location strand + semaphores, else the orphaned LocationNexus
+  # strand crash-loops on a nil subject.
   shared = Location.where(project_id: nil).all
   if shared.any?
-    shared.each(&:destroy)
+    shared.each do |loc|
+      Semaphore.where(strand_id: loc.id).destroy
+      Strand.where(id: loc.id).destroy
+      loc.destroy
+    end
     puts "Removed #{shared.count} shared location(s): #{shared.map(&:display_name).join(", ")}"
   end
 
