@@ -862,3 +862,4 @@ end
 #  postgres_init_script        | postgres_init_script_id_fkey                          | (id) REFERENCES postgres_resource(id)
 #  postgres_log_destination    | postgres_log_destination_postgres_resource_id_fkey    | (postgres_resource_id) REFERENCES postgres_resource(id)
 #  postgres_metric_destination | postgres_metric_destination_postgres_resource_id_fkey | (postgres_resource_id) REFERENCES postgres_resource(id)
+#  postgres_wal_shadow         | postgres_wal_shadow_postgres_resource_id_fkey         | (postgres_resource_id) REFERENCES postgres_resource(id)
