@@ -95,12 +95,23 @@ jobs:
       - name: Run prepare-pg-ubicloud
         id: prepare
         run: |
+          # Capture without letting `bash -e` abort at the assignment: on a
+          # non-zero exit the step used to die before `echo "$OUTPUT"` ran,
+          # so every prepare failure surfaced as a bare "exit code 1" with
+          # the whole script output discarded.
+          set +e
           OUTPUT=$(docker compose \
             -f .devcontainer/docker-compose.yml \
             -f .devcontainer/docker-compose.ci.yml \
             exec -T app \
             .devcontainer/scripts/prepare-pg-ubicloud.sh --region us-west-2 2>&1)
+          RC=$?
+          set -e
           echo "$OUTPUT"
+          if [ "$RC" -ne 0 ]; then
+            echo "FAIL: prepare-pg-ubicloud exited $RC"
+            exit "$RC"
+          fi
 
           # Extract PAT token and project ubid from prepare output
           PAT_TOKEN=$(echo "$OUTPUT" | grep "PAT token:" | grep -oP 'pat-\S+')
