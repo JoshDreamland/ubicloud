@@ -5,6 +5,14 @@ require_relative "../model"
 class Semaphore < Sequel::Model
   plugin ResourceMethods
 
+  dataset_module do
+    private
+
+    def check_delete_callstack!
+      nil
+    end
+  end
+
   def self.incr(id, name, wake: true)
     case name
     when Symbol
@@ -40,6 +48,13 @@ class Semaphore < Sequel::Model
     hash = super
     hash[:set_at] = set_at.strftime("%F %T")
     hash
+  end
+
+  private
+
+  # Do not create archived records of semaphores
+  def create_archived_record
+    nil
   end
 end
 

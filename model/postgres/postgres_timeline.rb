@@ -19,12 +19,12 @@ class PostgresTimeline < Sequel::Model
     ubid
   end
 
-  def walg_config_env_contents
+  def walg_config_env_contents(server)
     return "" unless walg_optimized_config_enabled?
-    return "" unless (params = walg_config_params)
+    return "" unless (params = walg_config_params(server))
 
     direct_io = walg_direct_io_enabled?
-    direct_io_drive_count = leader.storage_device_paths.count if direct_io
+    direct_io_drive_count = server.storage_device_paths.count if direct_io
     WalgConfig.config_env_contents(**params, direct_io:, direct_io_drive_count:)
   end
 
@@ -43,6 +43,22 @@ class PostgresTimeline < Sequel::Model
     return false if latest_backup_started_at && latest_backup_started_at > Time.now - 60 * 60 * backup_period_hours
 
     leader.vm.sshable.d_check("take_postgres_backup") != "InProgress"
+  end
+
+  # wal-g segment names are `<timeline 8hex><log 8hex><seg 8hex>`; .history
+  # & other objects don't match
+  WAL_SEGMENT_RE = /\A[0-9A-F]{24}\z/
+
+  # To allow overriding in specs
+  def self.any_archived_wal?(timeline)
+    timeline.any_archived_wal?
+  end
+
+  # Whether any WAL segment has been archived. Gates unarchive E2E until
+  # post-backup writes land in the archive, not the live tail segment.
+  def any_archived_wal?
+    return false if blob_storage.nil?
+    list_objects("wal_005/").any? { WAL_SEGMENT_RE.match?(it.key.delete_prefix("wal_005/").split(".").first) }
   end
 
   def backups

@@ -110,7 +110,7 @@ class Clover
         handle_validation_failure("kubernetes-cluster/show") { @page = "overview" }
 
         unless kc.kubeconfig
-          raise CloverError.new(503, "ServiceUnavailable", "Temporary error downloading kubeconfig.yaml. Please try again.")
+          fail_kubernetes_unprocessable("Cluster is not ready, kubeconfig is not available yet")
         end
 
         response.attachment "#{kc.name}-kubeconfig.yaml"
@@ -184,9 +184,7 @@ class Clover
 
           upgrade_candidate = kn.available_upgrade_version
           DB.transaction do
-            kn.update(version: upgrade_candidate)
-            kn.incr_upgrade_requested
-            kc.incr_upgrade_nodepools
+            kn.request_upgrade
             audit_log(kn, "upgrade", [kc])
           end
 
@@ -266,8 +264,7 @@ class Clover
 
         upgrade_candidate = kc.available_upgrade_version
         DB.transaction do
-          kc.update(version: upgrade_candidate)
-          kc.incr_upgrade
+          kc.request_upgrade
           audit_log(kc, "upgrade")
         end
 

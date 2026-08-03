@@ -7,23 +7,27 @@ class PostgresTimeline < Sequel::Model
   module Gcp
     private
 
+<<<<<<< HEAD
     def gcp_generate_walg_config(version)
       walg_credentials = if access_key
         <<-WALG_CONF
 GOOGLE_APPLICATION_CREDENTIALS=/etc/postgresql/gcs-sa-key.json
         WALG_CONF
       end
+=======
+    def gcp_generate_walg_config(version, server)
+>>>>>>> ba650184bf7b6b48d9188655371f7e2e3798a4fa
       config = <<-WALG_CONF
 WALG_GS_PREFIX=gs://#{ubid}
 #{walg_credentials}
 PGHOST=/var/run/postgresql
 PGDATA=/dat/#{version}/data
       WALG_CONF
-      config + walg_config_env_contents
+      config + walg_config_env_contents(server)
     end
 
-    def gcp_walg_config_params
-      return nil unless (vm = leader.vm)
+    def gcp_walg_config_params(server)
+      return nil unless (vm = server.vm)
 
       {vcpu_count: vm.vcpus, memory_mib: vm.memory_gib * 1024}
     end
@@ -89,8 +93,7 @@ PGDATA=/dat/#{version}/data
             "projects/-/serviceAccounts/#{access_key}",
           )
         rescue Google::Apis::ClientError => e
-          raise unless e.status_code == 404
-          # SA already deleted. idempotent path
+          raise unless [403, 404].include?(e.status_code)
           nil
         end
       end
