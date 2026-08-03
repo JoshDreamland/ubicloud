@@ -43,7 +43,7 @@ PGHOST=/var/run/postgresql
 PGDATA=/dat/17/data
         WALG_CONF
 
-        expect(postgres_timeline.generate_walg_config(17)).to eq(walg_config)
+        expect(postgres_timeline.generate_walg_config(17, instance_double(PostgresServer))).to eq(walg_config)
       end
 
       it "omits the credentials line when access_key is nil so WAL-G uses metadata-server ADC" do

@@ -7,16 +7,12 @@ class PostgresTimeline < Sequel::Model
   module Gcp
     private
 
-<<<<<<< HEAD
-    def gcp_generate_walg_config(version)
+    def gcp_generate_walg_config(version, server)
       walg_credentials = if access_key
         <<-WALG_CONF
 GOOGLE_APPLICATION_CREDENTIALS=/etc/postgresql/gcs-sa-key.json
         WALG_CONF
       end
-=======
-    def gcp_generate_walg_config(version, server)
->>>>>>> ba650184bf7b6b48d9188655371f7e2e3798a4fa
       config = <<-WALG_CONF
 WALG_GS_PREFIX=gs://#{ubid}
 #{walg_credentials}
