@@ -216,13 +216,20 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
       end
       self.initialize_database_from_backup_try_count = previous_try_count + 1
 
-      backup_label = if postgres_server.standby? || postgres_server.read_replica?
+      backup_label = if postgres_server.standby? || postgres_server.read_replica? || postgres_server.unarchive_set?
         "LATEST"
       else
         postgres_server.timeline.latest_backup_label_before_target(target: resource.restore_target)
       end
+      recovery_mode = if postgres_server.standby? || postgres_server.read_replica?
+        "standby"
+      else
+        # PITR (restore_target) and unarchive terminate recovery once WAL is
+        # exhausted; no live primary to follow.
+        "recovery"
+      end
       strict_overcommit = resource.skip_strict_memory_overcommit_set? ? "false" : "true"
-      vm.sshable.d_run("initialize_database_from_backup", "sudo", "postgres/bin/initialize-database-from-backup", postgres_server.version, backup_label, strict_overcommit)
+      vm.sshable.d_run("initialize_database_from_backup", "sudo", "postgres/bin/initialize-database-from-backup", postgres_server.version, backup_label, strict_overcommit, recovery_mode)
     end
 
     nap 5
@@ -1039,6 +1046,9 @@ SQL
       vm.sshable.d_run("postgres_restart", "sudo", "postgres/bin/restart", postgres_server.version)
     end
 
+    false
+  rescue *Sshable::SSH_CONNECTION_ERRORS => ex
+    Clog.emit("Postgres restart failed", Util.exception_to_hash(ex, into: {postgres_server_id: postgres_server.id}))
     false
   end
 end

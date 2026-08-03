@@ -854,13 +854,20 @@ RSpec.describe PostgresResource do
       expect(postgres_resource.display_state).to eq("finalizing_restore")
     end
 
-    it "returns 'restarting' when representative server's strand label is 'restart'" do
-      create_representative_server(strand_label: "restart")
+    it "returns 'restarting' while the representative server has a restart pending" do
+      create_representative_server(strand_label: "wait")
+      postgres_resource.representative_server.incr_restart
       expect(postgres_resource.display_state).to eq("restarting")
     end
 
     it "returns 'running' when strand label is 'wait' and has no children" do
       create_representative_server(strand_label: "wait")
+      expect(postgres_resource.display_state).to eq("running")
+    end
+
+    it "returns 'running' while waiting for a public certificate renewal" do
+      create_representative_server(strand_label: "wait")
+      postgres_resource.strand.update(label: "wait_refresh_public_cert")
       expect(postgres_resource.display_state).to eq("running")
     end
 
@@ -1363,7 +1370,7 @@ RSpec.describe PostgresResource do
 
     it "creates page and sends warning email at 80-89% when at max size" do
       server.vm.update(vcpus: 60, cpu_percent_limit: 6000)
-      server.vm.vm_storage_volumes.find { !it.boot }.update(size_gib: 2048)
+      server.vm.vm_storage_volumes.find { !it.boot }.update(size_gib: 4096)
       expect(server.vm.sshable).to receive(:_cmd).with("df --output=pcent /dat | tail -n 1").and_return("  85%\n")
 
       postgres_resource.handle_storage_auto_scale
@@ -1377,9 +1384,9 @@ RSpec.describe PostgresResource do
     end
 
     it "creates page and sends warning email at 80-89% when quota insufficient" do
-      server.vm.update(vcpus: 8, cpu_percent_limit: 800)
-      server.vm.vm_storage_volumes.find { !it.boot }.update(size_gib: 1024)
-      project.add_quota(quota_id: ProjectQuota.default_quotas["PostgresVCpu"]["id"], value: 8)
+      server.vm.update(vcpus: 16, cpu_percent_limit: 1600)
+      server.vm.vm_storage_volumes.find { !it.boot }.update(size_gib: 2048)
+      project.add_quota(quota_id: ProjectQuota.default_quotas["PostgresVCpu"]["id"], value: 16)
       expect(server.vm.sshable).to receive(:_cmd).with("df --output=pcent /dat | tail -n 1").and_return("  85%\n")
 
       postgres_resource.handle_storage_auto_scale

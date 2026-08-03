@@ -19,6 +19,12 @@ RSpec.describe Option do
     end
   end
 
+  describe ".locations" do
+    it "orders visible locations by display name so the default location is stable" do
+      expect(described_class.locations.map(&:display_name)).to eq(%w[eu-central-h1 eu-north-h1 us-east-a2])
+    end
+  end
+
   describe ".gcp_instance_type_name" do
     it "appends -lssd for machine types with local SSDs" do
       expect(described_class.gcp_instance_type_name("c4a-standard", 8, lssd: true)).to eq("c4a-standard-8-lssd")

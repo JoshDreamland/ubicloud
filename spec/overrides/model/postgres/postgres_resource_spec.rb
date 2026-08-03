@@ -41,7 +41,7 @@ RSpec.describe PostgresResource::PrependMethods do # rubocop:disable RSpec/SpecF
 
     it "delegates to super when no chc_state tag is set" do
       allow(resource).to receive(:representative_server).and_return(
-        instance_double(PostgresServer, strand: instance_double(Strand, label: "wait")),
+        instance_double(PostgresServer, strand: instance_double(Strand, label: "wait"), restart_set?: false),
       )
       expect(resource.display_state).not_to eq("deactivated")
     end
@@ -49,7 +49,7 @@ RSpec.describe PostgresResource::PrependMethods do # rubocop:disable RSpec/SpecF
     it "ignores customer tags whose key is 'chc_state' but value differs from 'deactivated'" do
       resource.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "something_else"}]))
       allow(resource).to receive(:representative_server).and_return(
-        instance_double(PostgresServer, strand: instance_double(Strand, label: "wait")),
+        instance_double(PostgresServer, strand: instance_double(Strand, label: "wait"), restart_set?: false),
       )
       expect(resource.display_state).not_to eq("deactivated")
     end
@@ -58,7 +58,7 @@ RSpec.describe PostgresResource::PrependMethods do # rubocop:disable RSpec/SpecF
       project.set_ff_chc_postgres_deactivate_lockout(false)
       resource.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
       allow(resource).to receive(:representative_server).and_return(
-        instance_double(PostgresServer, strand: instance_double(Strand, label: "wait")),
+        instance_double(PostgresServer, strand: instance_double(Strand, label: "wait"), restart_set?: false),
       )
       expect(resource.display_state).not_to eq("deactivated")
     end

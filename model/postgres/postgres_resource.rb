@@ -60,8 +60,8 @@ class PostgresResource < Sequel::Model
     return "restoring_backup" if server_strand_label == "initialize_database_from_backup"
     return "replaying_wal" if ["wait_catch_up", "wait_synchronization"].include?(server_strand_label)
     return "finalizing_restore" if server_strand_label == "wait_recovery_completion"
-    return "restarting" if server_strand_label == "restart"
-    return "running" if ["wait", "refresh_certificates", "refresh_dns_record"].include?(strand.label) && !initial_provisioning_set?
+    return "restarting" if server_strand_label == "wait" && representative_server.restart_set?
+    return "running" if ["wait", "refresh_certificates", "wait_refresh_public_cert", "refresh_dns_record"].include?(strand.label) && !initial_provisioning_set?
 
     "creating"
   end
@@ -661,8 +661,6 @@ class PostgresResource < Sequel::Model
         .flat_map { |h| h.values.flatten }
     storage_size_options.uniq!
     options.add_option(name: "storage_size", values: storage_size_options, parent: "size") do |flavor, location, family, size, storage_size|
-      # Temporary capacity constraint. TODO: remove when resolved.
-      next false if storage_size == 4096 && location.id == Location::HETZNER_FSN1_ID
       vcpu_count = Option::POSTGRES_SIZE_OPTIONS[size].vcpu_count
       storage_sizes(location, family, vcpu_count).include?(storage_size)
     end
