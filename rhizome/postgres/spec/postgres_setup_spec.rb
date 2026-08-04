@@ -108,14 +108,9 @@ RSpec.describe PostgresSetup do
           Environment=GOMEMLIMIT=#{lim}
         OVERRIDE
       end
-<<<<<<< HEAD
       expect(WalgHardening).to receive(:apply)
-      expect(pg_setup).to receive(:r).with("systemctl daemon-reload")
-      expect(pg_setup).to receive(:r).with("systemctl set-property system-go_services.slice MemoryHigh=2G MemoryMax=2560M")
-=======
       expect(pg_setup).to receive(:_run_command).with("systemctl daemon-reload")
       expect(pg_setup).to receive(:_run_command).with("systemctl set-property system-go_services.slice MemoryHigh=2G MemoryMax=2560M")
->>>>>>> ff3dbcbe2481c6e7dc14f5ab88e9f51e56d422d1
 
       # First two services already in system-go_services.slice -> skip restart.
       # Last two still in system.slice / missing -> try-restart.
