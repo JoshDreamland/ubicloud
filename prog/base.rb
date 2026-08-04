@@ -3,13 +3,13 @@
 class Prog::Base
   attr_reader :strand, :subject_id
 
-  # :nocov:
+  # simplecov:disable
   if Config.override_dir
     Overrider.setup_overrides(self, Config.override_dir)
   elsif Config.unfrozen_test?
     Overrider.setup_overrides(self, "spec/overrider_test")
   end
-  # :nocov:
+  # simplecov:enable
 
   def initialize(strand, snap = nil)
     @snap = snap || SemSnap.new(strand.id)
@@ -401,7 +401,7 @@ end
     if deadline_at.nil? ||
         deadline_target != new_deadline_target ||
         allow_extension ||
-        Time.parse(deadline_at) > new_deadline
+        Time.new(deadline_at) > new_deadline
 
       resolve_deadline_target(deadline_target) if deadline_target != new_deadline_target
 
@@ -409,7 +409,7 @@ end
 
       if allow_extension.is_a?(Integer)
         self.deadline_start ||= time_string(time)
-        cap = Time.parse(deadline_start) + allow_extension
+        cap = Time.new(deadline_start) + allow_extension
         new_deadline = [new_deadline, cap].min
       end
 

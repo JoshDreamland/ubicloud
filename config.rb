@@ -9,9 +9,9 @@ rescue LoadError
   nil
 end
 
-# :nocov:
+# simplecov:disable
 $stdout.sync = $stderr.sync = true if ENV["SYNC"] == "1"
-# :nocov:
+# simplecov:enable
 
 ENV["OVERRIDE_DIR"] = "override"
 
@@ -85,10 +85,10 @@ module Config
   override :clover_freeze, false, bool
   optional :override_dir, string
 
-  # :nocov:
+  # simplecov:disable
   override :mail_driver, (production? ? :smtp : :logger), symbol
   override :mail_from, (production? ? nil : "dev@example.com"), string
-  # :nocov:
+  # simplecov:enable
   # Some email services use a secret token for both user and password,
   # so clear them both.
   optional :smtp_user, string, clear: true
@@ -113,14 +113,15 @@ module Config
   override :recursive_tag_limit, 32, int
   override :root, File.expand_path(__dir__), string
   override :aws_role_session_name, "ubi", string
-  # :nocov:
+  # simplecov:disable
   override :provider_resource_tag_value, (development? ? ENV.fetch("USER", "true") : "true"), string
-  # :nocov:
+  # simplecov:enable
   override :clover_database_rds_iam_auth_enabled, false, bool
   optional :hetzner_user, string, clear: true
   optional :hetzner_password, string, clear: true
   override :hetzner_connection_string, "https://robot-ws.your-server.de", string
   optional :leaseweb_api_key, string, clear: true
+  optional :leaseweb_eu_api_key, string, clear: true
   override :leaseweb_connection_string, "https://api.leaseweb.com", string
   override :managed_service, false, bool
   override :sanctioned_countries, "CU,IR,KP,SY", array(string)

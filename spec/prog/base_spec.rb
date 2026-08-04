@@ -308,8 +308,8 @@ RSpec.describe Prog::Base do
       st = Strand.create(prog: "Test", label: :extend_deadline_with_limit)
       st.unsynchronized_run
 
-      deadline_start = Time.parse(st.stack.first["deadline_start"])
-      deadline_at = Time.parse(st.stack.first["deadline_at"])
+      deadline_start = Time.new(st.stack.first["deadline_start"])
+      deadline_at = Time.new(st.stack.first["deadline_at"])
       expect(deadline_start).to be_within(1).of(Time.now)
       expect(deadline_at).to be_within(1).of(deadline_start + 10 * 60)
 
@@ -319,8 +319,8 @@ RSpec.describe Prog::Base do
       st.stack.first["deadline_start"] = st.time_string(deadline_start)
       st.unsynchronized_run
 
-      new_deadline_start = Time.parse(st.stack.first["deadline_start"])
-      new_deadline_at = Time.parse(st.stack.first["deadline_at"])
+      new_deadline_start = Time.new(st.stack.first["deadline_start"])
+      new_deadline_at = Time.new(st.stack.first["deadline_at"])
       expect(new_deadline_start).to eq(deadline_start)
       expect(new_deadline_at).to be_within(1).of(deadline_start + 30 * 60)
     end
@@ -555,6 +555,28 @@ RSpec.describe Prog::Base do
       expect(st.stack.first).not_to have_key("deadline_at")
       expect(st.stack.first).not_to have_key("deadline_target")
       expect(st.stack.first).not_to have_key("deadline_start")
+    end
+  end
+
+  describe "prog return matchers" do
+    it "handle missing returns" do
+      nx = Prog::Test.new(Strand.create(prog: "Test", label: :start))
+      expect { expect { nx.start }.to hop("something") }.to raise_error(RSpec::Expectations::ExpectationNotMetError)
+      expect { expect { nx.start }.to nap(1) }.to raise_error(RSpec::Expectations::ExpectationNotMetError)
+      expect { expect { nx.start }.to exit("something") }.to raise_error(RSpec::Expectations::ExpectationNotMetError)
+    end
+
+    it "handle unexpected returns" do
+      nx = Prog::Test.new(Strand.create(prog: "Test", label: :start))
+      expect { expect { nx.smoke_test_0 }.to nap(0) }.to raise_error(RSpec::Expectations::ExpectationNotMetError)
+      expect { expect { nx.smoke_test_0 }.to hop("something") }.to raise_error(RSpec::Expectations::ExpectationNotMetError)
+      expect { expect { nx.smoke_test_0 }.to exit("something") }.to raise_error(RSpec::Expectations::ExpectationNotMetError)
+      expect { expect { nx.destroy }.to exit("wrong") }.to raise_error(RSpec::Expectations::ExpectationNotMetError)
+      expect { expect { nx.destroy }.to nap(1) }.to raise_error(RSpec::Expectations::ExpectationNotMetError)
+      expect { expect { nx.destroy }.to hop("something") }.to raise_error(RSpec::Expectations::ExpectationNotMetError)
+      expect { expect { nx.hop_entry }.to hop("wrong") }.to raise_error(RSpec::Expectations::ExpectationNotMetError)
+      expect { expect { nx.hop_entry }.to nap(1) }.to raise_error(RSpec::Expectations::ExpectationNotMetError)
+      expect { expect { nx.hop_entry }.to exit("something") }.to raise_error(RSpec::Expectations::ExpectationNotMetError)
     end
   end
 

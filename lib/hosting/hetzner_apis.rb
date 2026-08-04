@@ -30,6 +30,25 @@ class Hosting::HetznerApis < Hosting::ProviderApis
     nil
   end
 
+  # Hetzner has no dedicated power on API; pressing the power button toggles
+  # the current state, and the ACPI signal would ask a running operating
+  # system to shut down gracefully. Checking the operating status first and
+  # doing nothing when the server is already running narrows, but cannot
+  # eliminate, the window in which the press turns the server off instead.
+  def power_on
+    return if power_status == "running"
+
+    create_connection.post(path: "/reset/#{server_id}", body: "type=power", expects: 200)
+    nil
+  end
+
+  # Returns the operating status of the server, one of "running", "shut off"
+  # or "not supported".
+  def power_status
+    response = create_connection.get(path: "/reset/#{server_id}", expects: 200)
+    JSON.parse(response.body).dig("reset", "operating_status")
+  end
+
   def get_main_ip4
     response = create_connection.get(path: "/server/#{server_id}", expects: 200)
     response_hash = JSON.parse(response.body)
@@ -78,7 +97,13 @@ class Hosting::HetznerApis < Hosting::ProviderApis
     end
   end
 
-  IpInfo = Data.define(:ip_address, :source_host_ip, :is_failover)
+  IpInfo = Data.define(:ip_address, :source_host_ip) do
+    # Hetzner routes every extra address to the host's main IP, so the host
+    # claims only the main IP itself and every extra stays VM-allocatable.
+    def host_only? = ip_address == "#{source_host_ip}/32"
+
+    def host_connectivity? = false
+  end
 
   # Finds IP addresses that match with the host's IP address. An important
   # detail about this function is that; Hetzner API returns the failover IPv6
@@ -97,7 +122,6 @@ class Hosting::HetznerApis < Hosting::ProviderApis
         IpInfo.new(
           ip_address: "#{ip["ip"]}/32",
           source_host_ip: ip["server_ip"],
-          is_failover: ip["failover_ip"],
         )
       end +
 
@@ -111,7 +135,6 @@ class Hosting::HetznerApis < Hosting::ProviderApis
         IpInfo.new(
           ip_address: "#{subnet["ip"]}/#{mask}",
           source_host_ip: subnet["server_ip"],
-          is_failover: subnet["failover_ip"],
         )
       end
     )

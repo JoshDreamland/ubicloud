@@ -8,11 +8,11 @@ RSpec.describe Prog::Vm::HostNexus do
   let(:st) { described_class.assemble("192.168.0.1") }
   let(:hetzner_ips) {
     [
-      ["127.0.0.1", "127.0.0.1", false],
-      ["30.30.30.32/29", "127.0.0.1", true],
-      ["2a01:4f8:10a:128b::/64", "127.0.0.1", true],
+      ["127.0.0.1/32", "127.0.0.1"],
+      ["30.30.30.32/29", "127.0.0.1"],
+      ["2a01:4f8:10a:128b::/64", "127.0.0.1"],
     ].map {
-      Hosting::HetznerApis::IpInfo.new(ip_address: _1, source_host_ip: _2, is_failover: _3)
+      Hosting::HetznerApis::IpInfo.new(ip_address: _1, source_host_ip: _2)
     }
   }
 
@@ -58,6 +58,54 @@ RSpec.describe Prog::Vm::HostNexus do
       expect(st.subject.assigned_host_addresses.first.ip.to_s).to eq("127.0.0.1/32")
       expect(st.subject.provider_name).to eq(HostProvider::HETZNER_PROVIDER_NAME)
       expect(st.subject.data_center).to eq("fsn1-dc14")
+    end
+
+    it "creates addresses from the leaseweb api" do
+      allow(Config).to receive_messages(
+        leaseweb_connection_string: "https://api.leaseweb.com",
+        leaseweb_api_key: "key123",
+      )
+      rows = [
+        {ip: "216.22.50.197/26", prefixLength: 26, type: "NORMAL_IP", networkType: "PUBLIC", mainIp: true, gateway: "216.22.50.254"},
+        {ip: "216.22.15.64/26", prefixLength: 26, type: "NORMAL_IP", networkType: "PUBLIC", mainIp: false, gateway: ""},
+        {ip: "216.22.15.65/26", prefixLength: 26, type: "NORMAL_IP", networkType: "PUBLIC", mainIp: false, gateway: ""},
+        {ip: "2607:f5b7:3:104::_64/64", prefixLength: 64, type: "NORMAL_IP", networkType: "PUBLIC", mainIp: false, gateway: ""},
+      ]
+      Excon.stub({path: "/bareMetals/v2/servers/123/ips", query: {limit: 50, offset: 0}},
+        {status: 200, body: JSON.generate(ips: rows, _metadata: {totalCount: rows.length})})
+      Excon.stub({path: "/bareMetals/v2/servers/123", method: :get},
+        {status: 200, body: JSON.generate(location: {site: "AMS-01", suite: "8", rack: "9200"})})
+      Excon.stub({path: "/bareMetals/v2/servers/123", method: :put}, {status: 204})
+
+      st = described_class.assemble("216.22.50.197", provider_name: HostProvider::LEASEWEB_PROVIDER_NAME, server_identifier: "123")
+      expect(st.subject.provider_name).to eq(HostProvider::LEASEWEB_PROVIDER_NAME)
+      expect(st.subject.data_center).to eq("AMS-01-8-9200")
+      expect(st.subject.assigned_subnets.map { it.cidr.to_s }.sort).to eq(["216.22.15.64/26", "216.22.50.197/32", "2607:f5b7:3:104::/64"])
+      # Only the gatewayed main IP is claimed; the routed block and prefix are VM space.
+      expect(st.subject.assigned_host_addresses.map { it.ip.to_s }).to eq ["216.22.50.197/32"]
+      # The block's network and broadcast addresses stay out of the VM pool.
+      expect(DB[:ipv4_address].select_order_map(:ip).map(&:to_s)).to eq((65..126).map { "216.22.15.#{it}" })
+    end
+
+    it "creates addresses from the leaseweb-eu org with its own key" do
+      allow(Config).to receive_messages(
+        leaseweb_connection_string: "https://api.leaseweb.com",
+        leaseweb_eu_api_key: "eu-key",
+      )
+      rows = [
+        {ip: "212.95.60.214/26", prefixLength: 26, type: "NORMAL_IP", networkType: "PUBLIC", mainIp: true, gateway: "212.95.60.254"},
+      ]
+      eu = {headers: {"X-Lsw-Auth" => "eu-key"}}
+      Excon.stub(eu.merge(path: "/bareMetals/v2/servers/456/ips", query: {limit: 50, offset: 0}),
+        {status: 200, body: JSON.generate(ips: rows, _metadata: {totalCount: rows.length})})
+      Excon.stub(eu.merge(path: "/bareMetals/v2/servers/456", method: :get),
+        {status: 200, body: JSON.generate(location: {site: "FRA-10", suite: "2", rack: "11"})})
+      Excon.stub(eu.merge(path: "/bareMetals/v2/servers/456", method: :put), {status: 204})
+
+      st = described_class.assemble("212.95.60.214", provider_name: HostProvider::LEASEWEB_EU_PROVIDER_NAME, server_identifier: "456")
+      expect(st.subject.provider_name).to eq(HostProvider::LEASEWEB_EU_PROVIDER_NAME)
+      expect(st.subject.data_center).to eq("FRA-10-2-11")
+      expect(st.subject.assigned_host_addresses.map { it.ip.to_s }).to eq ["212.95.60.214/32"]
     end
 
     it "does not set the server name in development" do
@@ -222,8 +270,8 @@ RSpec.describe Prog::Vm::HostNexus do
       expect(child_progs).to include("LearnNetwork")
     end
 
-    it "passes format_storage to LearnStorage for a Hetzner host with install_os" do
-      st = assemble_hetzner_host(install_os: true)
+    it "passes format_storage to LearnStorage when assembled with install_os, regardless of provider" do
+      st = described_class.assemble("192.168.0.2", install_os: true)
       expect { described_class.new(st).prep }.to hop("wait_prep")
       learn_storage = Strand.where(parent_id: st.id, prog: "LearnStorage").first
       expect(learn_storage.stack.first["format_storage"]).to be true
@@ -381,7 +429,17 @@ RSpec.describe Prog::Vm::HostNexus do
 
       nx.incr_checkup
       expect(nx).to receive(:available?).and_return(true)
+      expect(nx).to receive(:get_boot_id).and_return("someboot")
       expect { nx.wait }.to nap(6 * 60 * 60)
+    end
+
+    it "restarts the VMs when a checkup finds a reachable host had an out-of-band reboot" do
+      nx.incr_checkup
+      vm_host.update(last_boot_id: "oldboot")
+      expect(nx).to receive(:available?).and_return(true)
+      expect(nx).to receive(:get_boot_id).and_return("newboot")
+      expect { nx.wait }.to hop("start_slices")
+      expect(vm_host.reload.last_boot_id).to eq("newboot")
     end
 
     context "when patch set" do
@@ -408,7 +466,7 @@ RSpec.describe Prog::Vm::HostNexus do
           .and not_change { nx.graceful_reboot_set? }
           .and change { nx.patch_set? }.from(true).to(false)
           .and change { nx.strand.stack[0]["deadline_target"] }.from(nil).to("prep_reboot")
-        expect(Time.parse(nx.strand.stack[0]["deadline_at"])).to be_within(5).of(Time.now + 600)
+        expect(Time.new(nx.strand.stack[0]["deadline_at"])).to be_within(5).of(Time.now + 600)
       end
 
       it "sets graceful_restart semaphore if host was in accepting before patch" do
@@ -419,7 +477,7 @@ RSpec.describe Prog::Vm::HostNexus do
           .and change { nx.patch_set? }.from(true).to(false)
           .and change { nx.graceful_reboot_set? }.from(false).to(true)
           .and change { nx.strand.stack[0]["deadline_target"] }.from(nil).to("prep_reboot")
-        expect(Time.parse(nx.strand.stack[0]["deadline_at"])).to be_within(5).of(Time.now + 600)
+        expect(Time.new(nx.strand.stack[0]["deadline_at"])).to be_within(5).of(Time.now + 600)
       end
     end
   end
@@ -446,9 +504,24 @@ RSpec.describe Prog::Vm::HostNexus do
       expect { nx.unavailable }.to nap(30)
     end
 
-    it "hops to wait if host is available" do
+    it "checks the boot_id and hops to wait if an available host did not reboot" do
+      nx.incr_checkup
       expect(nx).to receive(:available?).and_return(true)
+      vm_host.update(last_boot_id: "boot-id")
+      expect(nx).to receive(:get_boot_id).and_return("boot-id")
       expect { nx.unavailable }.to hop("wait")
+      expect(nx.checkup_set?).to be false
+    end
+
+    it "restarts the VMs when an available host had an out-of-band reboot" do
+      nx.incr_checkup
+      expect(nx).to receive(:available?).and_return(true)
+      vm_host.update(last_boot_id: "oldboot")
+      expect(nx).to receive(:get_boot_id).and_return("newboot")
+      expect { nx.unavailable }.to hop("start_slices")
+      expect(vm_host.reload.last_boot_id).to eq("newboot")
+      expect(nx.checkup_set?).to be false
+      expect(Page.first.summary).to eq("Recorded last_boot_id of #{vm_host.ubid} differs from the actual boot_id; treating as an out-of-band reboot and restarting its VMs")
     end
   end
 
@@ -568,6 +641,25 @@ RSpec.describe Prog::Vm::HostNexus do
 
       expect { nx.reboot }.to hop("verify_hugepages")
       expect(vm_host.reload.last_boot_id).to eq("pqr")
+    end
+
+    it "brings VMs back up end-to-end after an out-of-band reboot" do
+      vm = create_vm(vm_host_id: vm_host.id, memory_gib: 1)
+      Strand.create(id: vm.id, prog: "Vm::Nexus", label: "wait")
+      vm_host.update(last_boot_id: "oldboot", allocation_state: "accepting")
+
+      # A healthy host in unavailable whose boot_id changed rebooted out-of-band;
+      # we jump straight to restarting the VMs, skipping the fresh-reboot verify checks.
+      expect(nx).to receive(:available?).and_return(true)
+      expect(nx).to receive(:get_boot_id).and_return("newboot")
+      expect { nx.unavailable }.to hop("start_slices")
+      expect(vm_host.reload.last_boot_id).to eq("newboot")
+
+      expect { nx.start_slices }.to hop("start_vms")
+      expect { nx.start_vms }.to hop("configure_metrics")
+
+      # The VM was signaled to restart, exactly as on a requested reboot.
+      expect(vm.reload.start_after_host_reboot_set?).to be true
     end
 
     it "verify_spdk hops to verify_hugepages if spdk started" do
@@ -733,14 +825,12 @@ RSpec.describe Prog::Vm::HostNexus do
   describe "#available?" do
     it "returns the available status when disks are healthy" do
       expect(sshable).to receive(:connect).and_return(nil)
-      expect(vm_host).to receive(:check_last_boot_id)
       expect(vm_host).to receive(:perform_health_checks).and_return(true)
       expect(nx.available?).to be true
     end
 
     it "returns the available status when disks are not healthy" do
       expect(sshable).to receive(:connect).and_return(nil)
-      expect(vm_host).to receive(:check_last_boot_id)
       allow(vm_host).to receive(:perform_health_checks).and_return(false)
       expect(nx.available?).to be false
     end
@@ -748,6 +838,28 @@ RSpec.describe Prog::Vm::HostNexus do
     it "returns an error trying to connect to VmHost" do
       expect(sshable).to receive(:connect).and_raise Sshable::SshError.new("ssh failed", "", "", nil, nil)
       expect(nx.available?).to be false
+    end
+  end
+
+  describe "#check_boot_id" do
+    it "does nothing when the boot_id still matches" do
+      vm_host.update(last_boot_id: "boot-id")
+      expect(nx).to receive(:get_boot_id).and_return("boot-id")
+      expect { nx.check_boot_id }.not_to hop
+    end
+
+    it "does nothing when last_boot_id is unset" do
+      vm_host.update(last_boot_id: nil)
+      expect(nx).to receive(:get_boot_id).and_return("boot-id")
+      expect { nx.check_boot_id }.not_to hop
+    end
+
+    it "pages, adopts the new boot_id, and hops to start_slices on a mismatch" do
+      vm_host.update(last_boot_id: "oldboot")
+      expect(nx).to receive(:get_boot_id).and_return("newboot")
+      expect { nx.check_boot_id }.to hop("start_slices")
+      expect(vm_host.reload.last_boot_id).to eq("newboot")
+      expect(Page.first.summary).to eq("Recorded last_boot_id of #{vm_host.ubid} differs from the actual boot_id; treating as an out-of-band reboot and restarting its VMs")
     end
   end
 end

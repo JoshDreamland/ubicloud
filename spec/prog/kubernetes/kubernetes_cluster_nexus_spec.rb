@@ -171,7 +171,7 @@ RSpec.describe Prog::Kubernetes::KubernetesClusterNexus do
     it "registers deadline and hops" do
       expect { nx.start }.to hop("create_load_balancers")
       expect(nx.strand.stack.first["deadline_target"]).to eq "wait"
-      expect(Time.parse(nx.strand.stack.first["deadline_at"])).to be_within(60).of(Time.now + 120 * 60)
+      expect(Time.new(nx.strand.stack.first["deadline_at"])).to be_within(60).of(Time.now + 120 * 60)
       expect(nx.install_metrics_server_set?).to be true
       expect(nx.sync_worker_mesh_set?).to be true
       expect(nx.sync_internal_dns_config_set?).to be true
@@ -1112,6 +1112,18 @@ RSpec.describe Prog::Kubernetes::KubernetesClusterNexus do
       kubernetes_cluster.nodes_dataset.destroy
 
       expect { nx.destroy }.to exit({"msg" => "kubernetes cluster is deleted"})
+    end
+
+    it "resolves the cluster and node version pages" do
+      st.update(label: "destroy")
+      node = kubernetes_cluster.nodes.first
+      Prog::PageNexus.assemble("existing", ["K8sExternalConnectivityFailed", kubernetes_cluster.ubid], kubernetes_cluster.ubid)
+      Prog::PageNexus.assemble("existing", ["K8sInvalidVersion", kubernetes_cluster.ubid, node.name], node.ubid)
+
+      expect { nx.destroy }.to nap(5)
+
+      expect(Page.from_tag_parts("K8sExternalConnectivityFailed", kubernetes_cluster.ubid).resolve_set?).to be true
+      expect(Page.from_tag_parts("K8sInvalidVersion", kubernetes_cluster.ubid, node.name).resolve_set?).to be true
     end
   end
 end

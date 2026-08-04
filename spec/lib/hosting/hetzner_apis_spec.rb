@@ -76,6 +76,37 @@ RSpec.describe Hosting::HetznerApis do
     end
   end
 
+  describe "power_on" do
+    it "presses the power button if the server is shut off" do
+      Excon.stub({path: "/reset/123", method: :get}, {status: 200, body: JSON.generate(reset: {operating_status: "shut off"})})
+      Excon.stub({path: "/reset/123", method: :post, body: "type=power"}, {status: 200, body: ""})
+      expect(hetzner_apis.power_on).to be_nil
+    end
+
+    it "does nothing if the server is already running" do
+      Excon.stub({path: "/reset/123", method: :get}, {status: 200, body: JSON.generate(reset: {operating_status: "running"})})
+      expect(hetzner_apis.power_on).to be_nil
+    end
+
+    it "raises an error if pressing the power button fails" do
+      Excon.stub({path: "/reset/123", method: :get}, {status: 200, body: JSON.generate(reset: {operating_status: "shut off"})})
+      Excon.stub({path: "/reset/123", method: :post, body: "type=power"}, {status: 400, body: ""})
+      expect { hetzner_apis.power_on }.to raise_error Excon::Error::BadRequest
+    end
+  end
+
+  describe "power_status" do
+    it "returns the operating status of a server" do
+      Excon.stub({path: "/reset/123", method: :get}, {status: 200, body: JSON.generate(reset: {operating_status: "running"})})
+      expect(hetzner_apis.power_status).to eq "running"
+    end
+
+    it "raises an error if getting the power status fails" do
+      Excon.stub({path: "/reset/123", method: :get}, {status: 404, body: ""})
+      expect { hetzner_apis.power_status }.to raise_error Excon::Error::NotFound
+    end
+  end
+
   describe "get_main_ip4" do
     it "can get the main ip4" do
       Excon.stub({path: "/server/123", method: :get}, {status: 200, body: "{\"server\": {\"server_ip\": \"1.2.3.4\"}}"})
@@ -216,13 +247,13 @@ RSpec.describe Hosting::HetznerApis do
       ]))
 
       expected = [
-        ["1.1.1.1/32", "1.1.1.1", false],
-        ["1.1.2.0/32", "1.1.1.1", false],
-        ["2.2.2.0/29", "1.1.1.1", false],
-        ["30.30.30.30/29", "1.1.1.1", true],
-        ["2a01:4f8:10a:128b::/64", "1.1.1.1", false],
+        ["1.1.1.1/32", "1.1.1.1"],
+        ["1.1.2.0/32", "1.1.1.1"],
+        ["2.2.2.0/29", "1.1.1.1"],
+        ["30.30.30.30/29", "1.1.1.1"],
+        ["2a01:4f8:10a:128b::/64", "1.1.1.1"],
       ].map {
-        Hosting::HetznerApis::IpInfo.new(ip_address: _1, source_host_ip: _2, is_failover: _3)
+        Hosting::HetznerApis::IpInfo.new(ip_address: _1, source_host_ip: _2)
       }
 
       expect(hetzner_apis.pull_ips).to eq expected
@@ -277,13 +308,13 @@ RSpec.describe Hosting::HetznerApis do
       stub_request(:get, "https://robot-ws.your-server.de/failover").to_return(status: 404)
 
       expected = [
-        ["1.1.1.1/32", "1.1.1.1", false],
-        ["1.1.2.0/32", "1.1.1.1", false],
-        ["2.2.2.0/29", "1.1.1.1", false],
-        ["15.15.15.15/29", "1.1.1.1", false],
-        ["30.30.30.30/29", "1.1.1.1", false],
+        ["1.1.1.1/32", "1.1.1.1"],
+        ["1.1.2.0/32", "1.1.1.1"],
+        ["2.2.2.0/29", "1.1.1.1"],
+        ["15.15.15.15/29", "1.1.1.1"],
+        ["30.30.30.30/29", "1.1.1.1"],
       ].map {
-        Hosting::HetznerApis::IpInfo.new(ip_address: _1, source_host_ip: _2, is_failover: _3)
+        Hosting::HetznerApis::IpInfo.new(ip_address: _1, source_host_ip: _2)
       }
 
       expect(hetzner_apis.pull_ips).to eq expected
