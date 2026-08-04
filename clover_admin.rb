@@ -31,7 +31,7 @@ class CloverAdmin < Roda
   AUDIT_LOG_PARAM_MAP["Account"] = "subject"
   AUDIT_LOG_PARAM_MAP.freeze
 
-  # :nocov:
+  # simplecov:disable
   if Config.development?
     plugin :exception_page
 
@@ -45,7 +45,7 @@ class CloverAdmin < Roda
 
   default_fixed_locals = if Config.production? || Config.frozen_test?
     "()"
-  # :nocov:
+  # simplecov:enable
   else
     "(_no_kw: nil)"
   end
@@ -59,13 +59,13 @@ class CloverAdmin < Roda
     extract_fixed_locals: true,
   }
 
-  # :nocov:
+  # simplecov:disable
   if Config.test? && defined?(SimpleCov)
     plugin :render_coverage, dir: "coverage/views/admin"
   end
 
   plugin :ip_from_header, Config.ip_from_header if Config.ip_from_header
-  # :nocov:
+  # simplecov:enable
 
   plugin :part
   plugin :public
@@ -128,9 +128,9 @@ class CloverAdmin < Roda
   end
 
   plugin :error_handler do |e|
-    # :nocov:
+    # simplecov:disable
     next exception_page(e, assets: true) if Config.development?
-    # :nocov:
+    # simplecov:enable
 
     raise e if Config.test? && !ENV["DONT_RAISE_ADMIN_ERRORS"]
 
@@ -292,9 +292,9 @@ class CloverAdmin < Roda
     login_column :login
     audit_logging_table :admin_account_authentication_audit_log
 
-    # :nocov:
+    # simplecov:disable
     unless skip_webauthn_requirement
-      # :nocov:
+      # simplecov:enable
       login_redirect do
         uses_two_factor_authentication? ? "/webauthn-auth" : "/webauthn-setup"
       end
@@ -372,6 +372,10 @@ class CloverAdmin < Roda
 
   def self.object_action(...)
     ObjectAction.define(...)
+  end
+
+  require_vm_host_provider = lambda do |obj|
+    fail CloverError.new(400, "InvalidRequest", "VmHost has no provider") unless obj.provider
   end
 
   github_page_action = object_action("GitHub Page", type: :direct) do |obj|
@@ -573,6 +577,14 @@ class CloverAdmin < Roda
       end,
       "reset" => object_action("Hardware Reset", flash: "Hardware reset scheduled for VmHost", &:incr_hardware_reset),
       "reboot" => object_action("Reboot", flash: "Reboot scheduled for VmHost", &:incr_reboot),
+      "power_on" => object_action("Power On", flash: "Power on requested for VmHost") do |obj|
+        require_vm_host_provider.call(obj)
+        obj.power_on
+      end,
+      "power_status" => object_action("Power Status", type: :content) do |obj|
+        require_vm_host_provider.call(obj)
+        "Power status: #{Erubi.h(obj.power_status)}"
+      end,
       "move_location" => object_action("Move to Location", flash: "Location updated and missing boot image downloads started", params: {
         location: {
           typecast: :ubid_uuid!,
@@ -665,9 +677,9 @@ class CloverAdmin < Roda
   CAPACITY_RESERVATION_PROGS = %w[CapacityReservation].freeze
 
   plugin :autoforme do
-    # :nocov:
+    # simplecov:disable
     register_by_name if Config.development?
-    # :nocov:
+    # simplecov:enable
 
     framework = self
 
@@ -1082,10 +1094,10 @@ class CloverAdmin < Roda
     rodauth.require_authentication
     rodauth.require_account
 
-    # :nocov:
+    # simplecov:disable
     rodauth.require_two_factor_setup unless skip_webauthn_requirement
     r.exception_page_assets if Config.development?
-    # :nocov:
+    # simplecov:enable
 
     r.on "model", /([A-Z][a-zA-Z]+)/ do |model_name|
       begin
@@ -1132,6 +1144,8 @@ class CloverAdmin < Roda
               if action_type == :direct
                 url = action.call(@obj) || fail(CloverError.new(400, "InvalidRequest", "Action link is not available"))
                 r.redirect url
+              elsif action_type == :content && @params.empty?
+                next view(content: action.call(@obj))
               end
               view("object_action")
             end
@@ -1737,9 +1751,9 @@ class CloverAdmin < Roda
       view("index")
     end
 
-    # :nocov:
+    # simplecov:disable
     if Config.test?
-      # :nocov:
+      # simplecov:enable
       r.get("error") { raise }
     end
   end

@@ -160,6 +160,10 @@ end
 coverage_setup = lambda do
   FileUtils.rm_rf("coverage/views")
   FileUtils.mkdir_p("coverage/views/admin")
+  # Leftover results from a previous run satisfy the reporting worker's
+  # PARALLEL_TEST_GROUPS count, making it report before the other workers
+  # of the current run finish.
+  FileUtils.rm_f("coverage/.resultset.json")
 end
 
 desc "Run specs with coverage"
@@ -178,10 +182,10 @@ task "coverage_pspec" do
   output_file = "coverage/output.txt"
   coverage_setup.call
   command = "bash -o pipefail -c 'bundle exec turbo_tests -n #{nproc.call} 2>&1 | tee #{output_file}'"
-  sh({"RUBYOPT" => "-w", "RACK_ENV" => "test", "FORCE_AUTOLOAD" => "1", "COVERAGE" => "1", "RODA_RENDER_COMPILED_METHOD_SUPPORT" => "no"}, command)
+  sh({"RUBYOPT" => "-w", "RACK_ENV" => "test", "FORCE_AUTOLOAD" => "1", "COVERAGE" => "1", "RODA_RENDER_COMPILED_METHOD_SUPPORT" => "no", "PARALLEL_TEST_GROUPS" => nproc.call}, command)
   command_output = File.binread(output_file)
   coverages = %w[Line Branch].map! do |type|
-    if (match = command_output.match(/#{type} Coverage: 100\.0% \((\d+) \/ (\d+)\)/))
+    if (match = command_output.match(/#{type} coverage: (\d+) \/ (\d+) \(100\.00%\)/))
       match[1] == match[2]
     end
   end
@@ -525,6 +529,20 @@ namespace :linter do
         end
       end
     end
+
+    # Rhizome specs must mock the underlying _run_command instead of r,
+    # so that r's command-building/checking logic is actually exercised.
+    Dir.glob("rhizome/*/spec/**/*.rb").each do |file|
+      number = 0
+      File.foreach(file) do |line|
+        number += 1
+        if line.include?("(:r)")
+          failure = true
+          warn "Potentially insecure method override: #{file}:#{number}: #{line}"
+        end
+      end
+    end
+
     exit(failure ? 1 : 0)
   end
 end

@@ -294,5 +294,29 @@ RSpec.describe Validation::PostgresConfigValidator do
       expect(validator.requires_restart?("work_mem")).to be false
       expect(validator.requires_restart?("log_statement")).to be false
     end
+
+    it "tracks a param whose restart requirement changes between versions" do
+      # PG 18 draws autovacuum workers from the autovacuum_worker_slots pool, so
+      # the worker count itself became reloadable.
+      expect(described_class.new("16").requires_restart?("autovacuum_max_workers")).to be true
+      expect(described_class.new("17").requires_restart?("autovacuum_max_workers")).to be true
+      expect(described_class.new("18").requires_restart?("autovacuum_max_workers")).to be false
+    end
+  end
+
+  describe "#valid_config?" do
+    it "is true for params the version knows" do
+      expect(validator.valid_config?("max_connections")).to be true
+    end
+
+    it "is false for params the version does not know" do
+      expect(described_class.new("16").valid_config?("autovacuum_vacuum_max_threshold")).to be false
+      expect(described_class.new("17").valid_config?("autovacuum_vacuum_max_threshold")).to be false
+      expect(described_class.new("18").valid_config?("autovacuum_vacuum_max_threshold")).to be true
+    end
+
+    it "is false for unknown params" do
+      expect(validator.valid_config?("not_a_real_guc")).to be false
+    end
   end
 end

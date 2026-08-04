@@ -37,6 +37,8 @@ class VmHost < Sequel::Model
     provider&.provider_name
   end
 
+  def leaseweb? = HostProvider::LEASEWEB_PROVIDER_NAMES.include?(provider_name)
+
   def sshable_host
     sshable.host
   end
@@ -113,9 +115,9 @@ class VmHost < Sequel::Model
       NetAddr::IPv6.new(net6.network.addr | lower_bits), NetAddr::Mask128.new(prefix),
     )
 
-    # :nocov:
+    # simplecov:disable
     fail "BUG: host should be supernet of randomized subnet" unless net6.rel(proposal) == 1
-    # :nocov:
+    # simplecov:enable
 
     case (rn = ip6_reserved_network(prefix)) && proposal.network.cmp(rn.network)
     when 0
@@ -183,32 +185,23 @@ class VmHost < Sequel::Model
 
     DB.transaction do
       ip_records.each do |ip_record|
+        # Connectivity space reaches the netplan but never the address registry.
+        next if ip_record.host_connectivity?
+
         ip_addr = ip_record.ip_address
-        source_host_ip = ip_record.source_host_ip
-        is_failover_ip = ip_record.is_failover
 
         next if assigned_subnets.any? { |a| a.cidr.to_s == ip_addr }
 
-        # we need to find if it was previously created
-        # if it was, we need to update the routed_to_host_id but only if there is no VM that's using it
-        # if it wasn't, we need to create it
-        adr = Address.first(cidr: ip_addr)
-        if adr && is_failover_ip
-          unless adr.assigned_vm_addresses_dataset.empty?
-            fail "BUG: failover ip #{ip_addr} is already assigned to a vm"
-          end
-
-          adr.update(routed_to_host_id: id)
-        else
-          if Sshable.where(host: source_host_ip).empty?
-            fail "BUG: source host #{source_host_ip} isn't added to the database"
-          end
-
-          adr = Address.create(cidr: ip_addr, routed_to_host_id: id, is_failover_ip:)
+        if Sshable.where(host: ip_record.source_host_ip).empty?
+          fail "BUG: source host #{ip_record.source_host_ip} isn't added to the database"
         end
 
-        unless is_failover_ip
+        adr = Address.create(cidr: ip_addr, routed_to_host_id: id)
+        # A claimed address joins the host's set; a routed one opens its VM pool.
+        if ip_record.host_only?
           AssignedHostAddress.create(host_id: id, ip: ip_addr, address_id: adr.id)
+        else
+          adr.populate_ipv4_addresses
         end
       end
     end
@@ -281,6 +274,14 @@ class VmHost < Sequel::Model
   # plugging it in again. Reset should only be used when reboot does not work.
   def hardware_reset
     provider.api.hardware_reset
+  end
+
+  def power_on
+    provider.api.power_on
+  end
+
+  def power_status
+    provider.api.power_status
   end
 
   def check_storage_smart(ssh_session, devices)
@@ -378,14 +379,6 @@ class VmHost < Sequel::Model
 
     Clog.emit("unexpected clock source", {unexpected_clock_source: {vm_host_ubid: ubid, clock_source:}}) unless clock_status
     clock_status
-  end
-
-  def check_last_boot_id(ssh_session)
-    boot_id = ssh_session.exec!("cat /proc/sys/kernel/random/boot_id")
-    fail "Failed to exec on session: #{boot_id}" unless boot_id.exitstatus.zero?
-    if boot_id.strip != last_boot_id
-      Prog::PageNexus.assemble("Recorded last_boot_id of #{ubid} in database differs from the actual boot_id", ["LastBootIDDiscrepancy", ubid], ubid, severity: "info")
-    end
   end
 
   def init_health_monitor_session

@@ -82,11 +82,11 @@ class Clover < Roda
         end
       end
 
-      # :nocov:
+      # simplecov:disable
       def respond_to_missing?(m, _include_all)
         @allow.include?(m)
       end
-      # :nocov:
+      # simplecov:enable
 
       def sequel_model
         @model
@@ -105,11 +105,11 @@ class Clover < Roda
         end
       end
     end
-  # :nocov:
+  # simplecov:disable
   else
     def self.models_loaded
       # nothing
     end
   end
-  # :nocov:
+  # simplecov:enable
 end
