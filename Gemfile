@@ -67,6 +67,7 @@ gem "sequel_pg", ">= 1.8", require: "sequel"
 gem "shellwords"
 gem "stripe", ">= 13"
 gem "tilt", ">= 2.6.1"
+gem "toml-rb"
 gem "warning"
 gem "webauthn"
 

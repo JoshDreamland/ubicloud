@@ -254,6 +254,7 @@ class Project < Sequel::Model
     :postgres_lantern,
     :postgres_maintenance_window_platform_only,
     :postgres_paradedb,
+    :postgres_wal_shadow,
     :private_locations,
     :require_mfa_or_omniauth,
     :skip_runner_pool,
@@ -313,6 +314,7 @@ end
 #  minio_cluster             | minio_cluster_project_id_fkey             | (project_id) REFERENCES project(id)
 #  object_tag                | object_tag_project_id_fkey                | (project_id) REFERENCES project(id)
 #  parseable_resource        | parseable_resource_project_id_fkey        | (project_id) REFERENCES project(id)
+#  postgres_wal_shadow       | postgres_wal_shadow_project_id_fkey       | (project_id) REFERENCES project(id)
 #  private_subnet            | private_subnet_project_id_fkey            | (project_id) REFERENCES project(id)
 #  project_discount_code     | project_discount_code_project_id_fkey     | (project_id) REFERENCES project(id)
 #  project_invitation        | project_invitation_project_id_fkey        | (project_id) REFERENCES project(id)

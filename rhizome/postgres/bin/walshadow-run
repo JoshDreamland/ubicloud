@@ -1,0 +1,17 @@
+#!/bin/bash
+set -euo pipefail
+mode=off
+[ -z "$(ls -A /var/lib/walshadow/shadow-data)" ] && mode=direct
+export PGSSLMODE=require
+exec /usr/local/bin/walshadow-stream \
+  --host "$WALSHADOW_SOURCE_HOST" --port 5432 --user postgres --dbname postgres \
+  --password "$WALSHADOW_SOURCE_PASSWORD" \
+  --out-dir /var/lib/walshadow/out --spill-dir /var/lib/walshadow/spill \
+  --shadow-socket-dir /var/run/postgresql --shadow-port 5440 \
+  --shadow-user postgres --shadow-dbname postgres \
+  --bootstrap-mode "$mode" \
+  --bootstrap-shadow-data-dir /var/lib/walshadow/shadow-data \
+  --walsender-bind 127.0.0.1:5441 \
+  --control-socket /run/walshadow/control.sock \
+  --ch-config /etc/walshadow/ch-config.toml \
+  --metrics-bind 127.0.0.1:9484

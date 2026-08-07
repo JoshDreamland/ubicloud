@@ -41,6 +41,7 @@ module ThawedMock
   # Ruby Core Classes
   allow_mocking(ENV, :[])
   allow_mocking(File, :exist?, :open, :rename, :write)
+  allow_mocking(IO, :popen)
   allow_mocking(Kernel, :exit, :exit!, :URI)
   allow_mocking(Thread, :new, :list)
   allow_mocking(Time, :now)

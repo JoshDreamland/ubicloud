@@ -446,7 +446,221 @@ paths:
           $ref: './openapi.yml#/components/responses/Error'
       tags:
         - Clickgres Testing
+  /project/{project_id}/location/{location}/postgres/{postgres_database_reference}/wal-shadow:
+    parameters:
+      - $ref: './openapi.yml#/components/parameters/project_id'
+      - $ref: './openapi.yml#/components/parameters/location'
+      - $ref: './openapi.yml#/components/parameters/postgres_database_reference'
+    post:
+      operationId: createLocationPostgresWalShadow
+      summary: Create a walshadow CDC for a PostgreSQL database
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ch_config:
+                  description: Operator base ch-config.toml (TOML)
+                  type: string
+                boot_image:
+                  description: Boot image (AMI id) for the walshadow VM
+                  type: string
+                git_ref:
+                  description: walshadow git ref to build (branch, tag, or sha)
+                  type: string
+                vm_size:
+                  description: VM size for the walshadow, defaults to a step down from the database's size
+                  type: string
+                storage_size_gib:
+                  description: Boot volume size in GiB
+                  type: integer
+                data_on_boot_volume:
+                  description: Keep shadow-data and spill (resume cursor) off instance store, so VM state survives instance-store loss
+                  type: boolean
+              additionalProperties: false
+              required:
+                - ch_config
+                - boot_image
+      responses:
+        '200':
+          $ref: '#/components/responses/WalShadow'
+        default:
+          $ref: './openapi.yml#/components/responses/Error'
+      tags:
+        - Postgres Walshadow
+    get:
+      operationId: getLocationPostgresWalShadow
+      summary: Get the walshadow for a PostgreSQL database
+      responses:
+        '200':
+          $ref: '#/components/responses/WalShadow'
+        default:
+          $ref: './openapi.yml#/components/responses/Error'
+      tags:
+        - Postgres Walshadow
+    delete:
+      operationId: deleteLocationPostgresWalShadow
+      summary: Delete the walshadow for a PostgreSQL database
+      responses:
+        '204':
+          $ref: './openapi.yml#/components/responses/Delete'
+        default:
+          $ref: './openapi.yml#/components/responses/Error'
+      tags:
+        - Postgres Walshadow
+  /project/{project_id}/location/{location}/postgres/{postgres_database_reference}/wal-shadow/config:
+    parameters:
+      - $ref: './openapi.yml#/components/parameters/project_id'
+      - $ref: './openapi.yml#/components/parameters/location'
+      - $ref: './openapi.yml#/components/parameters/postgres_database_reference'
+    get:
+      operationId: getLocationPostgresWalShadowConfig
+      summary: Get the walshadow API config fragment
+      responses:
+        '200':
+          $ref: '#/components/responses/WalShadowConfig'
+        default:
+          $ref: './openapi.yml#/components/responses/Error'
+      tags:
+        - Postgres Walshadow
+    patch:
+      operationId: patchLocationPostgresWalShadowConfig
+      summary: Deep-merge a fragment into the walshadow API config
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                config:
+                  $ref: '#/components/schemas/WalShadowConfigData'
+              additionalProperties: false
+              required:
+                - config
+      responses:
+        '200':
+          $ref: '#/components/responses/WalShadowConfig'
+        default:
+          $ref: './openapi.yml#/components/responses/Error'
+      tags:
+        - Postgres Walshadow
+    delete:
+      operationId: deleteLocationPostgresWalShadowConfig
+      summary: Unset keys from the walshadow API config
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                keys:
+                  description: Dotted key paths to remove (e.g. stream.paused)
+                  type: array
+                  items:
+                    type: string
+              additionalProperties: false
+              required:
+                - keys
+      responses:
+        '200':
+          $ref: '#/components/responses/WalShadowConfig'
+        default:
+          $ref: './openapi.yml#/components/responses/Error'
+      tags:
+        - Postgres Walshadow
+  /project/{project_id}/location/{location}/postgres/{postgres_database_reference}/wal-shadow/status:
+    parameters:
+      - $ref: './openapi.yml#/components/parameters/project_id'
+      - $ref: './openapi.yml#/components/parameters/location'
+      - $ref: './openapi.yml#/components/parameters/postgres_database_reference'
+    get:
+      operationId: getLocationPostgresWalShadowStatus
+      summary: Get the last cached walshadow status snapshot
+      responses:
+        '200':
+          $ref: '#/components/responses/WalShadowStatus'
+        default:
+          $ref: './openapi.yml#/components/responses/Error'
+      tags:
+        - Postgres Walshadow
 components:
+  schemas:
+    WalShadow:
+      type: object
+      properties:
+        id:
+          type: string
+          pattern: ^pw[0-9a-hj-km-np-tv-z]{24}$
+        postgres_id:
+          type: string
+          pattern: ^pg[0-9a-hj-km-np-tv-z]{24}$
+        location:
+          type: string
+        state:
+          type: string
+        vm_size:
+          type: string
+        storage_size_gib:
+          type: integer
+        data_on_boot_volume:
+          type: boolean
+        created_at:
+          type: string
+        status:
+          $ref: '#/components/schemas/WalShadowStatus'
+        config:
+          $ref: '#/components/schemas/WalShadowConfigData'
+      additionalProperties: false
+      required:
+        - id
+        - postgres_id
+        - location
+        - state
+        - vm_size
+        - storage_size_gib
+        - data_on_boot_volume
+        - created_at
+    WalShadowConfigData:
+      description: walshadow config fragment; TOML tables represented as nested objects
+      type: object
+      additionalProperties: true
+    WalShadowStatus:
+      type: object
+      properties:
+        paused:
+          type: boolean
+          nullable: true
+        rows_synced:
+          type: number
+          nullable: true
+        backfills_pending:
+          type: number
+          nullable: true
+        lag_bytes:
+          type: number
+          nullable: true
+        lag_seconds:
+          type: number
+          nullable: true
+        uptime_secs:
+          type: number
+          nullable: true
+        refreshed_at:
+          type: string
+          nullable: true
+      additionalProperties: false
+      required:
+        - paused
+        - rows_synced
+        - backfills_pending
+        - lag_bytes
+        - lag_seconds
+        - uptime_secs
+        - refreshed_at
   responses:
     ClickgresTestingRhizomeStatus:
       description: Per-server rhizome installation status
@@ -571,6 +785,30 @@ components:
                   $ref: './openapi.yml#/components/schemas/PostgresDatabase'
             required:
               - items
+    WalShadow:
+      description: A walshadow CDC
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/WalShadow'
+    WalShadowConfig:
+      description: The walshadow API config fragment
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              config:
+                $ref: '#/components/schemas/WalShadowConfigData'
+            additionalProperties: false
+            required:
+              - config
+    WalShadowStatus:
+      description: The last cached walshadow status snapshot
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/WalShadowStatus'
   requestBodies:
     ClickgresTestingUpgradeServers:
       required: false
@@ -597,5 +835,7 @@ tags:
     name: Clickgres Billing
   - description: Clickgres Testing Operations
     name: Clickgres Testing
+  - description: Postgres Walshadow CDC Operations
+    name: Postgres Walshadow
 security:
   - BearerAuth: []
