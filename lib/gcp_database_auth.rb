@@ -1,57 +1,26 @@
 # frozen_string_literal: true
 
-module GcpDatabaseAuth
-  SCOPE = "https://www.googleapis.com/auth/sqlservice.login"
-  SA_SUFFIX = ".gserviceaccount.com"
+require "googleauth"
+require "google/apis/iamcredentials_v1"
 
+module GcpDatabaseAuth
   class Error < StandardError; end
 
   @mutex = Mutex.new
-  @cache_hash = {}      # sa_email => [token, expires_at_monotonic]
-  @sa_mutexes = {}      # sa_email => Mutex (serializes minting for that SA)
+  @cache = {} # sa_email => [token, refresh_deadline_monotonic]
 
   class << self
-    def reset_cache!
-      @mutex.synchronize do
-        @cache_hash.clear
-        @sa_mutexes.clear
-      end
-    end
-
-    def access_token(service_account:)
-      # Fast path: a still-valid cached token, taken under the global lock only.
-      cached = cached_token(service_account)
-      return cached if cached
-
-      # Slow path: serialize minting per SA so the network call runs under the
-      # per-SA lock, not the global one — a refresh blocks neither other SAs nor
-      # valid cached reads. The double-check returns the token a concurrent
-      # caller already cached instead of minting a second time.
-      sa_mutex = @mutex.synchronize { @sa_mutexes[service_account] ||= Mutex.new }
-      sa_mutex.synchronize do
-        cached = cached_token(service_account)
-        return cached if cached
-        token, ttl = mint_impersonated(service_account)
-        now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        @mutex.synchronize { @cache_hash[service_account] = [token, now + ttl] }
-        token
-      end
-    end
-
     def connect_opts_proc(sa_by_role)
       lambda do |opts|
         role = opts[:user]
         service_account = sa_by_role[role]
         raise Error, "no CloudSQL IAM SA mapped for role #{role.inspect}" unless service_account
-        opts[:user] = db_user_for(service_account)
-        opts[:password] = access_token(service_account:)
-        opts[:driver_options] = (opts[:driver_options] || {}).merge(options: role_connect_option(role))
+        # The CloudSQL IAM db username is the SA email minus its .gserviceaccount.com suffix.
+        opts[:user] = service_account.delete_suffix(".gserviceaccount.com")
+        opts[:password] = access_token(service_account)
+        opts[:driver_options] = opts[:driver_options].merge(options: role_connect_option(role))
       end
     end
-
-    # The CloudSQL IAM db username for a service account: the SA email minus its
-    # .gserviceaccount.com suffix.
-    def db_user_for(service_account) = service_account.delete_suffix(SA_SUFFIX)
 
     # The Postgres role from the connection URL. Delegates to Sequel's own parser
     # so the result always matches opts[:user] — userinfo or ?user= query param,
@@ -59,6 +28,27 @@ module GcpDatabaseAuth
     # no public URI->options parser), hence send.
     def url_user(url)
       Sequel::Database.send(:options_from_uri, URI.parse(url))[:user]
+    end
+
+    private
+
+    def reset_cache!
+      @mutex.synchronize { @cache.clear }
+    end
+
+    # A cached token for the SA while it stays more than 5 minutes from expiry,
+    # else a freshly minted one. Minting holds the lock: a refresh happens about
+    # once an hour per SA, and holding the lock across it keeps concurrent
+    # connections from minting twice.
+    def access_token(service_account)
+      @mutex.synchronize do
+        token, refresh_deadline = @cache[service_account]
+        unless token && Process.clock_gettime(Process::CLOCK_MONOTONIC) < refresh_deadline
+          token, ttl = mint_impersonated(service_account)
+          @cache[service_account] = [token, Process.clock_gettime(Process::CLOCK_MONOTONIC) + ttl - 300]
+        end
+        token
+      end
     end
 
     # libpq options value that SETs the active role at connection startup. nil for
@@ -69,24 +59,10 @@ module GcpDatabaseAuth
       "-c role=#{role}"
     end
 
-    private
-
-    # A still-valid cached token for the SA (> 5 minutes to expiry), else nil.
-    # Reads the cache under the global lock and never does I/O.
-    def cached_token(service_account)
-      now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      @mutex.synchronize do
-        token, exp = @cache_hash[service_account]
-        token if token && now < (exp - 300)
-      end
-    end
-
     def mint_impersonated(sa_email)
-      require "googleauth"
-      require "google/apis/iamcredentials_v1"
       svc = Google::Apis::IamcredentialsV1::IAMCredentialsService.new
       svc.authorization = Google::Auth.get_application_default(["https://www.googleapis.com/auth/cloud-platform"])
-      req = Google::Apis::IamcredentialsV1::GenerateAccessTokenRequest.new(scope: [SCOPE], lifetime: "3600s")
+      req = Google::Apis::IamcredentialsV1::GenerateAccessTokenRequest.new(scope: ["https://www.googleapis.com/auth/sqlservice.login"], lifetime: "3600s")
       resp = svc.generate_service_account_access_token("projects/-/serviceAccounts/#{sa_email}", req)
       [resp.access_token, Time.parse(resp.expire_time) - Time.now]
     rescue Google::Apis::Error => e

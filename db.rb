@@ -11,11 +11,7 @@ if Config.clover_database_rds_iam_auth_enabled
 elsif Config.clover_database_gcp_iam_auth_enabled
   require_relative "lib/gcp_database_auth"   # loaded only on the GCP path
   role = GcpDatabaseAuth.url_user(Config.clover_database_url)
-  sa_by_role = {role => Config.clover_database_gcp_clover_login_sa}
-  if (ph_sa = Config.clover_database_gcp_clover_password_login_sa)
-    sa_by_role["#{role}_password"] = ph_sa
-  end
-  connect_opts_proc = GcpDatabaseAuth.connect_opts_proc(sa_by_role)
+  connect_opts_proc = GcpDatabaseAuth.connect_opts_proc(role => Config.clover_database_gcp_clover_login_sa)
   driver_options = {}
 else
   driver_options = {}

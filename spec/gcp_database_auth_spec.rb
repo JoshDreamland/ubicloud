@@ -2,36 +2,27 @@
 
 require_relative "spec_helper"
 require_relative "../lib/gcp_database_auth"
+require "googleauth"
+require "google/apis/iamcredentials_v1"
 
 RSpec.describe GcpDatabaseAuth do
   # Stub the real GCP IAM Credentials boundary instead of any test seam in the
-  # module itself. The google gems are required lazily inside mint_impersonated,
-  # so these classes load AFTER Refrigerator.freeze_core and remain unfrozen —
-  # which is what lets RSpec stub them even in frozen tests. The block receives
-  # the resource path ("projects/-/serviceAccounts/<sa-email>") and returns the
-  # token string the API should hand back.
+  # module itself. The lib (and with it the google gems) is only loaded by
+  # db.rb's GCP branch, never at app boot, so these classes load AFTER
+  # Refrigerator.freeze_core and remain unfrozen — which is what lets RSpec
+  # stub them even in frozen tests. The block receives the resource path
+  # ("projects/-/serviceAccounts/<sa-email>") and returns the token string the
+  # API should hand back.
   def stub_iam_credentials(expire_time: (Time.now + 3600).utc.iso8601)
-    require "googleauth"
-    require "google/apis/iamcredentials_v1"
+    adc = Object.new
     svc = instance_double(Google::Apis::IamcredentialsV1::IAMCredentialsService)
-    allow(svc).to receive(:authorization=)
+    allow(svc).to receive(:authorization=).with(adc)
     allow(svc).to receive(:generate_service_account_access_token) do |resource, _req|
       Struct.new(:access_token, :expire_time).new(yield(resource), expire_time)
     end
-    allow(Google::Apis::IamcredentialsV1::IAMCredentialsService).to receive(:new).and_return(svc)
-    allow(Google::Auth).to receive(:get_application_default).and_return(Object.new)
+    allow(Google::Apis::IamcredentialsV1::IAMCredentialsService).to receive(:new).with(no_args).and_return(svc)
+    allow(Google::Auth).to receive(:get_application_default).with(["https://www.googleapis.com/auth/cloud-platform"]).and_return(adc)
     svc
-  end
-
-  describe ".db_user_for" do
-    it "strips the gserviceaccount.com suffix to yield the IAM db username" do
-      expect(described_class.db_user_for("clover-sa@my-project.iam.gserviceaccount.com"))
-        .to eq("clover-sa@my-project.iam")
-    end
-
-    it "leaves a bare db username unchanged" do
-      expect(described_class.db_user_for("clover-sa@my-project.iam")).to eq("clover-sa@my-project.iam")
-    end
   end
 
   describe ".url_user" do
@@ -56,36 +47,75 @@ RSpec.describe GcpDatabaseAuth do
     end
   end
 
-  describe ".role_connect_option" do
-    it "nil for blank, string otherwise, rejects junk" do
-      expect(described_class.role_connect_option(nil)).to be_nil
-      expect(described_class.role_connect_option("")).to be_nil
-      expect(described_class.role_connect_option("clover")).to eq("-c role=clover")
-      expect { described_class.role_connect_option("a; DROP") }.to raise_error(ArgumentError)
+  describe ".connect_opts_proc" do
+    before { described_class.send(:reset_cache!) }
+
+    let(:sa) { "clover-sa@my-project.iam.gserviceaccount.com" }
+    let(:opts_proc) { described_class.connect_opts_proc({"clover" => sa}) }
+
+    def call_proc(opts_proc, user: "clover")
+      opts = {user:, driver_options: {}}
+      opts_proc.call(opts)
+      opts
     end
-  end
 
-  describe ".access_token" do
-    before { described_class.reset_cache! }
+    it "rewrites opts with the SA login user (email minus its .gserviceaccount.com suffix), minted-token password, and role option" do
+      stub_iam_credentials { |_resource| "minted-token" }
+      opts = call_proc(opts_proc)
+      expect(opts[:user]).to eq("clover-sa@my-project.iam")
+      expect(opts[:password]).to eq("minted-token")
+      expect(opts[:driver_options][:options]).to eq("-c role=clover")
+    end
 
-    it "mints by impersonation, targeting the given SA" do
-      svc = stub_iam_credentials { |_resource| "real-token" }
-      expect(described_class.access_token(service_account: "clover-sa@my-project.iam.gserviceaccount.com")).to eq("real-token")
+    it "leaves a bare SA db username (no suffix) unchanged" do
+      stub_iam_credentials { |_resource| "minted-token" }
+      opts_proc = described_class.connect_opts_proc({"clover" => "clover-sa@my-project.iam"})
+      expect(call_proc(opts_proc)[:user]).to eq("clover-sa@my-project.iam")
+    end
+
+    it "raises a GcpDatabaseAuth::Error for a role not in the map" do
+      expect { opts_proc.call({user: "nope", driver_options: {}}) }
+        .to raise_error(GcpDatabaseAuth::Error, /no CloudSQL IAM SA mapped for role "nope"/)
+    end
+
+    it "sets no role option when the mapped role is blank" do
+      stub_iam_credentials { |_resource| "minted-token" }
+      opts_proc = described_class.connect_opts_proc({nil => sa, "" => sa})
+      expect(call_proc(opts_proc, user: nil)[:driver_options][:options]).to be_nil
+      expect(call_proc(opts_proc, user: "")[:driver_options][:options]).to be_nil
+    end
+
+    it "rejects a role that is not a bare identifier (fail-closed)" do
+      stub_iam_credentials { |_resource| "minted-token" }
+      opts_proc = described_class.connect_opts_proc({"a; DROP" => sa})
+      expect { call_proc(opts_proc, user: "a; DROP") }.to raise_error(ArgumentError, /invalid role identifier/)
+    end
+
+    it "does not mutate the caller's existing driver_options hash" do
+      stub_iam_credentials { |_resource| "minted-token" }
+      driver_options = {}
+      opts_proc.call({user: "clover", driver_options:})
+      expect(driver_options).to eq({})
+    end
+
+    it "mints by impersonation, targeting the mapped SA" do
+      svc = stub_iam_credentials { |_resource| "minted-token" }
+      call_proc(opts_proc)
       expect(svc).to have_received(:generate_service_account_access_token)
         .with("projects/-/serviceAccounts/clover-sa@my-project.iam.gserviceaccount.com", anything)
     end
 
     it "surfaces the SA and body, preserving the original backtrace, when generateAccessToken is rejected" do
-      require "googleauth"
-      require "google/apis/iamcredentials_v1"
+      adc = Object.new
       svc = instance_double(Google::Apis::IamcredentialsV1::IAMCredentialsService)
-      allow(svc).to receive(:authorization=)
+      allow(svc).to receive(:authorization=).with(adc)
       allow(svc).to receive(:generate_service_account_access_token)
+        .with("projects/-/serviceAccounts/#{sa}", anything)
         .and_raise(Google::Apis::ClientError.new("Invalid request", body: '{"error":{"status":"INVALID_ARGUMENT"}}'))
-      allow(Google::Apis::IamcredentialsV1::IAMCredentialsService).to receive(:new).and_return(svc)
-      allow(Google::Auth).to receive(:get_application_default).and_return(Object.new)
+      allow(Google::Apis::IamcredentialsV1::IAMCredentialsService).to receive(:new).with(no_args).and_return(svc)
+      allow(Google::Auth).to receive(:get_application_default).with(["https://www.googleapis.com/auth/cloud-platform"]).and_return(adc)
 
-      expect { described_class.access_token(service_account: "clover-sa@my-project.iam.gserviceaccount.com") }
+      expect { call_proc(opts_proc) }
         .to raise_error(Google::Apis::ClientError, /clover-sa@my-project\.iam\.gserviceaccount\.com.*INVALID_ARGUMENT/m) do |error|
           expect(error.backtrace).to eq(error.cause.backtrace) # original backtrace kept, not reset to the rescue line
         end
@@ -94,8 +124,8 @@ RSpec.describe GcpDatabaseAuth do
     it "caches a minted token per SA and reuses it until near expiry" do
       calls = 0
       stub_iam_credentials { |_resource| "tok-#{calls += 1}" }
-      t1 = described_class.access_token(service_account: "clover-sa@my-project.iam.gserviceaccount.com")
-      t2 = described_class.access_token(service_account: "clover-sa@my-project.iam.gserviceaccount.com")
+      t1 = call_proc(opts_proc)[:password]
+      t2 = call_proc(opts_proc)[:password]
       expect([t1, t2, calls]).to eq(["tok-1", "tok-1", 1])
     end
 
@@ -104,72 +134,45 @@ RSpec.describe GcpDatabaseAuth do
       # expire_time inside the 5-minute refresh buffer => the second call must
       # re-mint; a hardcoded 3600 lifetime would wrongly reuse the first token.
       stub_iam_credentials(expire_time: (Time.now + 30).utc.iso8601) { |_resource| "tok-#{calls += 1}" }
-      service_account = "clover-sa@my-project.iam.gserviceaccount.com"
-      described_class.access_token(service_account:)
-      described_class.access_token(service_account:)
+      call_proc(opts_proc)
+      call_proc(opts_proc)
       expect(calls).to eq(2)
     end
 
     it "keys the cache by SA (each SA gets its own token)" do
       stub_iam_credentials { |resource| "tok:#{resource}" }
-      a = described_class.access_token(service_account: "clover-sa@my-project.iam.gserviceaccount.com")
-      b = described_class.access_token(service_account: "clover-sa-ph@my-project.iam.gserviceaccount.com")
+      opts_proc = described_class.connect_opts_proc({
+        "clover" => sa,
+        "clover_password" => "clover-sa-ph@my-project.iam.gserviceaccount.com",
+      })
+      a = call_proc(opts_proc)[:password]
+      b = call_proc(opts_proc, user: "clover_password")[:password]
       expect(a).not_to eq(b)
     end
 
-    # Stubs the (lazily-loaded, unfrozen) IAM client rather than GcpDatabaseAuth
-    # itself, so it also runs under frozen tests where the module can't be stubbed.
-    it "re-checks under the per-SA lock so a concurrent fetch reuses the token instead of minting twice" do
-      require "googleauth"
-      require "google/apis/iamcredentials_v1"
-      service_account = "clover-sa@my-project.iam.gserviceaccount.com"
+    # Stubs the (unfrozen) IAM client rather than GcpDatabaseAuth itself, so it
+    # also runs under frozen tests where the module can't be stubbed.
+    it "holds the lock while minting so a concurrent fetch reuses the token instead of minting twice" do
       proceed = Queue.new
       mints = 0
+      adc = Object.new
       svc = instance_double(Google::Apis::IamcredentialsV1::IAMCredentialsService)
-      allow(svc).to receive(:authorization=)
+      allow(svc).to receive(:authorization=).with(adc)
       allow(svc).to receive(:generate_service_account_access_token) do
         mints += 1
-        proceed.pop if mints == 1 # hold the per-SA lock until the second caller is waiting
+        proceed.pop if mints == 1 # hold the lock until the second caller is waiting
         Struct.new(:access_token, :expire_time).new("tok-#{mints}", (Time.now + 3600).utc.iso8601)
       end
-      allow(Google::Apis::IamcredentialsV1::IAMCredentialsService).to receive(:new).and_return(svc)
-      allow(Google::Auth).to receive(:get_application_default).and_return(Object.new)
+      allow(Google::Apis::IamcredentialsV1::IAMCredentialsService).to receive(:new).with(no_args).and_return(svc)
+      allow(Google::Auth).to receive(:get_application_default).with(["https://www.googleapis.com/auth/cloud-platform"]).and_return(adc)
 
-      first = Thread.new { described_class.access_token(service_account:) }
-      Thread.pass until mints == 1               # first holds the per-SA lock, inside the blocked mint
-      second = Thread.new { described_class.access_token(service_account:) }
-      Thread.pass until second.status == "sleep" # second passed the fast path, now blocked on the lock
+      first = Thread.new { call_proc(opts_proc)[:password] }
+      Thread.pass until mints == 1               # first holds the lock, inside the blocked mint
+      second = Thread.new { call_proc(opts_proc)[:password] }
+      Thread.pass until second.status == "sleep" # second is blocked on the lock
       proceed << :go                             # let first finish minting and cache the token
 
       expect([first.value, second.value, mints]).to eq(["tok-1", "tok-1", 1])
-    end
-  end
-
-  describe ".connect_opts_proc" do
-    before { described_class.reset_cache! }
-
-    let(:sa) { "clover-sa@my-project.iam.gserviceaccount.com" }
-    let(:opts_proc) { described_class.connect_opts_proc({"clover" => sa}) }
-
-    it "rewrites opts with the SA login user, minted-token password, and role option" do
-      stub_iam_credentials { |_resource| "minted-token" }
-      opts = {user: "clover"}
-      opts_proc.call(opts)
-      expect(opts[:user]).to eq("clover-sa@my-project.iam")
-      expect(opts[:password]).to eq("minted-token")
-      expect(opts[:driver_options][:options]).to eq("-c role=clover")
-    end
-
-    it "raises a GcpDatabaseAuth::Error for a role not in the map" do
-      expect { opts_proc.call({user: "nope"}) }
-        .to raise_error(GcpDatabaseAuth::Error, /no CloudSQL IAM SA mapped for role "nope"/)
-    end
-
-    it "does not mutate the caller's existing driver_options hash" do
-      stub_iam_credentials { |_resource| "minted-token" }
-      driver_options = {}
-      opts_proc.call({user: "clover", driver_options:})
-      expect(driver_options).to eq({})
     end
   end
 end
