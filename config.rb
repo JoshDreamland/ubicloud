@@ -220,6 +220,7 @@ module Config
   optional :postgres_otel_otlp_export_additional_metadata_field, string
   override :postgres_walg_optimized_config, false, bool
   override :postgres_walg_direct_io_enabled, false, bool
+  override :aws_postgres_blob_storage_iam_sweep, true, bool
   override :postgres_internal_firewall_cidrs, "", array(string)
   optional :postgres_timeseries_match_name_export_regex, string
 
