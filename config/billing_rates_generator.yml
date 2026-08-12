@@ -54,6 +54,7 @@ aws:
       - ap-northeast-1
       - eu-west-3
       - eu-south-1
+      - mx-central-1
     activeFrom: "2025-10-20T00:00:00Z"
     # Instance families that appear in instance availability but are intentionally
     # NOT priced by this matrix. Consumed only by the availability-coverage spec
@@ -85,4 +86,8 @@ gcp:
       - gcp-europe-west4
       - gcp-asia-southeast1
       - gcp-asia-northeast1
+      - gcp-us-west1
+      - gcp-europe-west6
+      - gcp-australia-southeast1
+      - gcp-northamerica-northeast1
     activeFrom: "2025-01-01T00:00:00Z"
