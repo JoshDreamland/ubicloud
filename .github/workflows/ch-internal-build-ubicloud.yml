@@ -11,6 +11,8 @@ on:
     types: [ opened, synchronize, reopened ]
     branches:
       - clickhouse
+      - 'release-*'
+      - 'hotfix-*'
   workflow_dispatch:
     inputs: { }
 
