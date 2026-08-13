@@ -21,6 +21,7 @@ class Clover
       filter[:location_id] = @location.id
       @pg = pg = @project.postgres_resources_dataset.first(filter)
       check_found_object(pg)
+      check_pg_not_deactivated!(pg)
 
       r.get true do
         authorize("Postgres:view", pg)

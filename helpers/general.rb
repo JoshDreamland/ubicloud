@@ -232,6 +232,23 @@ class Clover < Roda
     end
   end
 
+  # Reject mutations against a Postgres resource that is billing-deactivated.
+  # Exempts GETs (reads are safe) and the top-level DELETE (customers must
+  # still be able to remove a paused DB without reactivating first).
+  # The /activate endpoint lives on the clickgres-billing route and does not
+  # go through this check.
+  def check_pg_not_deactivated!(pg)
+    return unless pg.display_state == "deactivated"
+    return if request.get?
+    return if request.delete? && request.remaining_path.chomp("/").empty?
+    # Require view permission before signaling deactivation state, so an
+    # unauthenticated / unauthorized caller sees 403 instead of leaking that
+    # the resource exists and is currently paused.
+    authorize("Postgres:view", pg)
+    no_audit_log
+    fail CloverError.new(409, "ResourceDeactivated", "Database is stopped; reactivate it before making changes.")
+  end
+
   def no_authorization_needed
     # Do nothing, this is a no-op method only used to check in the specs
     # that all requests have some form of authorization, or an explicit

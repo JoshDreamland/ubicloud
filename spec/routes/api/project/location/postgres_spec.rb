@@ -1592,5 +1592,52 @@ RSpec.describe Clover, "postgres" do
         expect(response_body["items"]).to eq([])
       end
     end
+
+    describe "deactivate lockout" do
+      before do
+        project.set_ff_chc_postgres_deactivate_lockout(true)
+        pg.update(tags: Sequel.pg_jsonb([{"key" => "chc_state", "value" => "deactivated"}]))
+      end
+
+      it "allows GETs on a deactivated resource" do
+        get "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}"
+        expect(last_response.status).to eq(200)
+      end
+
+      it "allows the top-level DELETE on a deactivated resource" do
+        delete "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}"
+        expect(last_response.status).to eq(204)
+      end
+
+      it "rejects PATCH on a deactivated resource with 409" do
+        patch "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}",
+          {size: "standard-4"}.to_json
+        expect(last_response.status).to eq(409)
+        expect(JSON.parse(last_response.body)["error"]["type"]).to eq("ResourceDeactivated")
+      end
+
+      it "rejects POST /restart on a deactivated resource with 409" do
+        post "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}/restart"
+        expect(last_response.status).to eq(409)
+      end
+
+      it "rejects DELETE on a nested resource (firewall-rule) with 409" do
+        delete "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}/firewall-rule/fraz0q3vbrpa7pkg7zbmah9csn"
+        expect(last_response.status).to eq(409)
+      end
+
+      it "returns 403 (not 409) when the caller lacks view permission" do
+        AccessControlEntry.dataset.destroy
+        patch "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}",
+          {size: "standard-4"}.to_json
+        expect(last_response.status).to eq(403)
+      end
+
+      it "does not fire when the FF is off" do
+        project.set_ff_chc_postgres_deactivate_lockout(false)
+        post "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}/restart"
+        expect(last_response.status).not_to eq(409)
+      end
+    end
   end
 end
