@@ -377,10 +377,10 @@ RSpec.describe VmHost do
       end
       vm_host.sshable.update(host: "23.105.171.112")
       rows = leaseweb_91478_ip_rows
-      Excon.stub({path: "/bareMetals/v2/servers/91478/ips", query: {limit: 50, offset: 0}},
-        {status: 200, body: JSON.generate(ips: rows.take(50), _metadata: {totalCount: rows.length})})
-      Excon.stub({path: "/bareMetals/v2/servers/91478/ips", query: {limit: 50, offset: 50}},
-        {status: 200, body: JSON.generate(ips: rows.drop(50), _metadata: {totalCount: rows.length})})
+      stub_request(:get, "https://api.leaseweb.com/bareMetals/v2/servers/91478/ips").with(query: {limit: 50, offset: 0})
+        .to_return(status: 200, body: JSON.generate(ips: rows.take(50), _metadata: {totalCount: rows.length}))
+      stub_request(:get, "https://api.leaseweb.com/bareMetals/v2/servers/91478/ips").with(query: {limit: 50, offset: 50})
+        .to_return(status: 200, body: JSON.generate(ips: rows.drop(50), _metadata: {totalCount: rows.length}))
 
       ip_records = vm_host.provider.api.pull_ips
       vm_host.create_addresses(ip_records:)
@@ -455,18 +455,6 @@ RSpec.describe VmHost do
     it "returns disk device ids when StorageDevice has unix_device_list" do
       StorageDevice.create(vm_host_id: vm_host.id, name: "DEFAULT", total_storage_gib: 100, available_storage_gib: 100, unix_device_list: ["wwn-random-id1", "wwn-random-id2"])
       expect(vm_host.disk_device_ids).to eq(["wwn-random-id1", "wwn-random-id2"])
-    end
-
-    it "converts disk devices when StorageDevice has unix_device_list with the old formatting for SSD disks" do
-      StorageDevice.create(vm_host_id: vm_host.id, name: "DEFAULT", total_storage_gib: 100, available_storage_gib: 100, unix_device_list: ["sda"])
-      expect(vm_host.sshable).to receive(:_cmd).with("ls -l /dev/disk/by-id/ | grep sda\\$ | grep 'wwn-' | sed -E 's/.*(wwn[^ ]*).*/\\1/'").and_return("wwn-random-id1")
-      expect(vm_host.disk_device_ids).to eq(["wwn-random-id1"])
-    end
-
-    it "converts disk devices when StorageDevice has unix_device_list with the old formatting for NVMe disks" do
-      StorageDevice.create(vm_host_id: vm_host.id, name: "DEFAULT", total_storage_gib: 100, available_storage_gib: 100, unix_device_list: ["nvme0n1"])
-      expect(vm_host.sshable).to receive(:_cmd).with("ls -l /dev/disk/by-id/ | grep nvme0n1\\$ | grep 'nvme-eui' | sed -E 's/.*(nvme-eui[^ ]*).*/\\1/'").and_return("nvme-eui.random-id")
-      expect(vm_host.disk_device_ids).to eq(["nvme-eui.random-id"])
     end
   end
 

@@ -179,7 +179,9 @@ RSpec.describe Prog::Postgres::PostgresTimelineNexus do
         iam_client.stub_responses(:attach_user_policy)
         iam_client.stub_responses(:create_access_key, access_key: {access_key_id: "access-key", secret_access_key: "secret-key", user_name: "username", status: "Active"})
 
-        expect(nx.postgres_timeline.location.location_credential_aws).to receive(:iam_client).and_return(iam_client).at_least(:once)
+        location_credential = nx.postgres_timeline.location.location_credential_aws
+        expect(location_credential).to receive(:iam_client).and_return(iam_client).at_least(:once)
+        expect(location_credential).to receive(:aws_iam_account_id).and_return("123456789012")
 
         expect { nx.start }.to hop("setup_bucket")
 
@@ -202,7 +204,7 @@ RSpec.describe Prog::Postgres::PostgresTimelineNexus do
 
         location_credential = nx.postgres_timeline.location.location_credential_aws
         expect(location_credential).to receive(:iam_client).and_return(iam_client).at_least(:once)
-        expect(location_credential).to receive(:aws_iam_account_id).and_return("123456789012")
+        expect(location_credential).to receive(:aws_iam_account_id).and_return("123456789012").at_least(:once)
 
         expect(iam_client).to receive(:attach_user_policy).with(user_name: ubid, policy_arn: "arn:aws:iam::123456789012:policy/#{ubid}").and_call_original
         expect(iam_client).to receive(:delete_access_key).with(user_name: ubid, access_key_id: "stale-key").and_call_original
@@ -224,7 +226,9 @@ RSpec.describe Prog::Postgres::PostgresTimelineNexus do
         iam_client.stub_responses(:attach_user_policy)
         iam_client.stub_responses(:create_access_key, access_key: {access_key_id: "access-key", secret_access_key: "secret-key", user_name: "username", status: "Active"})
 
-        expect(nx.postgres_timeline.location.location_credential_aws).to receive(:iam_client).and_return(iam_client).at_least(:once)
+        location_credential = nx.postgres_timeline.location.location_credential_aws
+        expect(location_credential).to receive(:iam_client).and_return(iam_client).at_least(:once)
+        expect(location_credential).to receive(:aws_iam_account_id).and_return("123456789012").at_least(:once)
         expect(nx.postgres_timeline.leader).to be_nil
 
         expect { nx.start }.to hop("setup_bucket")
@@ -390,6 +394,19 @@ RSpec.describe Prog::Postgres::PostgresTimelineNexus do
 
       expect { nx.wait }.to nap(20 * 60)
     end
+
+    it "decrements and refreshes the blob storage policy when refresh_blob_storage_policy is set" do
+      create_minio_cluster
+      resource = create_postgres_resource(project:, location_id:)
+      create_postgres_server(resource:, timeline: postgres_timeline).strand.update(label: "wait")
+      postgres_timeline.update(latest_backup_started_at: Time.now)
+      nx.incr_refresh_blob_storage_policy
+
+      expect(nx.postgres_timeline).to receive(:refresh_blob_storage_policy)
+
+      expect { nx.wait }.to nap(20 * 60)
+      expect(Semaphore.where(strand_id: postgres_timeline.id, name: "refresh_blob_storage_policy").count).to eq(0)
+    end
   end
 
   describe "#before_run" do
@@ -478,7 +495,7 @@ RSpec.describe Prog::Postgres::PostgresTimelineNexus do
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 clean take_postgres_backup").ordered
 
       expect { nx.take_backup }.to hop("wait")
-      expect(postgres_timeline.reload.take_backup_for_converge_set?).to be(false)
+      expect(postgres_timeline.take_backup_for_converge_set?(cached: false)).to be(false)
     end
 
     it "naps if a backup is already in progress" do
@@ -492,7 +509,7 @@ RSpec.describe Prog::Postgres::PostgresTimelineNexus do
       sshable = nx.postgres_timeline.leader.vm.sshable
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 check take_postgres_backup").and_return("NotStarted").ordered
       expect(sshable).to receive(:_cmd).with("df --output=used /dat | tail -n 1").and_return((200 * 1024 * 1024).to_s).ordered
-      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run take_postgres_backup sudo postgres/bin/take-backup 17 25", {log: true, stdin: nil}).ordered
+      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run take_postgres_backup sudo postgres/bin/take-backup 18 25", {log: true, stdin: nil}).ordered
 
       expect { nx.take_backup }.to nap(60)
       expect(postgres_timeline.reload.latest_backup_started_at).not_to be_nil
@@ -504,7 +521,7 @@ RSpec.describe Prog::Postgres::PostgresTimelineNexus do
       allow(nx.postgres_timeline).to receive(:walg_optimized_config_enabled?).and_return(false)
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 check take_postgres_backup").and_return("NotStarted").ordered
       expect(sshable).to receive(:_cmd).with("df --output=used /dat | tail -n 1").and_return((200 * 1024 * 1024).to_s).ordered
-      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run take_postgres_backup sudo postgres/bin/take-backup 17", {log: true, stdin: nil}).ordered
+      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run take_postgres_backup sudo postgres/bin/take-backup 18", {log: true, stdin: nil}).ordered
 
       expect { nx.take_backup }.to nap(60)
     end
@@ -513,7 +530,7 @@ RSpec.describe Prog::Postgres::PostgresTimelineNexus do
       sshable = nx.postgres_timeline.leader.vm.sshable
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 check take_postgres_backup").and_return("Failed").ordered
       expect(sshable).to receive(:_cmd).with("df --output=used /dat | tail -n 1").and_return("0").ordered
-      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run take_postgres_backup sudo postgres/bin/take-backup 17 25", {log: true, stdin: nil}).ordered
+      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run take_postgres_backup sudo postgres/bin/take-backup 18 25", {log: true, stdin: nil}).ordered
 
       expect { nx.take_backup }.to nap(60)
     end

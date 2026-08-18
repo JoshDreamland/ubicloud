@@ -193,9 +193,11 @@ RSpec.describe Prog::Test::VmGroup do
       expect { vg_test.verify_firewall_rules }.to hop("verify_connected_subnets")
     end
 
-    it "runs tests for the first firewall" do
-      refresh_frame(vg_test, new_values: {"subnets" => [ps1.id]})
-      expect { vg_test.verify_firewall_rules }.to hop("start", "Test::FirewallRules")
+    it "runs tests for the first firewall with the other subnet as the outside subnet" do
+      refresh_frame(vg_test, new_values: {"subnets" => [ps1.id, ps2.id]})
+      expect { vg_test.verify_firewall_rules }.to hop("start", "Test::FirewallRules") { |hop|
+        expect(hop.strand_update_args[:stack].first.values_at("subject_id", "subnet_id_outside")).to eq [ps1.firewalls.first.id, ps2.id]
+      }
     end
   end
 
@@ -207,7 +209,9 @@ RSpec.describe Prog::Test::VmGroup do
 
     it "runs tests for the first connected subnet" do
       refresh_frame(vg_test, new_values: {"subnets" => [ps1.id, ps2.id]})
-      expect { vg_test.verify_connected_subnets }.to hop("start", "Test::ConnectedSubnets")
+      expect { vg_test.verify_connected_subnets }.to hop("start", "Test::ConnectedSubnets") { |hop|
+        expect(hop.strand_update_args[:stack].first.values_at("subnet_id_multiple", "subnet_id_single")).to eq [ps2.id, ps1.id]
+      }
     end
 
     it "runs tests for the second connected subnet" do
@@ -227,11 +231,21 @@ RSpec.describe Prog::Test::VmGroup do
   end
 
   describe "#test_reboot" do
-    it "hops to wait_reboot" do
+    it "hops to wait_reboot once the reboot is allowed" do
       vm_host = create_vm_host
       vm = create_vm(vm_host_id: vm_host.id)
       refresh_frame(vg_test, new_values: {"vms" => [vm.id]})
+      vg_test.incr_allow_reboot
+
       expect { vg_test.test_reboot }.to hop("wait_reboot")
+    end
+
+    it "naps until the reboot is allowed" do
+      vm_host = create_vm_host
+      vm = create_vm(vm_host_id: vm_host.id)
+      refresh_frame(vg_test, new_values: {"vms" => [vm.id]})
+
+      expect { vg_test.test_reboot }.to nap(10)
     end
   end
 

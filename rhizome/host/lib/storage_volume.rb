@@ -47,6 +47,7 @@ class StorageVolume
     @stripe_sector_count_shift = Integer(params.fetch("stripe_sector_count_shift", 11))
     @cpus = params["cpus"]
     @archive_source = params["archive_source"]
+    @remote_source = params["remote_source"]
   end
 
   def vp
@@ -79,7 +80,7 @@ class StorageVolume
     encryption_key = generate_data_encryption_key
 
     if @vhost_backend_version
-      create_empty_disk_file
+      create_empty_disk_file(disk_size_mib: vhost_backend_disk_size_mib)
       prep_vhost_backend(encryption_key, key_wrapping_secrets)
       return
     end
@@ -104,7 +105,7 @@ class StorageVolume
   end
 
   def has_source?
-    !!(@image_path || @archive_source)
+    !!(@image_path || @archive_source || @remote_source)
   end
 
   def requires_metadata?
@@ -180,7 +181,8 @@ class StorageVolume
       "--kek #{sp.kek_pipe}"
     end
 
-    if @archive_source
+    if @archive_source || @remote_source
+      # An archive (S3) or remote stripe source needs outbound network access.
       restrict_address_families = "AF_UNIX AF_INET AF_INET6"
       private_network = "no"
     else
@@ -389,6 +391,14 @@ class StorageVolume
       })
     end
 
+    if @remote_source
+      sections << toml_section("secrets.remote-psk", {
+        "source.inline" => @remote_source["encrypted_psk"],
+        "encoding" => "base64",
+        "encrypted_by.ref" => "kek",
+      })
+    end
+
     sections.join("\n")
   end
 
@@ -405,6 +415,14 @@ class StorageVolume
         "access_key_id.ref" => "archive-access-key",
         "secret_access_key.ref" => "archive-secret-key",
         "archive_kek.ref" => "archive-kek",
+      }
+    elsif @remote_source
+      {
+        "type" => "remote",
+        "address" => @remote_source["address"],
+        "autofetch" => @remote_source.fetch("autofetch", false),
+        "psk.identity" => @remote_source["psk_identity"],
+        "psk.secret.ref" => "remote-psk",
       }
     else
       {
@@ -634,6 +652,19 @@ class StorageVolume
     create_empty_disk_file(disk_size_mib: @disk_size_gib * 1024 + 16)
     # just clear the metadata section, i.e. first 8MB
     encrypted_image_copy(encryption_key, "/dev/zero", block_size: 2097152, count: 4)
+  end
+
+  # Size (MiB) of a vhost-backend disk.raw: the requested size_gib, or the source
+  # volume's actual disk.raw size when moving (remote_source["disk_size_bytes"]),
+  # whichever is larger.
+  def vhost_backend_disk_size_mib
+    nominal_mib = @disk_size_gib * 1024
+    source_bytes = @remote_source && @remote_source["disk_size_bytes"]
+    return nominal_mib unless source_bytes
+
+    mib = 1024 * 1024
+    source_mib = (source_bytes + mib - 1) / mib # round up to whole MiB
+    [nominal_mib, source_mib].max
   end
 
   def create_empty_disk_file(disk_size_mib: @disk_size_gib * 1024)

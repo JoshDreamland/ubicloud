@@ -122,7 +122,7 @@ class Clover
           additions.transform_keys!(&:name)
           removals.transform_keys!(&:name)
 
-          if @project.subject_tags_dataset.first(name: "Admin").member_ids.empty?
+          unless @project.subject_tags_dataset.first(name: "Admin").member_ids.any? { UBID.uuid_class_match?(it, Account) }
             raise_web_error("The project must have at least one admin.")
           end
 
@@ -374,6 +374,9 @@ class Clover
         DB.transaction(isolation: :serializable) do
           unless @project.accounts_dataset.count > 1
             raise_web_error("You can't remove the last user from '#{@project.name}' project. Delete project instead.")
+          end
+          if @project.sole_admin?(user)
+            raise_web_error("You can't remove the last admin from '#{@project.name}' project.")
           end
 
           @project.disassociate_subject(user.id)

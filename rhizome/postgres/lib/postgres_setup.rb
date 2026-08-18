@@ -2,6 +2,7 @@
 
 require_relative "../../common/lib/util"
 require_relative "walg_hardening"
+require "fileutils"
 require "logger"
 
 class PostgresSetup
@@ -46,6 +47,40 @@ class PostgresSetup
       net.ipv4.tcp_keepalive_intvl=10
     SYSCTL
     r "sudo sysctl --system"
+  end
+
+  JOURNALD_CONF_PATH = "/etc/systemd/journald.conf.d/50-persistent.conf"
+
+  JOURNALD_CONF = <<~JOURNALD
+    [Journal]
+    Storage=persistent
+    SystemMaxUse=4G
+    Compress=yes
+    ForwardToSyslog=no
+  JOURNALD
+
+  # Every file the stock rsyslog config writes, with its rotated and compressed
+  # generations. Once rsyslog is gone nothing writes, rotates or reads them.
+  RSYSLOG_LOGS_GLOB = "/var/log/{syslog,auth.log,kern.log,daemon.log,user.log,lpr.log,cron.log,debug,messages,mail.log,mail.info,mail.warn,mail.err}*"
+
+  # rsyslog duplicates the journal into /var/log with no size ceiling, so the
+  # root filesystem fills. The current image drops it for a capped persistent
+  # journal at build time; servers built before that image need the same end
+  # state applied in place, including reclaiming what rsyslog already wrote.
+  def configure_journald
+    unless File.exist?(JOURNALD_CONF_PATH) && File.read(JOURNALD_CONF_PATH) == JOURNALD_CONF
+      r "mkdir", "-p", File.dirname(JOURNALD_CONF_PATH)
+      safe_write_to_file(JOURNALD_CONF_PATH, JOURNALD_CONF)
+      r "systemctl", "restart", "systemd-journald"
+    end
+
+    return unless File.exist?("/usr/sbin/rsyslogd")
+
+    # postrm takes /etc/logrotate.d/rsyslog with it, so the stale weekly config
+    # does not outlive the daemon.
+    r "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "purge", "-y", "rsyslog"
+
+    FileUtils.rm_f(Dir.glob(RSYSLOG_LOGS_GLOB))
   end
 
   def configure_service_slice
@@ -124,6 +159,11 @@ class PostgresSetup
   end
 
   def create_cluster
-    r "pg_createcluster", @version.to_s, "main", "--port=5432", "--locale=C.UTF8"
+    # Use builtin collation for PG 17+
+    if @version.to_i >= 17
+      r "pg_createcluster", @version.to_s, "main", "--port=5432", "--", "--locale-provider=builtin", "--builtin-locale=C.UTF-8"
+    else
+      r "pg_createcluster", @version.to_s, "main", "--port=5432", "--locale=C.UTF8"
+    end
   end
 end

@@ -9,6 +9,7 @@ class VmHost < Sequel::Model
   one_to_many :vms, read_only: true
   one_to_many :assigned_subnets, key: :routed_to_host_id, class: :Address, read_only: true
   one_to_one :provider, key: :id, class: :HostProvider, read_only: true
+  one_to_one :inventory, key: :id, class: :VmHostInventory, read_only: true
   one_to_many :assigned_host_addresses, key: :host_id, read_only: true
   one_to_many :spdk_installations, remover: nil, clearer: nil
   one_to_many :vhost_block_backends, remover: nil, clearer: nil
@@ -248,6 +249,10 @@ class VmHost < Sequel::Model
     update(data_center: provider.api.pull_data_center)
   end
 
+  def create_inventory
+    VmHostInventory.create(provider.api.pull_inventory) { it.id = id }
+  end
+
   def allow_slices
     update(accepts_slices: true)
   end
@@ -394,11 +399,6 @@ class VmHost < Sequel::Model
   end
 
   def disk_device_ids
-    # we use this next line to migrate data from the old formatting (storing device names) to the new (storing id) so we trigger the convert
-    # whenever an element inside unix_device_list is not a SSD or NVMe id.
-    # SSD and NVMe ids start with wwn or nvme-eui respectively.
-    # YYY: This next line can be removed in the future after the first run of the code.
-    storage_devices.each { |sd| sd.migrate_device_name_to_device_id if sd.unix_device_list.any? { |device_name| device_name !~ /\A(wwn|nvme-eui)/i } }
     storage_devices.flat_map { |sd| sd.unix_device_list }
   end
 
@@ -425,7 +425,7 @@ class VmHost < Sequel::Model
     end
     pulse = aggregate_readings(previous_pulse:, reading:)
 
-    if pulse[:reading] == "down" && pulse[:reading_rpt] > 5 && Time.now - pulse[:reading_chg] > 30 && !reload.checkup_set?
+    if pulse[:reading] == "down" && pulse[:reading_rpt] > 5 && Time.now - pulse[:reading_chg] > 30 && !checkup_set?(cached: false)
       incr_checkup
     end
 
@@ -507,15 +507,17 @@ end
 #  vm_host_id_fkey          | (id) REFERENCES sshable(id)
 #  vm_host_location_id_fkey | (location_id) REFERENCES location(id)
 # Referenced By:
-#  address               | address_routed_to_host_id_fkey      | (routed_to_host_id) REFERENCES vm_host(id)
-#  assigned_host_address | assigned_host_address_host_id_fkey  | (host_id) REFERENCES vm_host(id)
-#  boot_image            | boot_image_vm_host_id_fkey          | (vm_host_id) REFERENCES vm_host(id)
-#  gpu_partition         | gpu_partition_vm_host_id_fkey       | (vm_host_id) REFERENCES vm_host(id)
-#  host_provider         | host_provider_id_fkey               | (id) REFERENCES vm_host(id)
-#  pci_device            | pci_device_vm_host_id_fkey          | (vm_host_id) REFERENCES vm_host(id)
-#  spdk_installation     | spdk_installation_vm_host_id_fkey   | (vm_host_id) REFERENCES vm_host(id)
-#  storage_device        | storage_device_vm_host_id_fkey      | (vm_host_id) REFERENCES vm_host(id)
-#  vhost_block_backend   | vhost_block_backend_vm_host_id_fkey | (vm_host_id) REFERENCES vm_host(id)
-#  vm                    | vm_vm_host_id_fkey                  | (vm_host_id) REFERENCES vm_host(id)
-#  vm_host_cpu           | vm_host_cpu_vm_host_id_fkey         | (vm_host_id) REFERENCES vm_host(id)
-#  vm_host_slice         | vm_host_slice_vm_host_id_fkey       | (vm_host_id) REFERENCES vm_host(id)
+#  address               | address_routed_to_host_id_fkey        | (routed_to_host_id) REFERENCES vm_host(id)
+#  assigned_host_address | assigned_host_address_host_id_fkey    | (host_id) REFERENCES vm_host(id)
+#  boot_image            | boot_image_vm_host_id_fkey            | (vm_host_id) REFERENCES vm_host(id)
+#  gpu_partition         | gpu_partition_vm_host_id_fkey         | (vm_host_id) REFERENCES vm_host(id)
+#  host_provider         | host_provider_id_fkey                 | (id) REFERENCES vm_host(id)
+#  pci_device            | pci_device_vm_host_id_fkey            | (vm_host_id) REFERENCES vm_host(id)
+#  remote_storage_server | remote_storage_server_vm_host_id_fkey | (vm_host_id) REFERENCES vm_host(id)
+#  spdk_installation     | spdk_installation_vm_host_id_fkey     | (vm_host_id) REFERENCES vm_host(id)
+#  storage_device        | storage_device_vm_host_id_fkey        | (vm_host_id) REFERENCES vm_host(id)
+#  vhost_block_backend   | vhost_block_backend_vm_host_id_fkey   | (vm_host_id) REFERENCES vm_host(id)
+#  vm                    | vm_vm_host_id_fkey                    | (vm_host_id) REFERENCES vm_host(id)
+#  vm_host_cpu           | vm_host_cpu_vm_host_id_fkey           | (vm_host_id) REFERENCES vm_host(id)
+#  vm_host_inventory     | vm_host_inventory_id_fkey             | (id) REFERENCES vm_host(id) ON DELETE CASCADE
+#  vm_host_slice         | vm_host_slice_vm_host_id_fkey         | (vm_host_id) REFERENCES vm_host(id)

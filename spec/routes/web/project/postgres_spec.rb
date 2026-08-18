@@ -60,12 +60,12 @@ RSpec.describe Clover, "postgres" do
 
     describe "list" do
       it "can list flavors when there is no pg databases" do
-        project.set_ff_postgres_paradedb(true)
+        project.set_ff_postgres_lantern(true)
         visit "#{project.path}/postgres"
 
         expect(page.title).to eq("Ubicloud - PostgreSQL Databases")
         expect(page).to have_content "Create PostgreSQL Database"
-        expect(page).to have_content "Create ParadeDB PostgreSQL Database"
+        expect(page).to have_content "Create Lantern PostgreSQL Database"
 
         click_link "Create PostgreSQL Database"
         expect(page.title).to eq("Ubicloud - Create PostgreSQL Database")
@@ -143,6 +143,13 @@ RSpec.describe Clover, "postgres" do
         expect(pg.target_storage_size_gib).to eq(118)
       end
 
+      it "pre-selects the default version rather than the newest one offered" do
+        visit "#{project.path}/postgres/create?flavor=#{PostgresResource::Flavor::STANDARD}"
+
+        checked = all("input[name=version]", visible: false).select(&:checked?).map { |input| input.value }
+        expect(checked).to eq([PostgresResource.default_version])
+      end
+
       it "can specify an init script when creating new PostgreSQL database" do
         project.set_ff_postgres_init_script(true)
         visit "#{project.path}/postgres/create?flavor=#{PostgresResource::Flavor::STANDARD}"
@@ -162,6 +169,27 @@ RSpec.describe Clover, "postgres" do
         expect(PostgresResource.count).to eq(1)
         expect(PostgresResource.first.project_id).to eq(project.id)
         expect(PostgresResource.first.init_script.init_script).to eq("sudo whoami")
+      end
+
+      it "can create new PostgreSQL database without firewall rules" do
+        visit "#{project.path}/postgres/create?flavor=#{PostgresResource::Flavor::STANDARD}"
+
+        expect(page.title).to eq("Ubicloud - Create PostgreSQL Database")
+        name = "new-pg-db"
+        fill_in "Name", with: name
+        choose option: Location::HETZNER_FSN1_UBID
+        choose option: "standard-2"
+        choose option: PostgresResource::HaType::NONE
+        check "Restrict access by default"
+
+        click_button "Create"
+
+        expect(page.title).to eq("Ubicloud - #{name}")
+        expect(page).to have_flash_notice("'#{name}' will be ready in a few minutes")
+        expect(PostgresResource.count).to eq(1)
+        pg = PostgresResource.first
+        expect(pg.project_id).to eq(project.id)
+        expect(pg.pg_firewall_rules_dataset.count).to eq(0)
       end
 
       it "handles errors when creating new PostgreSQL database" do
@@ -203,28 +231,6 @@ RSpec.describe Clover, "postgres" do
         expect(page).to have_flash_error("Validation failed for following fields: location")
       end
 
-      it "can create new ParadeDB PostgreSQL database" do
-        project.set_ff_postgres_paradedb(true)
-        expect(Config).to receive(:postgres_paradedb_notification_email).and_return("dummy@mail.com")
-        expect(Util).to receive(:send_email)
-        visit "#{project.path}/postgres/create?flavor=#{PostgresResource::Flavor::PARADEDB}"
-
-        expect(page.title).to eq("Ubicloud - Create ParadeDB PostgreSQL Database")
-        name = "new-pg-db"
-        fill_in "Name", with: name
-        choose option: Location::HETZNER_FSN1_UBID
-        choose option: "standard-2"
-        choose option: PostgresResource::HaType::NONE
-        check "Accept Terms of Service and Privacy Policy"
-
-        click_button "Create"
-
-        expect(page.title).to eq("Ubicloud - #{name}")
-        expect(page).to have_flash_notice("'#{name}' will be ready in a few minutes")
-        expect(PostgresResource.count).to eq(1)
-        expect(PostgresResource.first.project_id).to eq(project.id)
-      end
-
       it "can create new Lantern PostgreSQL database when the feature flag is enabled" do
         project.set_ff_postgres_lantern(true)
         visit "#{project.path}/postgres/create?flavor=#{PostgresResource::Flavor::LANTERN}"
@@ -244,32 +250,13 @@ RSpec.describe Clover, "postgres" do
         expect(PostgresResource.first.project_id).to eq(project.id)
       end
 
-      it "can create new ParadeDB PostgreSQL database when the feature flag is enabled" do
-        project.set_ff_postgres_paradedb(true)
-        visit "#{project.path}/postgres/create?flavor=#{PostgresResource::Flavor::PARADEDB}"
-
-        expect(page.title).to eq("Ubicloud - Create ParadeDB PostgreSQL Database")
-        name = "new-pg-db"
-        fill_in "Name", with: name
-        choose option: Location::HETZNER_FSN1_UBID
-        choose option: "standard-2"
-        choose option: PostgresResource::HaType::NONE
-        check "Accept Terms of Service and Privacy Policy"
-
-        click_button "Create"
-        expect(page.title).to eq("Ubicloud - #{name}")
-        expect(page).to have_flash_notice("'#{name}' will be ready in a few minutes")
-        expect(PostgresResource.count).to eq(1)
-        expect(PostgresResource.first.project_id).to eq(project.id)
-      end
-
-      it "can not create new ParadeDB PostgreSQL database in a customer specific location" do
-        project.set_ff_postgres_paradedb(true)
+      it "can not create new Lantern PostgreSQL database in a customer specific location" do
+        project.set_ff_postgres_lantern(true)
         private_location = create_private_location(project:)
 
-        visit "#{project.path}/postgres/create?flavor=#{PostgresResource::Flavor::PARADEDB}"
+        visit "#{project.path}/postgres/create?flavor=#{PostgresResource::Flavor::LANTERN}"
 
-        expect(page.title).to eq("Ubicloud - Create ParadeDB PostgreSQL Database")
+        expect(page.title).to eq("Ubicloud - Create Lantern PostgreSQL Database")
         expect(page).to have_no_content private_location.name
       end
 
@@ -638,6 +625,43 @@ RSpec.describe Clover, "postgres" do
 
         visit "#{project.path}#{pg.path}/backup-restore"
         expect(page).to have_content "No backups available for this PostgreSQL database."
+      end
+
+      it "generates backup download credentials once the minio flag is set" do
+        project.set_ff_postgres_backup_download_minio(true)
+        create_minio_cluster_for_blob_storage
+        allow(Config).to receive(:minio_service_project_id).and_return(Config.postgres_service_project_id)
+        expiration = Time.now.utc + 36 * 60 * 60
+        expect(Minio::Client).to receive(:new).and_return(instance_double(Minio::Client, list_objects: [], assume_role: {access_key_id: "AKID", secret_access_key: "SECRET", session_token: "TOKEN", expiration:})).at_least(:once)
+
+        visit "#{project.path}#{pg.path}/backup-restore"
+        expect(page).to have_content "Backup Download Access"
+
+        click_button "Create download credentials"
+
+        expect(page.status_code).to eq(200)
+        expect(page).to have_content "Access Key ID"
+        expect(page).to have_content "AKID"
+        expect(page).to have_content "https://walg-minio.minio.test:9000"
+        expect(page).to have_content "aws s3 sync"
+        expect(page).to have_css(".backup-example-box.copyable-content .copy-button")
+      end
+
+      it "hides the backup download section for non-aws databases without the minio flag" do
+        visit "#{project.path}#{pg.path}/backup-restore"
+        expect(page).to have_no_content "Backup Download Access"
+        expect(page).to have_no_button "Create download credentials"
+      end
+
+      it "shows proper message when a backup exists but the restore window is not open yet" do
+        create_minio_cluster_for_blob_storage
+        backup = Struct.new(:key, :last_modified)
+        expect(Minio::Client).to receive(:new).and_return(instance_double(Minio::Client, list_objects: [backup.new("basebackups_005/backup_stop_sentinel.json", Time.now.utc)])).at_least(:once)
+
+        visit "#{project.path}#{pg.path}/backup-restore"
+        expect(page).to have_no_content "Fork PostgreSQL database"
+        expect(page).to have_content "Point-in-time restore is not available yet."
+        expect(page).to have_content "Backups"
       end
 
       it "can create a read replica of a PostgreSQL database" do

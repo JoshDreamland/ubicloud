@@ -100,9 +100,9 @@ RSpec.describe UBID do
     expect(ubid2.to_i).to eq(ubid1.to_i)
   end
 
-  context "when a routing stamp is configured" do
+  context "when a routing stamp is configured", if: Config.unfrozen_test? || Config.ubid_routing_stamp do
     subject(:stamped_class) do
-      Class.new(described_class).tap { UBID::RoutingStamp.apply(it) }
+      Class.new(described_class) { UBID::RoutingStamp.apply(self) }
     end
 
     before do
@@ -130,10 +130,8 @@ RSpec.describe UBID do
     end
   end
 
-  it "does not stamp ubids when routing stamp is not configured" do
-    expect(Config.ubid_routing_stamp).to be_nil
-    klass = Class.new(described_class).tap { UBID::RoutingStamp.apply(it) }
-    ubid = klass.generate(UBID::TYPE_VM)
+  it "does not stamp ubids when routing stamp is not configured", if: !Config.ubid_routing_stamp do
+    ubid = described_class.generate(UBID::TYPE_VM)
     expect(ubid.to_s[13]).to be_between("g", "q")
     expect(ubid.variant).to eq 0b10
     expect(ubid).not_to respond_to(:routing_version)

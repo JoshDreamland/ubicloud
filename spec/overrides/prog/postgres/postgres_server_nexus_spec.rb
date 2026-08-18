@@ -32,8 +32,6 @@ RSpec.describe Prog::Postgres::PostgresServerNexus::PrependMethods do # rubocop:
     end
 
     it "does not create pg_stat_ch for non-standard flavors" do
-      # LANTERN rather than PARADEDB so super's paradedb_and_primary? branch
-      # does not fire and try to run its own CREATE EXTENSION DDL.
       postgres_server.resource.update(flavor: PostgresResource::Flavor::LANTERN)
       allow(sshable).to receive(:d_check).with("post_installation_script").and_return("Succeeded")
       expect(sshable).not_to receive(:_cmd).with(

@@ -133,6 +133,7 @@ module Config
   optional :e2e_cloudflare_parent_zone_name, string
   override :allow_unspread_servers, !production?, bool
   override :control_plane_outbound_cidrs, "0.0.0.0/0,::/0", array(string)
+  override :pg_network_metering_enabled, false, bool
   optional :git_commit_hash, string
   optional :ip_from_header, string
   optional :ubid_routing_stamp, match?(/\A[0-9a-hj-km-np-tv-z]{2}\z/)
@@ -177,7 +178,7 @@ module Config
   # VictoriaMetrics
   optional :victoria_metrics_service_project_id, uuid
   override :victoria_metrics_host_name, "metrics.ubicloud.com", string
-  override :victoria_metrics_version, "v1.148.0", string
+  override :victoria_metrics_version, "v1.149.0", string
   optional :victoria_metrics_endpoint_override, string
 
   # Spdk
@@ -209,7 +210,6 @@ module Config
   override :postgres_hostname_version_default, "v3", string
   override :postgres_monitor_database_url, Config.clover_database_url, string
   optional :postgres_monitor_database_root_certs, string
-  optional :postgres_paradedb_notification_email, string
   optional :postgres_lantern_notification_email, string
   optional :postgres_notification_email, string
   override :aws_postgres_iam_access, false, bool
@@ -251,12 +251,12 @@ module Config
   optional :ubicloud_images_r2_access_key, string, clear: true
   optional :ubicloud_images_r2_secret_key, string, clear: true
 
-  override :github_ubuntu_2204_x64_aws_ami_version, "ami-027521b1fcdfb2d1d", string
-  override :github_ubuntu_2404_x64_aws_ami_version, "ami-00053ab2c8f2e7a3f", string
-  override :github_ubuntu_2604_x64_aws_ami_version, "ami-05a5aaba660346f42", string
-  override :github_ubuntu_2204_arm64_aws_ami_version, "ami-057b1610e577ebfa5", string
-  override :github_ubuntu_2404_arm64_aws_ami_version, "ami-005e84aaf5eab2384", string
-  override :github_ubuntu_2604_arm64_aws_ami_version, "ami-0695161c7269e474e", string
+  override :github_ubuntu_2204_x64_aws_ami_version, "ami-06278f3369923ea6d", string
+  override :github_ubuntu_2404_x64_aws_ami_version, "ami-0c43c7772150382e4", string
+  override :github_ubuntu_2604_x64_aws_ami_version, "ami-050a11359633cef1e", string
+  override :github_ubuntu_2204_arm64_aws_ami_version, "ami-075a811d824904134", string
+  override :github_ubuntu_2404_arm64_aws_ami_version, "ami-0037a28ce39645ec3", string
+  override :github_ubuntu_2604_arm64_aws_ami_version, "ami-05821fff80af45eca", string
   override :postgres_gce_image_gcp_project_id, "ubicloud-images", string
 
   # Allocator

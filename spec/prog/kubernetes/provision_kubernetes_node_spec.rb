@@ -138,6 +138,15 @@ RSpec.describe Prog::Kubernetes::ProvisionKubernetesNode do
       expect(new_vm.boot_image).to eq("kubernetes-#{Option.kubernetes_versions[1].tr(".", "_")}")
     end
 
+    it "records that the bundler install can be skipped when the node boots from a machine image" do
+      metal = create_machine_image_version_metal(name: "kubernetes-#{Option.selectable_kubernetes_versions.first.tr(".", "_")}", set_latest_version: true)
+      allow(Config).to receive(:machine_images_service_project_id).and_return(metal.machine_image_version.machine_image.project_id)
+
+      expect { prog.create_node }.to hop("bootstrap_rhizome")
+
+      expect(prog.strand.stack.first["no_bundler_install"]).to be true
+    end
+
     it "fails if the given nodepool does not belong to the cluster" do
       other_cluster = Prog::Kubernetes::KubernetesClusterNexus.assemble(name: "other-cluster", version: Option.selectable_kubernetes_versions.first, cp_node_count: 1, location_id: Location::HETZNER_FSN1_ID, project_id: project.id, target_node_size: "standard-4").subject
       other_nodepool = Prog::Kubernetes::KubernetesNodepoolNexus.assemble(name: "other-np", node_count: 1, kubernetes_cluster_id: other_cluster.id, target_node_size: "standard-2").subject
@@ -216,6 +225,19 @@ RSpec.describe Prog::Kubernetes::ProvisionKubernetesNode do
       expect(br_frame["target_folder"]).to eq "kubernetes"
       expect(br_frame["subject_id"]).to eq prog.node.vm.id
       expect(br_frame["user"]).to eq "ubi"
+      expect(br_frame).not_to have_key "no_bundler_install"
+    end
+
+    it "skips the bundler install when the node booted from a machine image" do
+      prog.node.vm.strand.update(label: "wait")
+      refresh_frame(prog, new_values: {"no_bundler_install" => true})
+      sshable = prog.vm.sshable
+      expect(sshable).to receive(:_cmd).with("sudo tee /etc/nftables.conf > /dev/null", stdin: expected_nft_rules).ordered
+      expect(sshable).to receive(:_cmd).with("sudo systemctl enable --now nftables").ordered
+      expect(sshable).to receive(:_cmd).with("sudo systemctl enable --now kubelet").ordered
+
+      expect { prog.bootstrap_rhizome }.to hop("wait_bootstrap_rhizome")
+      expect(Strand.where(prog: "BootstrapRhizome").get(:stack)[0]["no_bundler_install"]).to be true
     end
 
     it "does not grant operator access to control plane nodes when operator keys are not configured" do
@@ -298,7 +320,7 @@ RSpec.describe Prog::Kubernetes::ProvisionKubernetesNode do
     it "resolves any open page and hops if the init_cluster script is successful" do
       Prog::PageNexus.assemble("existing", ["KubernetesNodeInitClusterFailed", prog.node.ubid], prog.node.ubid)
       expect(prog.vm.sshable).to receive(:d_check).with("init_kubernetes_cluster").and_return("Succeeded")
-      expect { prog.init_cluster }.to hop("install_cni")
+      expect { prog.init_cluster }.to hop("wait_api_server_lb")
       page = Page.from_tag_parts("KubernetesNodeInitClusterFailed", prog.node.ubid)
       expect(page.resolve_set?).to be true
     end
@@ -306,12 +328,30 @@ RSpec.describe Prog::Kubernetes::ProvisionKubernetesNode do
     it "hops if the init_cluster script is successful and no page exists" do
       expect(Page.from_tag_parts("KubernetesNodeInitClusterFailed", prog.node.ubid)).to be_nil
       expect(prog.vm.sshable).to receive(:d_check).with("init_kubernetes_cluster").and_return("Succeeded")
-      expect { prog.init_cluster }.to hop("install_cni")
+      expect { prog.init_cluster }.to hop("wait_api_server_lb")
     end
 
     it "naps if the daemonizer check returns something unknown" do
       expect(prog.vm.sshable).to receive(:d_check).with("init_kubernetes_cluster").and_return("Unknown")
       expect { prog.init_cluster }.to nap(30)
+    end
+  end
+
+  describe "#wait_api_server_lb" do
+    let(:session) { Net::SSH::Connection::Session.allocate }
+
+    before do
+      allow(kubernetes_cluster.sshable).to receive(:connect).and_return(session)
+    end
+
+    it "hops once the api server answers through the load balancer" do
+      expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s get --raw=/healthz").and_return(Net::SSH::Connection::Session::StringWithExitstatus.new("ok", 0))
+      expect { prog.wait_api_server_lb }.to hop("install_cni")
+    end
+
+    it "naps while the load balancer does not serve the api server yet" do
+      expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s get --raw=/healthz").and_return(Net::SSH::Connection::Session::StringWithExitstatus.new("couldn't get current server API group list: connection refused", 1))
+      expect { prog.wait_api_server_lb }.to nap(5)
     end
   end
 
@@ -474,9 +514,9 @@ RSpec.describe Prog::Kubernetes::ProvisionKubernetesNode do
     it "skips approve if the csr is already approved" do
       expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s get csr --sort-by=.metadata.creationTimestamp | awk /Approved/' && /kubelet-serving/ && /'test-vm'/ {print $1}' | tail -1").and_return(Net::SSH::Connection::Session::StringWithExitstatus.new("csr-abc123\n", 0))
       expect { prog.approve_new_csr }.to exit({node_id: prog.node.id})
-      expect(kubernetes_cluster.reload.sync_internal_dns_config_set?).to be true
-      expect(kubernetes_cluster.reload.sync_worker_mesh_set?).to be true
-      expect(kubernetes_cluster.reload.update_billing_records_set?).to be true
+      expect(kubernetes_cluster.sync_internal_dns_config_set?(cached: false)).to be true
+      expect(kubernetes_cluster.sync_worker_mesh_set?(cached: false)).to be true
+      expect(kubernetes_cluster.update_billing_records_set?(cached: false)).to be true
     end
 
     it "approves the csr when it is pending" do
@@ -484,9 +524,9 @@ RSpec.describe Prog::Kubernetes::ProvisionKubernetesNode do
       expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s get csr --sort-by=.metadata.creationTimestamp | awk /Pending/' && /kubelet-serving/ && /'test-vm'/ {print $1}' | tail -1").and_return(Net::SSH::Connection::Session::StringWithExitstatus.new("csr-abc123\n", 0))
       expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s certificate approve csr-abc123").and_return(Net::SSH::Connection::Session::StringWithExitstatus.new("approved", 0))
       expect { prog.approve_new_csr }.to exit({node_id: prog.node.id})
-      expect(kubernetes_cluster.reload.sync_internal_dns_config_set?).to be true
-      expect(kubernetes_cluster.reload.sync_worker_mesh_set?).to be true
-      expect(kubernetes_cluster.reload.update_billing_records_set?).to be true
+      expect(kubernetes_cluster.sync_internal_dns_config_set?(cached: false)).to be true
+      expect(kubernetes_cluster.sync_worker_mesh_set?(cached: false)).to be true
+      expect(kubernetes_cluster.update_billing_records_set?(cached: false)).to be true
     end
   end
 

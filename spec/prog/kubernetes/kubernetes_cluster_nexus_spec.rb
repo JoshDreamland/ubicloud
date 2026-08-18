@@ -173,6 +173,7 @@ RSpec.describe Prog::Kubernetes::KubernetesClusterNexus do
       expect(nx.strand.stack.first["deadline_target"]).to eq "wait"
       expect(Time.new(nx.strand.stack.first["deadline_at"])).to be_within(60).of(Time.now + 120 * 60)
       expect(nx.install_metrics_server_set?).to be true
+      expect(nx.install_prometheus_rbac_set?).to be true
       expect(nx.sync_worker_mesh_set?).to be true
       expect(nx.sync_internal_dns_config_set?).to be true
       expect(nx.install_csi_set?).to be true
@@ -472,10 +473,10 @@ RSpec.describe Prog::Kubernetes::KubernetesClusterNexus do
       expect(nps.map(&:upgrade_set?)).to eq([true, false])
 
       np1.strand.update(label: "upgrade")
-      Semaphore.where(strand_id: np1.id, name: "upgrade").destroy
+      Semaphore.where(strand_id: np1.id, name: "upgrade").delete
       kubernetes_cluster.nodepools(reload: true)
       expect { nx.wait }.to nap(30)
-      expect(np2.reload.upgrade_set?).to be false
+      expect(np2.upgrade_set?(cached: false)).to be false
 
       np1.strand.update(label: "wait")
       kubernetes_cluster.nodepools(reload: true)
@@ -484,10 +485,10 @@ RSpec.describe Prog::Kubernetes::KubernetesClusterNexus do
       expect(np2.upgrade_set?).to be true
 
       np2.strand.update(label: "wait")
-      Semaphore.where(strand_id: np2.id, name: "upgrade").destroy
+      Semaphore.where(strand_id: np2.id, name: "upgrade").delete
       kubernetes_cluster.nodepools(reload: true)
       expect { nx.wait }.to nap(6 * 60 * 60)
-      expect(kubernetes_cluster.reload.upgrade_nodepools_set?).to be false
+      expect(kubernetes_cluster.upgrade_nodepools_set?(cached: false)).to be false
     end
 
     it "hops to install_metrics_server when semaphore is set" do
@@ -513,6 +514,11 @@ RSpec.describe Prog::Kubernetes::KubernetesClusterNexus do
     it "hops to sync_kubeconfig when its semaphore is set" do
       nx.incr_sync_kubeconfig
       expect { nx.wait }.to hop("sync_kubeconfig")
+    end
+
+    it "hops to install_prometheus_rbac when its semaphore is set" do
+      nx.incr_install_prometheus_rbac
+      expect { nx.wait }.to hop("install_prometheus_rbac")
     end
 
     it "hops to update_billing_records" do
@@ -677,6 +683,20 @@ RSpec.describe Prog::Kubernetes::KubernetesClusterNexus do
       st.update(label: "destroy")
       Strand.create(parent_id: st.id, prog: "Kubernetes::ProvisionKubernetesNode", label: "start", stack: [{}], lease: Time.now + 10)
       expect { nx.wait_upgrade }.to nap(120)
+    end
+  end
+
+  describe "#install_prometheus_rbac" do
+    it "applies the rbac manifest and reconfigures metrics on the control plane nodes" do
+      nx.incr_install_prometheus_rbac
+      ssh_session = Net::SSH::Connection::Session.allocate
+      expect(nx.kubernetes_cluster).to receive(:client).and_return(Kubernetes::Client.new(kubernetes_cluster, ssh_session))
+      expect(ssh_session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s apply -f /home/ubi/kubernetes/lib/prometheus-rbac.yaml").and_return(Net::SSH::Connection::Session::StringWithExitstatus.new("", 0))
+
+      expect { nx.install_prometheus_rbac }.to hop("wait")
+
+      expect(kubernetes_cluster.install_prometheus_rbac_set?).to be false
+      expect(kubernetes_cluster.reload.nodes.map { it.configure_metrics_set? }).to eq [true, true]
     end
   end
 

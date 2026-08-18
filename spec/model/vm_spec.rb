@@ -185,7 +185,7 @@ RSpec.describe Vm do
       vm.update_spdk_version("b")
 
       expect(vm.vm_storage_volumes.first.spdk_installation_id).to eq(spdk_installation.id)
-      expect(vm.reload.update_spdk_dependency_set?).to be true
+      expect(vm.update_spdk_dependency_set?(cached: false)).to be true
     end
 
     it "fails if spdk installation not found" do
@@ -325,14 +325,14 @@ RSpec.describe Vm do
       expect(session[:ssh_session]).to receive(:_exec!).and_return("active\ninactive\n")
       result = pulse_vm.check_pulse(session:, previous_pulse: pulse)
       expect(result[:reading]).to eq("down")
-      expect(pulse_vm.reload.checkup_set?).to be true
+      expect(pulse_vm.checkup_set?(cached: false)).to be true
     end
 
     it "returns down and increments checkup on SSH error" do
       expect(session[:ssh_session]).to receive(:_exec!).and_raise Sshable::SshError
       result = pulse_vm.check_pulse(session:, previous_pulse: pulse)
       expect(result[:reading]).to eq("down")
-      expect(pulse_vm.reload.checkup_set?).to be true
+      expect(pulse_vm.checkup_set?(cached: false)).to be true
     end
   end
 
@@ -448,6 +448,34 @@ RSpec.describe Vm do
       expect(src["autofetch"]).to be(true)
 
       expect(volumes[1]).not_to have_key("archive_source")
+    end
+
+    it "adds remote_source when volume has remote_storage_server_id" do
+      source_vm = create_archive_ready_vm
+      source_volume = VmStorageVolume.first(vm_id: source_vm.id)
+      source_vm.vm_host.sshable.update(host: "10.0.0.9")
+      rss = RemoteStorageServer.create(
+        source_vm_storage_volume_id: source_volume.id,
+        vm_host_id: source_vm.vm_host_id,
+        psk: Base64.strict_encode64("raw-psk-bytes-0123456789abcdef"),
+        psk_identity: "ubiblk-rss", port: 4600,
+      )
+      VmStorageVolume.where(vm_id: vm.id, disk_index: 0).update(remote_storage_server_id: rss.id, boot_image_id: nil)
+      source_disk_size = 40 * 1024 * 1024 * 1024 + 8 * 1024 * 1024
+      source_sshable = vm.vm_storage_volumes.find { |s| s.disk_index == 0 }.remote_storage_server.vm_host.sshable
+      expect(source_sshable).to receive(:_cmd).with("sudo stat -c %s #{File.join(source_volume.path, "disk.raw")}").and_return("#{source_disk_size}\n")
+
+      volumes = vm.storage_volumes
+
+      expect(volumes[0]).to have_key("remote_source")
+      src = volumes[0]["remote_source"]
+      expect(src["address"]).to eq("10.0.0.9:4600")
+      expect(src["psk_identity"]).to eq("ubiblk-rss")
+      expect(src).to have_key("encrypted_psk")
+      expect(src["autofetch"]).to be(true)
+      expect(src["disk_size_bytes"]).to eq(source_disk_size)
+
+      expect(volumes[1]).not_to have_key("remote_source")
     end
   end
 

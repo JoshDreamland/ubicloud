@@ -111,6 +111,69 @@ RSpec.describe Prog::Kubernetes::KubernetesNodeNexus do
       nx.incr_renew_certs
       expect { nx.wait }.to hop("renew_certs")
     end
+
+    it "hops to configure_metrics when configure_metrics semaphore is set" do
+      nx.incr_configure_metrics
+      expect { nx.wait }.to hop("configure_metrics")
+    end
+  end
+
+  describe "#configure_metrics" do
+    def expect_collector_setup(sshable)
+      expect(sshable).to receive(:_cmd).with("mkdir -p /home/ubi/kubernetes/metrics")
+      expect(sshable).to receive(:_cmd).with("tee /home/ubi/kubernetes/metrics/config.json > /dev/null", stdin: nx.metrics_config.to_json)
+      expect(sshable).to receive(:_cmd).with("sudo tee /etc/systemd/system/kubernetes-metrics.service > /dev/null", stdin: nx.metrics_service)
+      expect(sshable).to receive(:_cmd).with("sudo tee /etc/systemd/system/kubernetes-metrics.timer > /dev/null", stdin: nx.metrics_timer)
+      expect(sshable).to receive(:_cmd).with("sudo systemctl daemon-reload")
+      expect(sshable).to receive(:_cmd).with("sudo systemctl enable --now kubernetes-metrics.timer")
+    end
+
+    it "hops to configure_prometheus on a control plane node and registers a wait deadline" do
+      nx.incr_configure_metrics
+      expect_collector_setup(nx.kubernetes_node.sshable)
+
+      expect { nx.configure_metrics }.to hop("configure_prometheus")
+
+      expect(kd.configure_metrics_set?).to be false
+      frame = nx.strand.stack.first
+      expect(frame["deadline_target"]).to eq "wait"
+      expect(Time.new(frame["deadline_at"].to_s)).to be_within(3).of(Time.now + 30 * 60)
+    end
+
+    it "skips prometheus on a worker node" do
+      kd.update(kubernetes_nodepool_id: Prog::Kubernetes::KubernetesNodepoolNexus.assemble(name: "np", node_count: 1, kubernetes_cluster_id: kc.id).subject.id)
+      expect_collector_setup(nx.kubernetes_node.sshable)
+
+      expect { nx.configure_metrics }.to hop("wait")
+    end
+  end
+
+  describe "#configure_prometheus" do
+    def expect_token_read(encoded)
+      ssh_session = Net::SSH::Connection::Session.allocate
+      expect(nx.cluster).to receive(:client).and_return(Kubernetes::Client.new(kc, ssh_session))
+      expect(ssh_session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s -n kube-system get secret prometheus-metrics -o jsonpath='{.data.token}' --ignore-not-found").and_return(Net::SSH::Connection::Session::StringWithExitstatus.new(encoded, 0))
+    end
+
+    it "writes the token and config, then starts prometheus" do
+      sshable = nx.kubernetes_node.sshable
+      expect_token_read(Base64.strict_encode64("sa-token"))
+      expect(sshable).to receive(:_cmd).with("sudo tee /etc/prometheus/token > /dev/null", stdin: "sa-token")
+      expect(sshable).to receive(:_cmd).with("sudo chown prometheus:prometheus /etc/prometheus/token")
+      expect(sshable).to receive(:_cmd).with("sudo chmod 600 /etc/prometheus/token")
+      expect(sshable).to receive(:_cmd).with("sudo tee /etc/prometheus/prometheus.yml > /dev/null", stdin: nx.prometheus_config)
+      expect(sshable).to receive(:_cmd).with("sudo tee /etc/prometheus/rules.yml > /dev/null", stdin: nx.prometheus_rules)
+      expect(sshable).to receive(:_cmd).with("sudo systemctl enable --now prometheus")
+      expect(sshable).to receive(:_cmd).with("sudo systemctl reload prometheus")
+
+      expect { nx.configure_prometheus }.to hop("wait")
+    end
+
+    it "naps without redoing any work until the service account token exists" do
+      expect_token_read("")
+
+      expect { nx.configure_prometheus }.to nap(10)
+    end
   end
 
   describe "#renew_certs" do
@@ -171,7 +234,7 @@ RSpec.describe Prog::Kubernetes::KubernetesNodeNexus do
       status_json = JSON.generate({"pods" => {"pod-1" => {"reachable" => true}}, "external_endpoints" => {}})
       expect(nx.kubernetes_node.sshable).to receive(:_cmd).with("cat /var/lib/ubicsi/mesh_status.json 2>/dev/null || echo -n").and_return(status_json)
       expect { nx.unavailable }.to hop("wait")
-      expect(kd.reload.checkup_set?).to be false
+      expect(kd.checkup_set?(cached: false)).to be false
     end
 
     it "logs, registers deadline and naps when still unavailable" do

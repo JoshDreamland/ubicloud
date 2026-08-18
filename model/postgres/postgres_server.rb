@@ -29,6 +29,7 @@ class PostgresServer < Sequel::Model
   def before_destroy
     super
     lsn_monitor_ds.delete
+    disk_usage_monitor_ds.delete
   end
 
   def aws?
@@ -90,13 +91,11 @@ class PostgresServer < Sequel::Model
     # VM-size-scaled autovacuum defaults. Everything here is reloadable on every
     # supported version except where noted below.
     validator = Validation::PostgresConfigValidator.new(version)
-    naptime = case vm.vcpus when 0..3 then "30s" when 4..15 then "20s" else "15s" end
+    naptime = case vm.vcpus when 0..3 then "60s" else "30s" end
     configs.merge!(
       "autovacuum_vacuum_cost_delay" => "2ms",
-      "autovacuum_vacuum_cost_limit" => (vm.vcpus * 200).clamp(600, 6000).to_s,
+      "autovacuum_vacuum_cost_limit" => (vm.vcpus * 50).clamp(200, 2400).to_s,
       "autovacuum_naptime" => naptime,
-      "autovacuum_vacuum_scale_factor" => "0.1",
-      "autovacuum_vacuum_insert_scale_factor" => "0.1",
     )
 
     # Raising the worker count needs a restart before PostgreSQL 18, so there we
@@ -117,9 +116,7 @@ class PostgresServer < Sequel::Model
       configs["autovacuum_vacuum_max_threshold"] = "50000000"
     end
 
-    if resource.flavor == PostgresResource::Flavor::PARADEDB
-      configs["shared_preload_libraries"] = "'pg_cron,pg_stat_statements,pg_analytics,pg_search'"
-    elsif resource.flavor == PostgresResource::Flavor::LANTERN
+    if resource.flavor == PostgresResource::Flavor::LANTERN
       configs["shared_preload_libraries"] = "'pg_cron,pg_stat_statements,lantern_extras'"
       configs["lantern.external_index_host"] = "'external-indexing.cloud.lantern.dev'"
       configs["lantern.external_index_port"] = "443"
@@ -308,10 +305,6 @@ class PostgresServer < Sequel::Model
     resource.read_replica?
   end
 
-  def paradedb_and_primary?
-    primary? && resource.flavor == PostgresResource::Flavor::PARADEDB
-  end
-
   def storage_size_gib
     vm.vm_storage_volumes.reject(&:boot).sum(&:size_gib)
   end
@@ -368,6 +361,16 @@ class PostgresServer < Sequel::Model
 
   def last_known_lsn
     lsn_monitor_ds.get(:last_known_lsn)
+  end
+
+  DISK_USAGE_MAX_AGE_SECONDS = 15 * 60
+
+  def disk_usage_monitor_ds
+    POSTGRES_MONITOR_DB[:postgres_disk_usage_monitor].where(postgres_server_id: id)
+  end
+
+  def observed_disk_usage_percent(max_age: DISK_USAGE_MAX_AGE_SECONDS)
+    disk_usage_monitor_ds.where { observed_at > Time.now - max_age }.get(:data_disk_usage_percent)
   end
 
   def failover_target(mode: "unplanned")
@@ -454,12 +457,19 @@ class PostgresServer < Sequel::Model
     }
   end
 
+  # A revoked privilege reads as "down" like any outage, but available? still
+  # answers over SSH as postgres, so the checkup clears and nothing else ever
+  # reports it. Match it here to tell the two apart.
+  MONITORING_ACCESS_DENIED = /permission denied for database|CONNECT privilege|authentication failed for user "ubi_monitoring"|role "ubi_monitoring" does not exist/
+
   def check_pulse(session:, previous_pulse:)
+    access_denied = false
     reading = begin
-      session[:db_connection] ||= Sequel.connect(adapter: "postgres", host: health_monitor_socket_path, port: 5432, database: "postgres", user: "postgres", connect_timeout: 4, keep_reference: false)
+      session[:db_connection] ||= Sequel.connect(adapter: "postgres", host: health_monitor_socket_path, port: 5432, database: "ubi_admin", user: "ubi_monitoring", connect_timeout: 4, keep_reference: false)
       last_known_lsn = session[:db_connection].get(last_lsn_expression.as(:lsn))
       "up"
-    rescue
+    rescue => ex
+      access_denied = MONITORING_ACCESS_DENIED.match?(ex.message)
       "down"
     end
     pulse = aggregate_readings(previous_pulse:, reading:, data: {last_known_lsn:})
@@ -471,6 +481,14 @@ class PostgresServer < Sequel::Model
         rescue Sequel::Error => ex
           Clog.emit("Failed to update last known lsn", {lsn_update_error: Util.exception_to_hash(ex, into: {ubid:, last_known_lsn:})})
         end
+      end
+
+      # Paged rather than logged: this freezes last_known_lsn, which blocks the
+      # async-HA failover guard, and it persists until someone re-grants.
+      if access_denied && pulse[:reading_rpt] > 5
+        Prog::PageNexus.assemble("Postgres monitoring lost its database privileges", ["PGMonitoringAccessDenied", id], ubid, severity: primary? ? "error" : "warning")
+      elsif pulse[:reading] == "up"
+        Page.from_tag_parts("PGMonitoringAccessDenied", id)&.incr_resolve
       end
 
       if pulse[:reading] == "down" && pulse[:reading_rpt] > 5 && Time.now - pulse[:reading_chg] > 30 && !reload.checkup_set?
@@ -531,6 +549,7 @@ class PostgresServer < Sequel::Model
       observe_archival_backlog(session)
       observe_io_throttle(session)
       observe_metrics_backlog(session)
+      observe_replica_lag(session)
     end
 
     # Call parent implementation to export actual metrics
@@ -586,7 +605,12 @@ class PostgresServer < Sequel::Model
       resource_name: resource.name,
       resource_id: resource.ubid,
       log_destinations: destinations,
+      cloudwatch_auth_region: (vm.location.name if aws_cloudwatch_logs?),
     }
+  end
+
+  def aws_cloudwatch_logs?
+    timeline.aws? && resource.project.get_ff_aws_cloudwatch_logs
   end
 
   def managed_parseable_destination
@@ -767,6 +791,9 @@ class PostgresServer < Sequel::Model
   def observe_data_disk_usage(session)
     disk_usage_percent = session[:ssh_session].exec!("df --output=pcent /dat | tail -n 1").strip.delete("%").to_i
     session[:disk_usage_percent] = disk_usage_percent
+    POSTGRES_MONITOR_DB[:postgres_disk_usage_monitor]
+      .insert_conflict(target: :postgres_server_id, update: {data_disk_usage_percent: disk_usage_percent, observed_at: Sequel::CURRENT_TIMESTAMP})
+      .insert(postgres_server_id: id, data_disk_usage_percent: disk_usage_percent, observed_at: Sequel::CURRENT_TIMESTAMP)
     if reload.primary?
       if (disk_usage_percent >= 77 || resource.storage_auto_scale_action_performed_80_set? || resource.storage_auto_scale_canceled_set?) && !resource.check_disk_usage_set?
         resource.incr_check_disk_usage
@@ -795,7 +822,45 @@ class PostgresServer < Sequel::Model
     vm.sshable.cmd("timeout 10 sudo postgres/bin/lockout :version", version:, timeout: 15)
   end
 
+  def observe_replica_lag(session)
+    return if primary? || (read_replica? && resource.parent.nil?)
+
+    parent_server = read_replica? ? resource.parent.representative_server : resource.representative_server
+    return unless (primary_lsn = parent_server.last_known_lsn)
+
+    replay_lsn, replay_age = run_query("SELECT pg_last_wal_replay_lsn(), EXTRACT(EPOCH FROM (NOW() - pg_last_xact_replay_timestamp()))::int").split(",")
+    return if replay_lsn.to_s.empty?
+
+    byte_lag = [lsn_diff(primary_lsn, replay_lsn), 0].max
+    previous_replay_lsn = session[:replica_lag_previous_replay_lsn]
+    session[:replica_lag_previous_replay_lsn] = replay_lsn
+    made_progress = previous_replay_lsn.nil? || lsn_diff(replay_lsn, previous_replay_lsn) > 0
+    byte_breach = byte_lag > REPLICA_LAG_HARD_THRESHOLD_BYTES || (byte_lag > REPLICA_LAG_SOFT_THRESHOLD_BYTES && !made_progress)
+
+    # pg_last_xact_replay_timestamp only advances when a transaction is replayed,
+    # so on an idle primary NOW() - pg_last_xact_replay_timestamp grows without bound.
+    # Take it into account only if standby/replica is genuinely behind the primary's LSN
+    # Otherwise everything has been applied and the time lag is zero.
+    time_lag = (byte_lag > 0 && !replay_age.to_s.empty?) ? Integer(replay_age) : 0
+    time_breach = time_lag > REPLICA_LAG_THRESHOLD_SECONDS
+
+    if byte_breach || time_breach
+      session[:replica_lag_breach_count] = (session[:replica_lag_breach_count] || 0) + 1
+      if session[:replica_lag_breach_count] >= 5
+        Prog::PageNexus.assemble("#{ubid} replica lag high", ["PGReplicaLagHigh", id], ubid, severity: "warning", extra_data: {byte_lag:, time_lag:, read_replica: read_replica?})
+      end
+    elsif byte_lag < REPLICA_LAG_SOFT_THRESHOLD_BYTES * 0.1 && time_lag < REPLICA_LAG_THRESHOLD_SECONDS * 0.1
+      session[:replica_lag_breach_count] = 0
+      Page.from_tag_parts("PGReplicaLagHigh", id)&.incr_resolve
+    end
+  rescue => ex
+    Clog.emit("Failed to observe replica lag", Util.exception_to_hash(ex, into: {postgres_server_id: id}))
+  end
+
   METRICS_BACKLOG_THRESHOLD_SECONDS = 300
+  REPLICA_LAG_SOFT_THRESHOLD_BYTES = 1024 * 1024 * 1024
+  REPLICA_LAG_HARD_THRESHOLD_BYTES = 10 * 1024 * 1024 * 1024
+  REPLICA_LAG_THRESHOLD_SECONDS = 15 * 60
   FAILOVER_LABELS = ["prepare_for_unplanned_take_over", "prepare_for_planned_take_over", "wait_fencing_of_old_primary", "taking_over", "lockout", "wait_lockout_attempt", "wait_representative_lockout"].freeze
   MIN_ARCHIVAL_RATE_BYTES_PER_SEC = 10 * 1024 * 1024
   DISK_THROUGHPUT_BASELINE_MBPS = {

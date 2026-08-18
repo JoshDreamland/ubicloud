@@ -66,6 +66,8 @@ a {
   &:hover { text-decoration: underline; }
 }
 
+.ubid { font-family: monospace; }
+
 input, select, textarea {
   padding: 5px;
   font-size: 1em;
@@ -116,14 +118,20 @@ input[type=submit] {
 }
 /* Checkbox and radio rows: control inline with its label */
 .rollout-form > div:has(> input[type=checkbox]),
-.rollout-form .rollout-radioset {
+.rollout-form .rollout-radioset,
+.rollout-form .rollout-checkboxset {
   display: flex;
   align-items: center;
   gap: 6px;
 }
-.rollout-form .rollout-radioset {
+.rollout-form .rollout-radioset,
+.rollout-form .rollout-checkboxset {
   gap: 4px 12px;
   flex-wrap: wrap;
+}
+.rollout-form .rollout-checkboxset > span.label {
+  flex-basis: 100%;
+  font-weight: 600;
 }
 .rollout-form input[type=submit] {
   margin-top: 16px;
@@ -189,6 +197,19 @@ h1 { font-size: 1.5em; }
 h2 { font-size: 1.3em; }
 h3 { font-size: 1.1em; }
 
+.cogs-page {
+  display: flex;
+  flex-direction: column;
+  gap: 3em;
+}
+
+#cogs-rate-form {
+  display: flex;
+  gap: 5px;
+}
+
+td:has(> .cost) { text-align: right; }
+
 label {
   display: inline-block;
   margin-right: 5px;
@@ -212,9 +233,10 @@ tbody tr {
   td[rowspan] { background-color: var(--bg); }
 }
 caption, .collapsible-table summary {
-  font-size: 1.3em;
+  font-size: 1.1em;
   font-weight: bold;
   text-align: left;
+  margin-bottom: 2px;
 }
 
 .collapsible-table {
@@ -286,6 +308,7 @@ code {
   display: flex;
   gap: 10px;
   align-items: center;
+  flex-wrap: wrap;
 
   & > :not(:first-child) { border-left: 1px solid var(--border); padding-left: 10px; }
 

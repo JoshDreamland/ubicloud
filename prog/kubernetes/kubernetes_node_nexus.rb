@@ -57,7 +57,121 @@ class Prog::Kubernetes::KubernetesNodeNexus < Prog::Base
       hop_renew_certs
     end
 
+    when_configure_metrics_set? do
+      hop_configure_metrics
+    end
+
     nap 6 * 60 * 60
+  end
+
+  label def configure_metrics
+    register_deadline("wait", 30 * 60)
+    decr_configure_metrics
+
+    sshable = kubernetes_node.sshable
+    metrics_dir = metrics_config[:metrics_dir]
+    sshable.cmd("mkdir -p :metrics_dir", metrics_dir:)
+    sshable.write_file("#{metrics_dir}/config.json", metrics_config.to_json, user: :current)
+    sshable.write_file("/etc/systemd/system/kubernetes-metrics.service", metrics_service)
+    sshable.write_file("/etc/systemd/system/kubernetes-metrics.timer", metrics_timer)
+
+    sshable.cmd("sudo systemctl daemon-reload")
+    sshable.cmd("sudo systemctl enable --now kubernetes-metrics.timer")
+
+    hop_wait unless kubernetes_node.control_plane?
+    hop_configure_prometheus
+  end
+
+  label def configure_prometheus
+    encoded_token = cluster.client.kubectl("-n kube-system get secret prometheus-metrics -o jsonpath='{.data.token}' --ignore-not-found")
+    nap 10 if encoded_token.empty?
+
+    sshable = kubernetes_node.sshable
+    sshable.write_file("/etc/prometheus/token", Base64.decode64(encoded_token))
+    sshable.cmd("sudo chown prometheus:prometheus /etc/prometheus/token")
+    sshable.cmd("sudo chmod 600 /etc/prometheus/token")
+    sshable.write_file("/etc/prometheus/prometheus.yml", prometheus_config)
+    sshable.write_file("/etc/prometheus/rules.yml", prometheus_rules)
+    sshable.cmd("sudo systemctl enable --now prometheus")
+    sshable.cmd("sudo systemctl reload prometheus")
+
+    hop_wait
+  end
+
+  def prometheus_config
+    <<CONFIG
+global:
+  scrape_interval: #{metrics_config[:interval]}
+
+rule_files:
+  - /etc/prometheus/rules.yml
+
+scrape_configs:
+- job_name: apiserver
+  scheme: https
+  tls_config:
+    insecure_skip_verify: true
+  bearer_token_file: /etc/prometheus/token
+  static_configs:
+  - targets: ['localhost:6443']
+- job_name: scheduler
+  scheme: https
+  tls_config:
+    insecure_skip_verify: true
+  bearer_token_file: /etc/prometheus/token
+  static_configs:
+  - targets: ['localhost:10259']
+CONFIG
+  end
+
+  def prometheus_rules
+    <<RULES
+groups:
+- name: ubicloud
+  interval: #{metrics_config[:interval]}
+  rules:
+  - record: ubicloud:apiserver_request:rate5m
+    expr: sum by (code) (rate(apiserver_request_total[5m]))
+  - record: ubicloud:apiserver_latency_seconds:p99
+    expr: histogram_quantile(0.99, sum by (verb, le) (rate(apiserver_request_duration_seconds_bucket[5m])))
+  - record: ubicloud:apiserver_latency_seconds:p50
+    expr: histogram_quantile(0.50, sum by (verb, le) (rate(apiserver_request_duration_seconds_bucket[5m])))
+  - record: ubicloud:apiserver_storage_objects:total
+    expr: sum(apiserver_storage_objects)
+RULES
+  end
+
+  def metrics_config
+    @metrics_config ||= kubernetes_node.metrics_config
+  end
+
+  def metrics_service
+    <<SERVICE
+[Unit]
+Description=Kubernetes Node Metrics Collection
+
+[Service]
+Type=oneshot
+User=ubi
+ExecStart=/home/ubi/common/bin/metrics-collector #{metrics_config[:metrics_dir]}
+StandardOutput=journal
+StandardError=journal
+SERVICE
+  end
+
+  def metrics_timer
+    <<TIMER
+[Unit]
+Description=Run Kubernetes Node Metrics Collection Periodically
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=#{metrics_config[:interval]}
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+TIMER
   end
 
   label def renew_certs

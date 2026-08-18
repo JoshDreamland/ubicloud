@@ -9,8 +9,9 @@ class KubernetesNode < Sequel::Model
   many_to_one :kubernetes_nodepool, read_only: true
 
   plugin ResourceMethods
-  plugin SemaphoreMethods, :destroy, :retire, :checkup, :renew_certs
+  plugin SemaphoreMethods, :destroy, :retire, :checkup, :renew_certs, :configure_metrics
   include HealthMonitorMethods
+  include MetricsTargetMethods
 
   MESH_STATUS_FILE_PATH = "/var/lib/ubicsi/mesh_status.json"
 
@@ -18,9 +19,49 @@ class KubernetesNode < Sequel::Model
     vm.sshable
   end
 
+  def control_plane?
+    kubernetes_nodepool_id.nil?
+  end
+
   def init_health_monitor_session
     {
       ssh_session: sshable.start_fresh_session,
+    }
+  end
+
+  def init_metrics_export_session
+    {
+      ssh_session: sshable.start_fresh_session,
+    }
+  end
+
+  FEDERATE_MATCHES = [
+    "{__name__=~\"ubicloud:.*\"}",
+    "apiserver_current_inflight_requests",
+    "apiserver_storage_size_bytes",
+    "scheduler_pending_pods",
+  ].freeze
+
+  def metrics_config
+    endpoints = ["http://localhost:9100/metrics"]
+    if control_plane?
+      query = URI.encode_www_form(FEDERATE_MATCHES.map { ["match[]", it] })
+      endpoints << "http://localhost:9090/federate?#{query}"
+    end
+
+    {
+      endpoints:,
+      max_file_retention: 120,
+      interval: "15s",
+      additional_labels: {
+        ubicloud_resource_id: kubernetes_cluster.ubid,
+        ubicloud_resource_role: control_plane? ? "control-plane" : "worker",
+        instance: name,
+        nodepool: kubernetes_nodepool&.name,
+      }.compact,
+      exclude_metrics: ["^(# (HELP|TYPE) )?node_scrape_collector_"],
+      metrics_dir: "/home/ubi/kubernetes/metrics",
+      project_id: Config.kubernetes_service_project_id,
     }
   end
 
@@ -41,7 +82,7 @@ class KubernetesNode < Sequel::Model
     end
     pulse = aggregate_readings(previous_pulse:, reading:)
 
-    if pulse[:reading] == "down" && pulse[:reading_rpt] > 5 && Time.now - pulse[:reading_chg] > 30 && !checkup_set?
+    if pulse[:reading] == "down" && pulse[:reading_rpt] > 5 && Time.now - pulse[:reading_chg] > 30 && !checkup_set?(cached: false)
       incr_checkup
     end
 

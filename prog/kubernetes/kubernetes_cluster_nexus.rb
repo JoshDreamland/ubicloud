@@ -3,7 +3,9 @@
 class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
   subject_is :kubernetes_cluster
 
-  def self.assemble(name:, project_id:, location_id:, version: Option.selectable_kubernetes_versions.first, cp_node_count: 3, target_node_size: "standard-2", target_node_storage_size_gib: nil)
+  frame_reader :machine_image_version_id
+
+  def self.assemble(name:, project_id:, location_id:, version: Option.selectable_kubernetes_versions.first, cp_node_count: 3, target_node_size: "standard-2", target_node_storage_size_gib: nil, machine_image_version_id: nil)
     DB.transaction do
       unless (project = Project[project_id])
         fail "No existing project"
@@ -50,7 +52,7 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
       id = ubid.to_uuid
       KubernetesCluster.create_with_id(id, name:, version:, cp_node_count:, location_id:, target_node_size:, target_node_storage_size_gib:, project_id: project.id, private_subnet_id: subnet.id)
 
-      Strand.create_with_id(id, prog: "Kubernetes::KubernetesClusterNexus", label: "start")
+      Strand.create_with_id(id, prog: "Kubernetes::KubernetesClusterNexus", label: "start", stack: [{"machine_image_version_id" => machine_image_version_id}])
     end
   end
 
@@ -85,6 +87,7 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
     register_deadline("wait", 120 * 60)
     Prog::Kubernetes::EtcdBackupNexus.assemble(kubernetes_cluster.id)
     incr_install_metrics_server
+    incr_install_prometheus_rbac
     incr_sync_worker_mesh
     incr_install_csi
     incr_sync_internal_dns_config
@@ -139,7 +142,7 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
 
     hop_wait_nodes if kubernetes_cluster.nodes.count >= kubernetes_cluster.cp_node_count
 
-    bud Prog::Kubernetes::ProvisionKubernetesNode, {"subject_id" => kubernetes_cluster.id}
+    bud Prog::Kubernetes::ProvisionKubernetesNode, {"subject_id" => kubernetes_cluster.id, "machine_image_version_id" => machine_image_version_id}
 
     hop_wait_control_plane_node
   end
@@ -239,6 +242,10 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
       hop_install_csi
     end
 
+    when_install_prometheus_rbac_set? do
+      hop_install_prometheus_rbac
+    end
+
     when_update_billing_records_set? do
       hop_update_billing_records
     end
@@ -308,6 +315,15 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
 
   label def wait_upgrade
     reap(:upgrade)
+  end
+
+  label def install_prometheus_rbac
+    decr_install_prometheus_rbac
+
+    kubernetes_cluster.client.kubectl("apply -f /home/ubi/kubernetes/lib/prometheus-rbac.yaml")
+    KubernetesNode.incr_configure_metrics(kubernetes_cluster.nodes_dataset.select(:id))
+
+    hop_wait
   end
 
   label def install_metrics_server

@@ -260,7 +260,7 @@ RSpec.describe Prog::Postgres::PostgresWalShadowNexus do
         sudo install -d /etc/postgresql-common/createcluster.d
         echo create_main_cluster=false | sudo tee /etc/postgresql-common/createcluster.d/no-main.conf
         sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-        sudo DEBIAN_FRONTEND=noninteractive apt-get -y install postgresql-17 postgresql-server-dev-17
+        sudo DEBIAN_FRONTEND=noninteractive apt-get -y install postgresql-18 postgresql-server-dev-18
         curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
       SCRIPT
     end
@@ -337,7 +337,7 @@ RSpec.describe Prog::Postgres::PostgresWalShadowNexus do
         [Service]
         User=postgres
         RuntimeDirectory=walshadow
-        Environment=PATH=/usr/lib/postgresql/17/bin:/usr/bin:/bin
+        Environment=PATH=/usr/lib/postgresql/18/bin:/usr/bin:/bin
         Environment=WALSHADOW_SOURCE_HOST=#{nx.postgres_resource.representative_server.vm.private_ipv4_string}
         Environment=WALSHADOW_SOURCE_PASSWORD=dummy-password
         ExecStartPre=+/usr/bin/install -d -o postgres -g postgres /var/lib/walshadow /var/lib/walshadow/out /var/lib/walshadow/spill

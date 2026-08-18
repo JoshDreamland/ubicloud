@@ -3,13 +3,7 @@
 require_relative "../model"
 
 class StorageDevice < Sequel::Model
-  many_to_one :vm_host, read_only: true
-
   plugin ResourceMethods, etc_type: true
-
-  def migrate_device_name_to_device_id
-    update(unix_device_list: unix_device_list.map { |device_name| StorageDevice.convert_device_name_to_device_id(vm_host.sshable, device_name) })
-  end
 
   # We have both raided and non-raided servers, in non-raided servers, we can call blkid to get the uuid
   # but in the case of raided servers, all the underlying disk devices will be shown with the same uuid of the raid device

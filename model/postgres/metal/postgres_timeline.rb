@@ -77,6 +77,15 @@ PGDATA=/dat/#{version}/data
       true
     end
 
+    def metal_create_download_credentials(duration_seconds: DOWNLOAD_CREDENTIALS_DURATION_SECONDS)
+      blob_storage_client.assume_role(policy: download_blob_storage_policy, duration_seconds:)
+    end
+
+    # MinIO downloads scope access via an inline AssumeRole policy per request, so there
+    # is no standing policy that needs re-applying for older timelines.
+    def metal_refresh_blob_storage_policy
+    end
+
     def blob_storage_admin_client
       Minio::Client.new(
         endpoint: blob_storage_endpoint,

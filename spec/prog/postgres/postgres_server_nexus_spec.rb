@@ -487,7 +487,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
 
   describe "#initialize_empty_database" do
     it "triggers initialize_empty_database if initialize_empty_database command is not sent yet or failed" do
-      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run initialize_empty_database sudo postgres/bin/initialize-empty-database 17 true", {log: true, stdin: nil}).twice
+      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run initialize_empty_database sudo postgres/bin/initialize-empty-database 18 true", {log: true, stdin: nil}).twice
 
       # NotStarted
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 check initialize_empty_database").and_return("NotStarted")
@@ -511,7 +511,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
     it "passes false for strict overcommit when skip_strict_memory_overcommit semaphore is set" do
       postgres_resource.incr_skip_strict_memory_overcommit
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 check initialize_empty_database").and_return("NotStarted")
-      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run initialize_empty_database sudo postgres/bin/initialize-empty-database 17 false", {log: true, stdin: nil})
+      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run initialize_empty_database sudo postgres/bin/initialize-empty-database 18 false", {log: true, stdin: nil})
       expect { nx.initialize_empty_database }.to nap(5)
     end
   end
@@ -520,7 +520,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
     it "triggers initialize_database_from_backup if initialize_database_from_backup command is not sent yet or failed" do
       postgres_resource.update(restore_target: Time.now)
       expect(server.timeline).to receive(:latest_backup_label_before_target).and_return("backup-label").twice
-      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run initialize_database_from_backup sudo postgres/bin/initialize-database-from-backup 17 backup-label true recovery", {log: true, stdin: nil}).twice
+      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run initialize_database_from_backup sudo postgres/bin/initialize-database-from-backup 18 backup-label true recovery", {log: true, stdin: nil}).twice
 
       # NotStarted
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 check initialize_database_from_backup").and_return("NotStarted")
@@ -564,7 +564,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       postgres_resource.incr_skip_strict_memory_overcommit
       expect(server.timeline).to receive(:latest_backup_label_before_target).and_return("backup-label")
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 check initialize_database_from_backup").and_return("NotStarted")
-      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run initialize_database_from_backup sudo postgres/bin/initialize-database-from-backup 17 backup-label false recovery", {log: true, stdin: nil})
+      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run initialize_database_from_backup sudo postgres/bin/initialize-database-from-backup 18 backup-label false recovery", {log: true, stdin: nil})
       expect { nx.initialize_database_from_backup }.to nap(5)
     end
 
@@ -574,7 +574,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       standby_nx = described_class.new(standby.strand)
       standby_sshable = standby_nx.postgres_server.vm.sshable
       expect(standby_sshable).to receive(:_cmd).with("common/bin/daemonizer2 check initialize_database_from_backup").and_return("NotStarted")
-      expect(standby_sshable).to receive(:_cmd).with("common/bin/daemonizer2 run initialize_database_from_backup sudo postgres/bin/initialize-database-from-backup 17 LATEST true standby", {log: true, stdin: nil})
+      expect(standby_sshable).to receive(:_cmd).with("common/bin/daemonizer2 run initialize_database_from_backup sudo postgres/bin/initialize-database-from-backup 18 LATEST true standby", {log: true, stdin: nil})
       expect { standby_nx.initialize_database_from_backup }.to nap(5)
     end
 
@@ -683,7 +683,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       expect(sshable).to receive(:_cmd).with("sudo chgrp cert_readers /etc/ssl/certs/server.key && sudo chmod 640 /etc/ssl/certs/server.key")
       expect(sshable).to receive(:_cmd).with("sudo chgrp cert_readers /etc/ssl/certs/client.crt && sudo chmod 640 /etc/ssl/certs/client.crt")
       expect(sshable).to receive(:_cmd).with("sudo chgrp cert_readers /etc/ssl/certs/client.key && sudo chmod 640 /etc/ssl/certs/client.key")
-      expect(sshable).to receive(:_cmd).with("sudo -u postgres pg_ctlcluster 17 main reload")
+      expect(sshable).to receive(:_cmd).with("sudo -u postgres pg_ctlcluster 18 main reload")
       expect(sshable).to receive(:_cmd).with("sudo systemctl reload pgbouncer@*.service")
       expect(server).to receive(:refresh_walg_credentials)
       expect { nx.refresh_certificates }.to hop("wait")
@@ -720,7 +720,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       expect(sshable).to receive(:_cmd).with("sudo chown ubi_monitoring:ubi_monitoring /var/lib/node_exporter")
       expect(sshable).to receive(:_cmd).with(
         "sudo tee /etc/systemd/system/pg-collect-metrics.service > /dev/null",
-        stdin: /User=ubi_monitoring.*SupplementaryGroups=ubi.*AmbientCapabilities=CAP_DAC_READ_SEARCH/m,
+        stdin: %r{User=ubi_monitoring.*AmbientCapabilities=CAP_DAC_READ_SEARCH.*ExecStart=/usr/bin/env ruby}m,
       )
       expect(sshable).to receive(:_cmd).with("sudo tee /etc/systemd/system/pg-collect-metrics.timer > /dev/null", stdin: anything)
       expect(sshable).to receive(:_cmd).with("sudo systemctl daemon-reload")
@@ -927,12 +927,21 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
 
     it "includes remote_write config when metric_destinations exist" do
       server
-      # Create a metric destination to trigger the map block
       PostgresMetricDestination.create(
         postgres_resource:,
-        url: "https://metrics.example.com/write",
+        url: "https://basic.example.com/write",
         username: "metrics_user",
         password: "metrics_pass",
+      )
+      PostgresMetricDestination.create(
+        postgres_resource:,
+        url: "https://bearer.example.com/write",
+        options: {"authorization" => {"type" => "Bearer", "credentials" => "my_token"}},
+      )
+      PostgresMetricDestination.create(
+        postgres_resource:,
+        url: "https://headers.example.com/write",
+        options: {"headers" => {"X-Scope-OrgID" => "tenant1"}},
       )
 
       standby = create_postgres_server(resource: postgres_resource, timeline: postgres_timeline, is_representative: false)
@@ -942,12 +951,13 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       allow(Config).to receive(:postgres_otel_otlp_export_enabled).and_return(true)
       expect(standby_nx).to receive(:setup_otel)
       expect(standby_nx).to receive(:setup_override_metrics)
+      prometheus_config = nil
 
       # Prometheus expectations
       expect(standby_sshable).to receive(:_cmd).with("sudo mkdir -p /usr/local/share/postgresql")
       expect(standby_sshable).to receive(:_cmd).with("sudo tee /usr/local/share/postgresql/postgres_exporter_queries.yaml > /dev/null", stdin: anything)
       expect(standby_sshable).to receive(:_cmd).with("sudo -u prometheus tee /home/prometheus/web-config.yml > /dev/null", stdin: anything)
-      expect(standby_sshable).to receive(:_cmd).with("sudo -u prometheus tee /home/prometheus/prometheus.yml > /dev/null", stdin: /remote_write:.*url:.*metrics\.example\.com/m)
+      expect(standby_sshable).to receive(:_cmd).with("sudo -u prometheus tee /home/prometheus/prometheus.yml > /dev/null", stdin: anything) { |_, stdin:| prometheus_config = stdin }
 
       # Configure metrics expectations
       expect(standby_server).to receive(:metrics_config).and_return(metrics_config)
@@ -968,6 +978,12 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       expect(standby_sshable).to receive(:_cmd).with("sudo systemctl reload otelcol-contrib || sudo systemctl restart otelcol-contrib")
 
       expect { standby_nx.configure_metrics }.to hop("wait")
+
+      expect(YAML.safe_load(prometheus_config)["remote_write"].sort_by { it["url"] }).to eq([
+        {"url" => "https://basic.example.com/write", "basic_auth" => {"username" => "metrics_user", "password" => "metrics_pass"}},
+        {"url" => "https://bearer.example.com/write", "authorization" => {"type" => "Bearer", "credentials" => "my_token"}},
+        {"url" => "https://headers.example.com/write", "headers" => {"X-Scope-OrgID" => "tenant1"}},
+      ])
     end
   end
 
@@ -1057,11 +1073,20 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
   end
 
   describe "#setup_cloudwatch" do
-    it "hops to setup_hugepages after setting up cloudwatch" do
+    it "collects the postgresql log files only, then hops to setup_hugepages" do
+      written = nil
       expect(sshable).to receive(:_cmd).with("sudo mkdir -p /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.d")
-      expect(sshable).to receive(:_cmd).with("sudo tee /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.d/001-ubicloud-config.json > /dev/null", stdin: anything)
+      expect(sshable).to receive(:_cmd).with("sudo tee /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.d/001-ubicloud-config.json > /dev/null", stdin: anything) { |_, stdin:| written = stdin }
       expect(sshable).to receive(:_cmd).with("sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.d/001-ubicloud-config.json -s")
       expect { nx.setup_cloudwatch }.to hop("setup_hugepages")
+
+      collect_list = JSON.parse(written).dig("logs", "logs_collected", "files", "collect_list")
+      expect(collect_list).to eq([{
+        "file_path" => "/dat/#{server.version}/data/pg_log/postgresql-*.log",
+        "log_group_name" => "/#{server.ubid}/postgresql",
+        "log_stream_name" => "#{server.ubid}/postgresql",
+        "timestamp_format" => "%Y-%m-%d %H:%M:%S",
+      }])
     end
   end
 
@@ -1069,45 +1094,6 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
     it "hops to configure if the setup succeeds" do
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 check setup_hugepages").and_return("Succeeded")
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 clean setup_hugepages")
-      expect { nx.setup_hugepages }.to hop("configure")
-    end
-
-    it "installs paradedb packages during initial provisioning before hopping to configure" do
-      nx.incr_initial_provisioning
-      postgres_server.resource.update(flavor: PostgresResource::Flavor::PARADEDB)
-      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 check setup_hugepages").and_return("Succeeded")
-      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 clean setup_hugepages")
-      expect(sshable).to receive(:_cmd).with(<<CMD).and_return("")
-set -ueo pipefail
-sudo apt-get install -y /var/cache/paradedb/postgresql-17-pg-analytics.deb /var/cache/paradedb/postgresql-17-pg-search.deb
-CMD
-      expect { nx.setup_hugepages }.to hop("configure")
-    end
-
-    it "installs paradedb packages on standbys as well, since the extension libraries are preloaded regardless of role" do
-      server
-      standby = create_postgres_server(resource: postgres_resource, timeline: postgres_timeline, is_representative: false)
-      postgres_resource.update(flavor: PostgresResource::Flavor::PARADEDB)
-      standby_nx = described_class.new(standby.strand)
-      standby_sshable = standby_nx.postgres_server.vm.sshable
-      standby_nx.incr_initial_provisioning
-      expect(standby_sshable).to receive(:_cmd).with("common/bin/daemonizer2 check setup_hugepages").and_return("Succeeded")
-      expect(standby_sshable).to receive(:_cmd).with("common/bin/daemonizer2 clean setup_hugepages")
-      expect(standby_sshable).to receive(:_cmd).with(<<CMD).and_return("")
-set -ueo pipefail
-sudo apt-get install -y /var/cache/paradedb/postgresql-17-pg-analytics.deb /var/cache/paradedb/postgresql-17-pg-search.deb
-CMD
-      expect { standby_nx.setup_hugepages }.to hop("configure")
-    end
-
-    it "does not install paradedb packages for standard flavor during initial provisioning" do
-      nx.incr_initial_provisioning
-      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 check setup_hugepages").and_return("Succeeded")
-      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 clean setup_hugepages")
-      expect(sshable).not_to receive(:_cmd).with(<<CMD)
-set -ueo pipefail
-sudo apt-get install -y /var/cache/paradedb/postgresql-17-pg-analytics.deb /var/cache/paradedb/postgresql-17-pg-search.deb
-CMD
       expect { nx.setup_hugepages }.to hop("configure")
     end
 
@@ -1132,7 +1118,7 @@ CMD
   describe "#configure" do
     it "triggers configure if configure command is not sent yet or failed" do
       expect(server).to receive(:configure_hash).and_return("dummy-configure-hash").twice
-      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run configure_postgres sudo postgres/bin/configure 17", {log: true, stdin: JSON.generate("dummy-configure-hash")}).twice
+      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run configure_postgres sudo postgres/bin/configure 18", {log: true, stdin: JSON.generate("dummy-configure-hash")}).twice
 
       # NotStarted
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 check configure_postgres").and_return("NotStarted")
@@ -1146,7 +1132,7 @@ CMD
     it "handles use_physical_slot semaphore" do
       expect(server).to receive(:configure_hash).and_return("dummy-configure-hash")
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 check configure_postgres").and_return("NotStarted")
-      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run configure_postgres sudo postgres/bin/configure 17", {log: true, stdin: JSON.generate("dummy-configure-hash")})
+      expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 run configure_postgres sudo postgres/bin/configure 18", {log: true, stdin: JSON.generate("dummy-configure-hash")})
       server.incr_use_physical_slot
       expect { nx.configure }.to nap(5)
       expect(server.use_physical_slot_set?).to be true
@@ -1217,7 +1203,7 @@ CMD
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 clean configure_postgres").and_return("Succeeded")
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 check configure_postgres").and_return("Succeeded")
       expect { nx.configure }.to hop("wait")
-      expect(standby_nx.postgres_server.reload.use_physical_slot_set?).to be true
+      expect(standby_nx.postgres_server.use_physical_slot_set?(cached: false)).to be true
       expect(standby_nx.postgres_server.configure_set?).to be true
     end
 
@@ -1228,7 +1214,7 @@ CMD
       expect(sshable).to receive(:_cmd).with("common/bin/daemonizer2 check configure_postgres").and_return("Succeeded")
       nx.postgres_server.timeline_access = "fetch"
       expect { nx.configure }.to hop("wait")
-      expect(standby_nx.postgres_server.reload.use_physical_slot_set?).to be false
+      expect(standby_nx.postgres_server.use_physical_slot_set?(cached: false)).to be false
       expect(standby_nx.postgres_server.configure_set?).to be false
     end
 
@@ -1283,17 +1269,7 @@ CMD
       ).and_return("")
     end
 
-    it "creates extensions for non-standard flavor and hops wait when succeeded" do
-      postgres_server.resource.update(flavor: PostgresResource::Flavor::PARADEDB)
-      expect(sshable).to receive(:d_check).with("post_installation_script").and_return("Succeeded")
-      expect(sshable).to receive(:_cmd).with(
-        "PGOPTIONS='-c statement_timeout=60s' psql -U postgres -t --csv -v 'ON_ERROR_STOP=1'",
-        hash_including(stdin: /CREATE EXTENSION IF NOT EXISTS pg_cron/),
-      ).and_return("")
-      expect { nx.run_post_installation_script }.to hop("wait")
-    end
-
-    it "hops wait when succeeded on standard flavor (pg_stat_ch created by override)" do
+    it "hops to wait when succeeded" do
       allow(sshable).to receive(:d_check).with("post_installation_script").and_return("Succeeded")
       expect { nx.run_post_installation_script }.to hop("wait")
     end
@@ -1499,7 +1475,7 @@ CMD
       expect(nx).to receive(:register_deadline).with("complete_restart", 2 * 60)
       expect(nx).to receive(:daemonized_restart).and_return(false)
       expect { nx.wait }.to nap(1)
-      expect(postgres_server.reload.checkup_set?).to be false
+      expect(postgres_server.checkup_set?(cached: false)).to be false
     end
 
     it "hops to configure_metrics if configure_metrics is set" do
@@ -1664,7 +1640,7 @@ CMD
       expect(nx).to receive(:available?).and_return(false)
       expect(nx).to receive(:daemonized_restart)
       expect { nx.unavailable }.to nap(5)
-      expect(postgres_server.reload.recycle_unavailable_server_set?).to be true
+      expect(postgres_server.recycle_unavailable_server_set?(cached: false)).to be true
     end
 
     it "calls daemonized_restart without incrementing recycle when recycle is already set" do
@@ -1681,14 +1657,14 @@ CMD
       expect(nx).to receive(:daemonized_restart)
       expect { nx.unavailable }.to nap(5)
       expect(Strand.where(prog: "Postgres::ConvergePostgresResource", label: "start").count).to eq 1
-      expect(postgres_server.reload.recycle_unavailable_server_set?).to be true
+      expect(postgres_server.recycle_unavailable_server_set?(cached: false)).to be true
     end
 
     it "keeps recycling the server when a dead host makes the restart raise" do
       expect(nx).to receive(:available?).and_return(false)
       expect(sshable).to receive(:d_check).with("postgres_restart").and_raise(Net::SSH::Disconnect)
       expect { nx.unavailable }.to nap(5)
-      expect(postgres_server.reload.recycle_unavailable_server_set?).to be true
+      expect(postgres_server.recycle_unavailable_server_set?(cached: false)).to be true
     end
 
     it "trigger_failover succeeds, naps 0" do
@@ -1707,9 +1683,9 @@ CMD
     it "runs checkpoints and perform lockout" do
       expect(nx).to receive(:decr_fence)
       expect(server).to receive(:_run_query).with("CHECKPOINT; CHECKPOINT; CHECKPOINT;")
-      expect(sshable).to receive(:_cmd).with("sudo postgres/bin/lockout 17")
+      expect(sshable).to receive(:_cmd).with("sudo postgres/bin/lockout 18")
       expect(sshable).to receive(:_cmd).with("sudo systemctl stop postgres-metrics.timer")
-      expect(sshable).to receive(:_cmd).with("sudo pg_ctlcluster 17 main stop -m fast")
+      expect(sshable).to receive(:_cmd).with("sudo pg_ctlcluster 18 main stop -m fast")
       expect { nx.fence }.to hop("wait_in_fence")
     end
 
@@ -1867,13 +1843,13 @@ CMD
   describe "#promote_read_replica" do
     it "runs promote command if not started yet" do
       expect(sshable).to receive(:d_check).with("promote_postgres").and_return("NotStarted")
-      expect(sshable).to receive(:d_run).with("promote_postgres", "sudo", "postgres/bin/promote", "17")
+      expect(sshable).to receive(:d_run).with("promote_postgres", "sudo", "postgres/bin/promote", "18")
       expect { nx.promote_read_replica }.to nap(5)
     end
 
     it "retries promote command if previous run failed" do
       expect(sshable).to receive(:d_check).with("promote_postgres").and_return("Failed")
-      expect(sshable).to receive(:d_run).with("promote_postgres", "sudo", "postgres/bin/promote", "17")
+      expect(sshable).to receive(:d_run).with("promote_postgres", "sudo", "postgres/bin/promote", "18")
       expect { nx.promote_read_replica }.to nap(5)
     end
 
@@ -1905,14 +1881,14 @@ CMD
 
   describe "#taking_over" do
     it "triggers promote if promote command is not sent yet" do
-      expect(sshable).to receive(:d_run).with("promote_postgres", "sudo", "postgres/bin/promote", "17")
+      expect(sshable).to receive(:d_run).with("promote_postgres", "sudo", "postgres/bin/promote", "18")
 
       expect(sshable).to receive(:d_check).with("promote_postgres").and_return("NotStarted")
       expect { nx.taking_over }.to nap(0)
     end
 
     it "retries if promote command is failed" do
-      expect(sshable).to receive(:d_run).with("promote_postgres", "sudo", "postgres/bin/promote", "17")
+      expect(sshable).to receive(:d_run).with("promote_postgres", "sudo", "postgres/bin/promote", "18")
 
       expect(sshable).to receive(:d_check).with("promote_postgres").and_return("Failed")
       expect { nx.taking_over }.to nap(0)
@@ -1977,7 +1953,7 @@ CMD
     end
 
     it "resolves server-keyed pages so they do not orphan after the server is gone" do
-      tags = %w[PGDiskUsageHigh PGRootDiskUsageHigh PGArchivalBacklogHigh PGMetricsBacklogHigh PGIOThrottleStale PGInitializeDatabaseFromBackupFailed]
+      tags = %w[PGDiskUsageHigh PGRootDiskUsageHigh PGArchivalBacklogHigh PGMetricsBacklogHigh PGIOThrottleStale PGInitializeDatabaseFromBackupFailed PGReplicaLagHigh]
       pages = tags.map { Prog::PageNexus.assemble("#{postgres_server.ubid} #{it}", [it, postgres_server.id], postgres_server.ubid).subject }
 
       expect { nx.destroy }.to hop("wait_children_destroy")
@@ -2049,7 +2025,7 @@ CMD
     end
 
     it "returns true if the resource is upgrading" do
-      postgres_resource.update(target_version: "18")
+      server.update(version: "17")
       expect(server.resource).to receive(:upgrade_candidate_server).and_return(server)
       expect(nx.available?).to be(true)
     end
@@ -2106,6 +2082,74 @@ CMD
       expect(sshable).to receive(:d_check).with("postgres_restart").and_raise(Net::SSH::Disconnect)
       expect(Clog).to receive(:emit).with("Postgres restart failed", instance_of(Hash)).and_call_original
       expect(nx.daemonized_restart).to be false
+    end
+  end
+
+  describe "network metering" do
+    before { allow(Config).to receive(:control_plane_outbound_cidrs).and_return(["0.0.0.0/0", "::/0"]) }
+
+    describe "#network_metering_control_plane_cidrs" do
+      it "drops 0.0.0.0/0 and ::/0 supernets and partitions the rest by IP version" do
+        expect(Config).to receive(:control_plane_outbound_cidrs).and_return(["0.0.0.0/0", "::/0", "3.143.188.173/32", "2600:1f14::/56"])
+        expect(nx.network_metering_control_plane_cidrs).to eq({"v4" => ["3.143.188.173/32"], "v6" => ["2600:1f14::/56"]})
+      end
+
+      it "returns empty lists when only supernets are configured" do
+        expect(nx.network_metering_control_plane_cidrs).to eq({"v4" => [], "v6" => []})
+      end
+    end
+
+    describe "#network_metering_rules" do
+      it "returns the six default rules with priorities in ascending order" do
+        ids = nx.network_metering_rules("aws", {}).map { |r| r["id"] }
+        expect(ids).to contain_exactly("internal", "control_plane", "excluded_svc", "intra_region", "inter_region_t1", "public_internet")
+      end
+
+      it "bakes partition cidrs into provider-source rules" do
+        parts = {"intra_region" => {"v4" => ["3.248.0.0/13"], "v6" => []},
+                 "inter_region_t1" => {"v4" => ["13.124.0.0/16"], "v6" => []},
+                 "excluded_svc" => {"v4" => ["52.218.0.0/17"], "v6" => []}}
+        rules = nx.network_metering_rules("aws", parts).to_h { |r| [r["id"], r["cidrs"]] }
+        expect(rules["intra_region"]).to eq(parts["intra_region"])
+        expect(rules["inter_region_t1"]).to eq(parts["inter_region_t1"])
+        expect(rules["excluded_svc"]).to eq(parts["excluded_svc"])
+      end
+    end
+
+    describe "#network_metering_config" do
+      it "composes config with cidrs from provider_ip_range rows" do
+        ProviderIpRange.create(location_id: postgres_server.resource.location_id, bucket_id: "intra_region", ip_version: 4, cidrs: Sequel.pg_array(["3.248.0.0/13"], :cidr))
+        cfg = nx.network_metering_config("aws")
+        expect(cfg["version"]).to eq(1)
+        expect(cfg["region"]).to eq(postgres_server.resource.location.metering_region)
+        expect(cfg["provider"]).to eq("aws")
+        priorities = cfg["rules"].map { |r| r["priority"] }
+        expect(priorities).to eq(priorities.sort)
+        expect(cfg["rules"].find { |r| r["id"] == "intra_region" }["cidrs"]["v4"]).to eq(["3.248.0.0/13"])
+      end
+    end
+
+    describe "#install_network_metering" do
+      it "no-ops when the pg_network_metering_enabled flag is off" do
+        expect(sshable).not_to receive(:_cmd)
+        nx.install_network_metering("aws")
+      end
+
+      context "when the flag is on" do
+        before { allow(Config).to receive(:pg_network_metering_enabled).and_return(true) }
+
+        it "no-ops on metal providers" do
+          expect(sshable).not_to receive(:_cmd)
+          nx.install_network_metering("hetzner")
+        end
+
+        it "writes config and delegates apply to rhizome" do
+          expect(sshable).to receive(:_cmd).with("sudo install -d -m 0755 /etc/pg-metering")
+          expect(sshable).to receive(:write_file).with(described_class::NETWORK_METERING_CONFIG_PATH, kind_of(String))
+          expect(sshable).to receive(:_cmd).with("sudo /home/ubi/postgres/bin/apply-metering-config")
+          nx.install_network_metering("aws")
+        end
+      end
     end
   end
 end

@@ -56,12 +56,12 @@ RSpec.describe KubernetesCluster do
     kc.incr_upgrade
     kc.reload
     expect(kc.display_state).to eq "upgrading"
-    Semaphore.where(strand_id: kc.id, name: "upgrade").destroy
+    Semaphore.where(strand_id: kc.id, name: "upgrade").delete
 
     kc.incr_upgrade_nodepools
     kc.reload
     expect(kc.display_state).to eq "upgrading"
-    Semaphore.where(strand_id: kc.id, name: "upgrade_nodepools").destroy
+    Semaphore.where(strand_id: kc.id, name: "upgrade_nodepools").delete
 
     kc.incr_destroy
     kc.reload
@@ -125,19 +125,19 @@ RSpec.describe KubernetesCluster do
     kc.incr_upgrade
     expect(kc.reload.ready_for_upgrade?).to be false
 
-    Semaphore.where(strand_id: kc.id, name: "upgrade").destroy
+    Semaphore.where(strand_id: kc.id, name: "upgrade").delete
     kc.incr_upgrade_nodepools
     expect(kc.reload.ready_for_upgrade?).to be false
 
-    Semaphore.where(strand_id: kc.id, name: "upgrade_nodepools").destroy
+    Semaphore.where(strand_id: kc.id, name: "upgrade_nodepools").delete
     np2.incr_upgrade_requested
     expect(kc.reload.ready_for_upgrade?).to be false
 
-    Semaphore.where(strand_id: np2.id, name: "upgrade_requested").destroy
+    Semaphore.where(strand_id: np2.id, name: "upgrade_requested").delete
     np2.incr_scale_worker_count
     expect(kc.reload.ready_for_upgrade?).to be false
 
-    Semaphore.where(strand_id: np2.id, name: "scale_worker_count").destroy
+    Semaphore.where(strand_id: np2.id, name: "scale_worker_count").delete
     kc.incr_sync_kubeconfig
     expect(kc.reload.ready_for_upgrade?).to be true
   end
@@ -226,7 +226,17 @@ RSpec.describe KubernetesCluster do
       expect(ssh_session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s get pv -ojson").and_return(pv_response).ordered
 
       expect(kc.check_pulse(session:, previous_pulse: down_pulse)[:reading]).to eq("up")
-      expect(kc.reload.sync_kubernetes_services_set?).to be true
+      expect(kc.sync_kubernetes_services_set?(cached: false)).to be true
+    end
+
+    it "keeps a single sync_kubernetes_services semaphore across pulses" do
+      LoadBalancerPort.create(load_balancer_id: lb.id, src_port: 80, dst_port: 30000)
+      kc.incr_sync_kubernetes_services
+      pv_response = Net::SSH::Connection::Session::StringWithExitstatus.new(JSON.generate({"items" => []}), 0)
+      expect(ssh_session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s get pv -ojson").and_return(pv_response)
+
+      expect(kc.check_pulse(session:, previous_pulse: up_pulse)[:reading]).to eq("up")
+      expect(Semaphore.where(strand_id: kc.id, name: "sync_kubernetes_services").count).to eq 1
     end
 
     it "checks pulse on with no changes to the internal services" do
@@ -275,7 +285,7 @@ RSpec.describe KubernetesCluster do
 
       expect(kc.check_pulse(session:, previous_pulse: up_pulse)[:reading]).to eq("up")
       page = Page.from_tag_parts("KubernetesClusterPVMigrationStuck", kc.id)
-      expect(page.reload.resolve_set?).to be true
+      expect(page.resolve_set?(cached: false)).to be true
     end
 
     [IOError.new("closed stream"), Errno::ECONNRESET.new("recvfrom(2)")].each do |ex|
@@ -420,14 +430,15 @@ RSpec.describe KubernetesCluster do
   end
 
   describe "#install_rhizome" do
-    it "creates a strand for each control plane vm to update the contents of rhizome folder" do
-      sshable = create_mock_sshable(id: "someid")
-      KubernetesNode.create(vm_id: create_vm.id, kubernetes_cluster_id: kc.id)
-      expect(kc.cp_vms.first).to receive(:sshable).and_return(sshable).twice
-      kc.cp_vms.each do |vm|
-        expect(Strand).to receive(:create).with(prog: "InstallRhizome", label: "start", stack: [{subject_id: vm.sshable.id, target_folder: "kubernetes"}])
-      end
-      kc.install_rhizome
+    it "creates a strand for each control plane node to update the contents of rhizome folder" do
+      node = Prog::Kubernetes::KubernetesNodeNexus.assemble(Config.kubernetes_service_project_id, sshable_unix_user: "ubi", name: "test-node", location_id: Location::HETZNER_FSN1_ID, size: "standard-2", storage_volumes: [{encrypted: true, size_gib: 40}], boot_image: "kubernetes-#{kc.version.tr(".", "_")}", enable_ip4: true, kubernetes_cluster_id: kc.id).subject
+
+      result = kc.install_rhizome
+      expect(result.count).to eq(1)
+      strand = result.first
+
+      expect(strand.prog).to eq "InstallRhizome"
+      expect(strand.stack.first["subject_id"]).to eq node.vm.sshable.id
     end
   end
 

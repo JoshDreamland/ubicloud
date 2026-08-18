@@ -6,7 +6,7 @@ source "https://rubygems.org"
 #
 # * Gemfile (this file)
 # * Dockerfile (2 places)
-# * .tool_versions
+# * mise.toml
 #
 # Then update the setup-ruby action hash/tag comment in the following action/workflow files:
 #
@@ -18,7 +18,7 @@ source "https://rubygems.org"
 # Then update BUNDLED WITH version in Gemfile.lock to match bundler version that
 # ships with the new Ruby version.
 #
-# Then run bundle install.
+# Then run `mise install`, `mise lock`, and `bundle install`.
 ruby "4.0.5"
 
 gem "acme-client"
@@ -57,7 +57,7 @@ gem "rack-unreloader", ">= 1.8"
 gem "rake"
 gem "refrigerator", ">= 1"
 gem "roda", ">= 3.105"
-gem "rodauth", github: "jeremyevans/rodauth", ref: "28c16ddb08a38969dbf68c55ed48a41c452cedda"
+gem "rodauth", github: "jeremyevans/rodauth", ref: "90162469714152312a1f0e606aca8157a801ae82"
 gem "rodauth-omniauth", ">= 0.6.2"
 gem "rodish", ">= 2.0.1"
 gem "rotp"
@@ -103,7 +103,6 @@ end
 
 group :lint do
   gem "brakeman"
-  gem "erb-formatter", github: "ubicloud/erb-formatter", ref: "df3174476986706828f7baf3e5e6f5ec8ecd849b"
 end
 
 group :test do

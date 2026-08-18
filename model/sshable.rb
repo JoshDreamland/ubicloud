@@ -145,8 +145,9 @@ class Sshable < Sequel::Model
 
     stdout_str = stdout.string.freeze
     stderr_str = stderr.string.freeze
+    success = exit_code&.zero?
 
-    if log
+    if log == true || (log == :on_error && !success)
       finish = Time.now
       embed = {ubid:, start:, finish:, timeout:, duration: finish - start,
                cmd:, exit_code:, exit_signal:}
@@ -166,7 +167,7 @@ class Sshable < Sequel::Model
       Clog.emit("ssh cmd execution", {ssh: embed})
     end
 
-    fail (exit_code ? SshError : SshTimeout).new(cmd, stdout_str, stderr_str, exit_code, exit_signal) unless exit_code&.zero?
+    fail (exit_code ? SshError : SshTimeout).new(cmd, stdout_str, stderr_str, exit_code, exit_signal) unless success
 
     stdout_str
   end
@@ -233,17 +234,7 @@ LOCK
 
       begin
         cmd(lock_contents, lock_name:, log: false)
-      rescue SshError => ex
-        session_fail_msg = case (exit_code = ex.exit_code)
-        when 92
-          "could not create session lock file for #{lock_name}"
-        when 124
-          "session lock conflict for #{lock_name}"
-        else
-          "unknown SshError"
-        end
-
-        Clog.emit("session lock failure", {contended_session_lock: {exit_code:, session_fail_msg:, sshable_ubid: ubid.to_s, prog: Prog::Base.current_prog}})
+      rescue SshError
       end
     end
 

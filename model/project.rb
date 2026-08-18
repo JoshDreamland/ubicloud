@@ -53,6 +53,19 @@ class Project < Sequel::Model
 
       nil
     end
+
+    def where_sole_admin_is(account)
+      account_array = Sequel.pg_array([account.id], :uuid)
+      project_id = Sequel[:project][:id]
+      ds = select(project_id)
+        .from_self(alias: :project)
+        .join(:subject_tag, project_id: :id, name: "Admin")
+        .join(:applied_subject_tag, tag_id: :id)
+        .join(:access_tag, hyper_tag_id: :subject_id, project_id:)
+        .select_group(project_id)
+        .having { {array_agg(:hyper_tag_id) => account_array} }
+      where(project_id => ds)
+    end
   end
 
   plugin :association_dependencies,
@@ -97,6 +110,10 @@ class Project < Sequel::Model
 
   def path
     "/project/#{ubid}"
+  end
+
+  def sole_admin?(account)
+    !this.where_sole_admin_is(account).empty?
   end
 
   # Returns the MachineImageStore to use for the given location, falling
@@ -261,7 +278,6 @@ class Project < Sequel::Model
     :postgres_init_script,
     :postgres_lantern,
     :postgres_maintenance_window_platform_only,
-    :postgres_paradedb,
     :postgres_wal_shadow,
     :private_locations,
     :require_mfa_or_omniauth,
@@ -271,6 +287,7 @@ class Project < Sequel::Model
     :visible_postgres_locations,
     :vm_public_ssh_keys,
     :postgres_aws_use_different_azs_for_standbys,
+    :postgres_backup_download_minio,
     :postgres_instance_type_fallback,
     :postgres_walg_optimized_config_disabled,
     :postgres_walg_direct_io_disabled,

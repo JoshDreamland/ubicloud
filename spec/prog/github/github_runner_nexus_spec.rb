@@ -606,7 +606,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
     it "hops to register_runner" do
       expect(vm).to receive(:runtime_token).and_return("my_token")
       installation.update(use_docker_mirror: false, cache_enabled: false)
-      expect(vm.sshable).to receive(:_cmd).with("bash", stdin: <<~COMMAND)
+      expect(vm.sshable).to receive(:_cmd).with("bash", stdin: <<~COMMAND, log: :on_error)
         set -ueo pipefail
         echo "image version: $ImageVersion"
         sudo usermod -a -G sudo,adm runneradmin
@@ -622,7 +622,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
       expect(vm).to receive(:runtime_token).and_return("my_token")
       installation.update(use_docker_mirror: false, cache_enabled: true)
       expect(vm).to receive(:nics).and_return([instance_double(Nic, private_ipv4: NetAddr::IPv4Net.parse("10.0.0.1/32"), is_management: false)]).at_least(:once)
-      expect(vm.sshable).to receive(:_cmd).with("bash", stdin: <<~COMMAND)
+      expect(vm.sshable).to receive(:_cmd).with("bash", stdin: <<~COMMAND, log: :on_error)
         set -ueo pipefail
         echo "image version: $ImageVersion"
         sudo usermod -a -G sudo,adm runneradmin
@@ -639,7 +639,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
       expect(vm).to receive(:runtime_token).and_return("my_token")
       installation.update(use_docker_mirror: false, cache_enabled: false)
       project.set_ff_cache_proxy_download_url({"x64" => "https://example.com/cache-proxy-x64.tar.gz", "arm64" => "https://example.com/cache-proxy-arm64.tar.gz"})
-      expect(vm.sshable).to receive(:_cmd).with("bash", stdin: <<~COMMAND)
+      expect(vm.sshable).to receive(:_cmd).with("bash", stdin: <<~COMMAND, log: :on_error)
         set -ueo pipefail
         echo "image version: $ImageVersion"
         sudo usermod -a -G sudo,adm runneradmin
@@ -659,7 +659,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
       expect(vm).to receive(:runtime_token).and_return("my_token")
       installation.update(use_docker_mirror: false, cache_enabled: false)
       project.set_ff_cache_proxy_download_url({"arm64" => "https://example.com/cache-proxy-arm64.tar.gz"})
-      expect(vm.sshable).to receive(:_cmd).with("bash", stdin: <<~COMMAND)
+      expect(vm.sshable).to receive(:_cmd).with("bash", stdin: <<~COMMAND, log: :on_error)
         set -ueo pipefail
         echo "image version: $ImageVersion"
         sudo usermod -a -G sudo,adm runneradmin
@@ -675,7 +675,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
       expect(vm).to receive(:runtime_token).and_return("my_token")
       installation.update(use_docker_mirror: false, cache_enabled: false)
       vm.vm_host.update(location_id: Location::LEASEWEB_WDC02_ID)
-      expect(vm.sshable).to receive(:_cmd).with("bash", stdin: <<~COMMAND)
+      expect(vm.sshable).to receive(:_cmd).with("bash", stdin: <<~COMMAND, log: :on_error)
         set -ueo pipefail
         echo "image version: $ImageVersion"
         sudo usermod -a -G sudo,adm runneradmin
@@ -696,7 +696,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
       expect(vm).to receive(:runtime_token).and_return("my_token")
       installation.update(use_docker_mirror: false, cache_enabled: false)
       vm.update(vm_host_id: nil)
-      expect(vm.sshable).to receive(:_cmd).with("bash", stdin: <<~COMMAND)
+      expect(vm.sshable).to receive(:_cmd).with("bash", stdin: <<~COMMAND, log: :on_error)
         set -ueo pipefail
         echo "image version: $ImageVersion"
         sudo usermod -a -G sudo,adm runneradmin
@@ -721,7 +721,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
   describe "#register_runner" do
     it "registers runner hops" do
       expect(client).to receive(:post).with(/.*generate-jitconfig/, hash_including(name: runner.ubid.to_s, labels: [runner.label])).and_return({runner: {id: 123}, encoded_jit_config: "AABBCC$"})
-      expect(vm.sshable).to receive(:_cmd).with(<<~COMMAND, stdin: "AABBCC$")
+      expect(vm.sshable).to receive(:_cmd).with(<<~COMMAND, stdin: "AABBCC$", log: :on_error)
         sudo -u runner tee /home/runner/actions-runner/.jit_token > /dev/null
         sudo systemctl start runner-script.service
       COMMAND
@@ -774,7 +774,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
 
     it "fails without a log if the ssh error doesn't match" do
       expect(client).to receive(:post).with(/.*generate-jitconfig/, hash_including(name: runner.ubid.to_s, labels: [runner.label])).and_return({runner: {id: 123}, encoded_jit_config: "AABBCC$"})
-      expect(vm.sshable).to receive(:_cmd).with(<<~COMMAND, stdin: "AABBCC$").and_raise Sshable::SshError.new("command", "", "unknown command", 123, nil)
+      expect(vm.sshable).to receive(:_cmd).with(<<~COMMAND, stdin: "AABBCC$", log: :on_error).and_raise Sshable::SshError.new("command", "", "unknown command", 123, nil)
         sudo -u runner tee /home/runner/actions-runner/.jit_token > /dev/null
         sudo systemctl start runner-script.service
       COMMAND
@@ -908,6 +908,14 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
     it "creates the page but sends no email when no project user has the github permission" do
       expect { nx.rescue_common_github_api_errors { raise Octokit::Error.new({body: "Repository level self-hosted runners are disabled"}) } }.to nap(0)
         .and change { Page.count }.from(0).to(1)
+        .and not_change { Mail::TestMailer.deliveries.length }
+      expect(runner.destroy_set?).to be(true)
+    end
+
+    it "destroys the runner without a page or email if the runner group is full" do
+      expect(client).not_to receive(:get)
+      expect { nx.rescue_common_github_api_errors { raise Octokit::UnprocessableEntity.new({body: "Runner group 1 has reached max limit of 10000 runners."}) } }.to nap(0)
+        .and not_change { Page.count }
         .and not_change { Mail::TestMailer.deliveries.length }
       expect(runner.destroy_set?).to be(true)
     end
@@ -1052,7 +1060,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
 
     it "Logs journalctl, docker limits, and cache proxy log if workflow_job is not successful" do
       runner.update(workflow_job: {"conclusion" => "failure"})
-      expect(vm.vm_host.sshable).to receive(:_cmd).with("sudo ln /vm/#{vm.inhost_name}/serial.log /var/log/ubicloud/serials/#{runner.ubid}\\_serial.log")
+      expect(vm.vm_host.sshable).to receive(:_cmd).with("sudo ln /vm/#{vm.inhost_name}/serial.log /var/log/ubicloud/serials/#{runner.ubid}\\_serial.log", log: :on_error)
       expect(vm.sshable).to receive(:_cmd).with("journalctl -u runner-script -t 'run-withenv.sh' -t 'systemd' --no-pager | grep -Fv Started")
       expect(vm.sshable).to receive(:_cmd).with(<<~COMMAND, log: false)
         TOKEN=$(curl -m 10 -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull" | jq -r .token)
@@ -1066,7 +1074,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
 
     it "Logs journalctl, docker limits, and cache proxy log if workflow_job is nil" do
       runner.update(workflow_job: nil)
-      expect(vm.vm_host.sshable).to receive(:_cmd).with("sudo ln /vm/#{vm.inhost_name}/serial.log /var/log/ubicloud/serials/#{runner.ubid}\\_serial.log")
+      expect(vm.vm_host.sshable).to receive(:_cmd).with("sudo ln /vm/#{vm.inhost_name}/serial.log /var/log/ubicloud/serials/#{runner.ubid}\\_serial.log", log: :on_error)
       expect(vm.sshable).to receive(:_cmd).with("journalctl -u runner-script -t 'run-withenv.sh' -t 'systemd' --no-pager | grep -Fv Started")
       expect(vm.sshable).to receive(:_cmd).with(<<~COMMAND, log: false)
         TOKEN=$(curl -m 10 -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull" | jq -r .token)

@@ -40,9 +40,6 @@ require "logger"
 require "sequel/core"
 require "webmock/rspec"
 
-require "aws-sdk-ec2"
-Aws::EC2.const_get(:Client)
-
 RSpec::Matchers.define_negated_matcher :not_change, :change
 
 def Object.method_added(method)
@@ -456,6 +453,10 @@ RSpec.configure do |config|
 
     def frame_value(prog, key)
       prog.strand.stack.first[key]
+    end
+
+    def hibernate
+      nap(60 * 60 * 24 * 365 * 1000)
     end
   end)
 end

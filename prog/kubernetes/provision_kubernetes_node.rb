@@ -3,8 +3,8 @@
 class Prog::Kubernetes::ProvisionKubernetesNode < Prog::Base
   subject_is :kubernetes_cluster
 
-  frame_reader :nodepool_id
-  frame_accessor :node_id
+  frame_reader :nodepool_id, :machine_image_version_id
+  frame_accessor :node_id, :no_bundler_install
 
   def node
     @node ||= KubernetesNode[node_id]
@@ -62,7 +62,9 @@ class Prog::Kubernetes::ProvisionKubernetesNode < Prog::Base
         kubernetes_cluster.target_node_storage_size_gib]
     end
 
-    storage_volumes = [{encrypted: true, size_gib: storage_size_gib}] if storage_size_gib
+    if storage_size_gib || machine_image_version_id
+      storage_volumes = [{encrypted: true, size_gib: storage_size_gib, machine_image_version_id:}.compact]
+    end
 
     boot_image = "kubernetes-#{(kubernetes_nodepool || kubernetes_cluster).version.tr(".", "_")}"
 
@@ -81,6 +83,7 @@ class Prog::Kubernetes::ProvisionKubernetesNode < Prog::Base
     vm = node.vm
 
     self.node_id = node.id
+    self.no_bundler_install = true if vm.vm_storage_volumes_dataset.first(boot: true).machine_image_version_id
 
     unless kubernetes_nodepool
       kubernetes_cluster.api_server_lb.add_vm(vm)
@@ -129,7 +132,7 @@ class Prog::Kubernetes::ProvisionKubernetesNode < Prog::Base
       vm.sshable.write_file("/home/ubi/.ssh/authorized_keys", all_keys_str, user: :current)
     end
 
-    bud Prog::BootstrapRhizome, {"target_folder" => "kubernetes", "subject_id" => vm.id, "user" => "ubi"}
+    bud Prog::BootstrapRhizome, {"target_folder" => "kubernetes", "subject_id" => vm.id, "user" => "ubi", "no_bundler_install" => no_bundler_install}.compact
 
     hop_wait_bootstrap_rhizome
   end
@@ -151,7 +154,7 @@ class Prog::Kubernetes::ProvisionKubernetesNode < Prog::Base
     case state
     when "Succeeded"
       Page.from_tag_parts("KubernetesNodeInitClusterFailed", node.ubid)&.incr_resolve
-      hop_install_cni
+      hop_wait_api_server_lb
     when "NotStarted"
       params = {
         node_name: vm.name,
@@ -180,6 +183,13 @@ class Prog::Kubernetes::ProvisionKubernetesNode < Prog::Base
       Clog.emit("got unknown state from daemonizer2 check: #{state}")
       nap 30
     end
+  end
+
+  label def wait_api_server_lb
+    kubernetes_cluster.client.kubectl("get --raw=/healthz")
+    hop_install_cni
+  rescue RuntimeError
+    nap 5
   end
 
   label def join_control_plane
@@ -280,6 +290,7 @@ CONFIG
     kubernetes_cluster.incr_sync_internal_dns_config
     kubernetes_cluster.incr_sync_worker_mesh
     kubernetes_cluster.incr_update_billing_records
+    node.incr_configure_metrics
     pop({node_id: node.id})
   end
 
