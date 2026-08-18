@@ -20,7 +20,7 @@ class KubernetesCluster < Sequel::Model
   dataset_module Pagination
 
   plugin ResourceMethods, encrypted_columns: :kubeconfig
-  plugin SemaphoreMethods, :destroy, :sync_kubernetes_services, :upgrade, :upgrade_nodepools, :install_metrics_server, :sync_worker_mesh, :install_csi, :update_billing_records, :sync_internal_dns_config, :sync_kubeconfig
+  plugin SemaphoreMethods, :destroy, :sync_kubernetes_services, :upgrade, :upgrade_nodepools, :install_metrics_server, :sync_worker_mesh, :install_csi, :update_billing_records, :sync_internal_dns_config, :sync_kubeconfig, :install_prometheus_rbac
   include HealthMonitorMethods
 
   def validate
@@ -165,7 +165,7 @@ class KubernetesCluster < Sequel::Model
   def check_pulse(session:, previous_pulse:)
     reading = begin
       k8s_client = client(session: session[:ssh_session])
-      incr_sync_kubernetes_services if k8s_client.any_lb_services_modified?
+      incr_sync_kubernetes_services if !sync_kubernetes_services_set?(cached: false) && k8s_client.any_lb_services_modified?
 
       pvs = JSON.parse(k8s_client.kubectl("get pv -ojson"))["items"]
       stuck_pvs = pvs.select { Integer(it.dig("metadata", "annotations", "csi.ubicloud.com/migration-retry-count") || "0", 10) >= 3 }
@@ -189,9 +189,7 @@ class KubernetesCluster < Sequel::Model
   end
 
   def install_rhizome
-    cp_vms.each do |vm|
-      Strand.create(prog: "InstallRhizome", label: "start", stack: [{subject_id: vm.sshable.id, target_folder: "kubernetes"}])
-    end
+    nodes.map(&:install_rhizome)
   end
 
   def all_nodes

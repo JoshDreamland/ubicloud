@@ -22,6 +22,16 @@ class CloverAdmin < Roda
     TableFormButton.new(text, attributes)
   end
 
+  TableCost = Data.define(:cost) do
+    def to_s
+      cost ? format("$%.2f", cost).gsub(/(\d)(?=(\d{3})+\.)/, '\1,') : "-"
+    end
+  end
+
+  def table_cost(...)
+    TableCost.new(...)
+  end
+
   Unreloader.record_dependency("lib/audit_log.rb", __FILE__)
 
   MIN_AUDIT_LOG_END_DATE = Date.new(2025, 6)
@@ -137,7 +147,7 @@ class CloverAdmin < Roda
     @page_title = if e.is_a?(CloverError)
       "#{e.type}: #{e.message}"
     else
-      Clog.emit("admin route exception", Util.exception_to_hash(e))
+      Clog.emit("admin route exception", Util.exception_to_hash(e, into: {request: request.inspect}))
       "Internal Server Error"
     end
     view(content: "")
@@ -163,7 +173,7 @@ class CloverAdmin < Roda
       uuid = id if id.include?("-")
       ubid = uuid ? UBID.to_ubid(uuid) : id
       if (klass = UBID.class_for_ubid(ubid))
-        link = "<a href=\"/model/#{klass}/#{ubid}\">#{ubid}</a>"
+        link = "<a class=\"ubid\" href=\"/model/#{klass}/#{ubid}\">#{ubid}</a>"
         uuid ? "#{uuid} [#{link}]" : link
       else
         id
@@ -187,6 +197,31 @@ class CloverAdmin < Roda
     m, s = s.divmod(60)
     h, m = m.divmod(60)
     "%02d:%02d:%02d" % [h, m, s]
+  end
+
+  COGS_LOCATION_IDS = [Location::HETZNER_FSN1_ID, Location::HETZNER_HEL1_ID, Location::LEASEWEB_WDC02_ID, Location::GITHUB_RUNNERS_ID].freeze
+  COGS_RUNNER_LOCATION_IDS = (COGS_LOCATION_IDS - [Location::LEASEWEB_WDC02_ID]).freeze
+  BIGDECIMAL_ZERO = BigDecimal(0)
+
+  def cogs_summary(hosts)
+    monthly_usd = hosts.sum(BIGDECIMAL_ZERO) { it[:monthly_usd] || 0 }
+    sellable_vcpus = hosts.sum { it[:sellable_vcpus] }
+    per_2vcpu_usd = monthly_usd / sellable_vcpus * 2 if sellable_vcpus.positive?
+    [hosts.size, monthly_usd, sellable_vcpus, per_2vcpu_usd]
+  end
+
+  def cogs_row(group, labels)
+    count, monthly_usd, sellable_vcpus, per_2vcpu_usd = cogs_summary(group)
+    labels.merge("Host Count" => count, "Monthly Cost" => table_cost(monthly_usd),
+      "Sellable vCPUs" => sellable_vcpus, "Per 2 vCPU Cost" => table_cost(per_2vcpu_usd))
+  end
+
+  def cogs_runner_row(group, labels)
+    count, _, _, per_2vcpu_usd = cogs_summary(group)
+    usable_vcpus = group.sum(BIGDECIMAL_ZERO) { it[:sellable_vcpus] - (it[:nonrunner_vcpus] || 0) }
+    weekly_usd = usable_vcpus * per_2vcpu_usd / 2 / 30 * 7 if per_2vcpu_usd
+    labels.merge("Host Count" => count, "Runner Usable vCPUs" => usable_vcpus.to_i,
+      "Per 2 vCPU Cost" => table_cost(per_2vcpu_usd), "Weekly Cost" => table_cost(weekly_usd))
   end
 
   def _classes
@@ -360,233 +395,443 @@ class CloverAdmin < Roda
     end
   end
 
-  ObjectAction = Data.define(:label, :flash, :params, :type, :action) do
-    def self.define(label, flash: nil, params: {}, type: :normal, &action)
-      new(label, flash, params.dup.freeze, type, action)
+  ObjectAction = Data.define(:label, :flash, :params, :type, :action, :pass_request, :allow_if) do
+    def self.define(label, flash: nil, params: {}, type: :normal, pass_request: false, allow_if: nil, &action)
+      new(label, flash, params.dup.freeze, type, action, pass_request, allow_if)
     end
 
     def call(...)
       action.call(...)
     end
+
+    def allow?(obj)
+      allow_if.nil? || allow_if.call(obj)
+    end
   end
 
-  def self.object_action(...)
-    ObjectAction.define(...)
+  class ObjectModelDSL
+    def initialize(model, &)
+      @model = model
+      instance_exec(&)
+    end
+
+    def action(action, label, &)
+      ObjectActionDSL.new(@model.name, action, label, &)
+    end
   end
 
-  require_vm_host_provider = lambda do |obj|
-    fail CloverError.new(400, "InvalidRequest", "VmHost has no provider") unless obj.provider
+  class ObjectActionDSL
+    def initialize(class_name, action, label, &)
+      @opts = {params: {}}
+      @block = nil
+      instance_exec(&)
+      (OBJECT_ACTIONS[class_name] ||= {})[action] = ObjectAction.define(label, **@opts, &@block)
+    end
+
+    def run(&block)
+      @block = block
+    end
+
+    def flash(notice)
+      @opts[:flash] = notice
+    end
+
+    def param(name, **opts)
+      @opts[:params][name] = opts
+    end
+
+    def type(type)
+      @opts[:type] = type
+    end
+
+    def pass_request!
+      @opts[:pass_request] = true
+    end
+
+    def allow_if(&block)
+      @opts[:allow_if] = block
+    end
   end
 
-  github_page_action = object_action("GitHub Page", type: :direct) do |obj|
-    "http://github.com/#{obj.name}"
-  end
+  OBJECT_ACTIONS = {}
 
-  OBJECT_ACTIONS = {
-    "Account" => {
-      "suspend" => object_action("Suspend", flash: "Account suspended", &:suspend),
-      "unsuspend" => object_action("Unsuspend", flash: "Account unsuspended", &:unsuspend),
-    },
-    "BootImage" => {
-      "remove_boot_image" => object_action("Remove Boot Image", flash: "Boot image removal scheduled", &:remove_boot_image),
-      "activate_boot_image" => object_action("Activate Boot Image", flash: "Boot image activated") do |obj|
-        obj.update(activated_at: Time.now)
-      end,
-      "disable_boot_image" => object_action("Disable Boot Image", flash: "Boot image disabled") do |obj|
-        obj.update(activated_at: nil)
-      end,
-    },
-    "DnsZone" => {
-      "add_record" => object_action("Add DNS Record", flash: "Added DNS Record",
-        params: {
-          name: {typecast: :nonempty_str!, label: "name (without zone)"},
-          type: {typecast: :nonempty_str!},
-          data: {typecast: :nonempty_str!},
-          ttl: {typecast: :pos_int!, type: :number, attr: {min: 60, max: 3600}, value: 600},
-        }) do |obj, record_name, type, data, ttl|
+  Object.new.instance_exec do
+    def model(...)
+      ObjectModelDSL.new(...)
+    end
+
+    model Account do
+      action "suspend", "Suspend" do
+        flash "Account suspended"
+        run(&:suspend)
+      end
+
+      action "unsuspend", "Unsuspend" do
+        flash "Account unsuspended"
+        run(&:unsuspend)
+      end
+    end
+
+    model BootImage do
+      action "remove_boot_image", "Remove Boot Image" do
+        flash "Boot image removal scheduled"
+        run(&:remove_boot_image)
+      end
+
+      action "activate_boot_image", "Activate Boot Image" do
+        flash "Boot image activated"
+        run do |obj|
+          obj.update(activated_at: Time.now)
+        end
+      end
+
+      action "disable_boot_image", "Disable Boot Image" do
+        flash "Boot image disabled"
+        run do |obj|
+          obj.update(activated_at: nil)
+        end
+      end
+    end
+
+    model DnsZone do
+      action "add_record", "Add DNS Record" do
+        flash "Added DNS Record"
+        param :name, typecast: :nonempty_str!, label: "name (without zone)"
+        param :type, typecast: :nonempty_str!
+        param :data, typecast: :nonempty_str!
+        param :ttl, typecast: :pos_int!, type: :number, attr: {min: 60, max: 3600}, value: 600
+        run do |obj, record_name, type, data, ttl|
           record_name += ".#{obj.name}."
           obj.insert_record(record_name:, type:, ttl:, data:)
-        end,
-    },
-    "DnsRecord" => {
-      "delete" => object_action("Delete DNS Record", flash: "Deleted DNS Record") do |obj|
-        dns_zone = DnsZone.with_pk!(obj.dns_zone_id)
-        dns_zone.delete_record(record_name: obj.name, type: obj.type, data: obj.data)
-      end,
-    },
-    "GithubInstallation" => {
-      "github_page" => github_page_action,
-    },
-    "GithubRepository" => {
-      "github_page" => github_page_action,
-      "show_job_log" => object_action("Show Job Log", params: {job_ids: {typecast: :nonempty_str!, label: "Job IDs (comma-separated)"}}, type: :content) do |obj, job_ids|
-        client = obj.installation.client
-        items = job_ids.split(",").filter_map do |job_id|
-          job_id.strip!
-          next if job_id.empty?
-
-          unless (id = Integer(job_id, exception: false)) && id.between?(1, 2**63 - 1)
-            next "<li>Job #{Erubi.h(job_id)}: invalid job ID</li>"
-          end
-
-          begin
-            url = client.workflow_run_job_logs(obj.name, id)
-            "<li><a href=\"#{Erubi.h(url)}\" target=\"_blank\">Job #{id}: Show Log</a></li>"
-          rescue Octokit::Error => e
-            "<li>Job #{id}: #{e.class}: #{Erubi.h(e.message)}</li>"
-          end
         end
-        "<ol>#{items.join}</ol>"
-      end,
-    },
-    "GithubRunner" => {
-      "provision" => object_action("Provision Spare Runner", flash: "Spare runner provisioned", type: :form, &:provision_spare_runner),
-    },
-    "Invoice" => {
-      "download_pdf" => object_action("Download PDF", type: :direct) do |obj|
-        obj.generate_download_link
-      end,
-    },
-    "OidcProvider" => {
-      "add_allowed_domain" => object_action("Add Allowed Domain", flash: "Added allowed domain", params: {domain: {typecast: :nonempty_str!}}) do |obj, domain|
-        obj.add_allowed_domain(domain)
-      end,
-      "remove_allowed_domain" => object_action("Remove Allowed Domain", flash: "Removed allowed domain",
-        params: ->(obj) {
-          {domain: {typecast: :nonempty_str!, type: "select", add_blank: true, required: true, options: obj.allowed_domains}}
-        }) do |obj, domain|
+      end
+    end
+
+    model DnsRecord do
+      action "delete", "Delete DNS Record" do
+        flash "Deleted DNS Record"
+        run do |obj|
+          dns_zone = DnsZone.with_pk!(obj.dns_zone_id)
+          dns_zone.delete_record(record_name: obj.name, type: obj.type, data: obj.data)
+        end
+      end
+    end
+
+    github_page_run = ->(obj) { "http://github.com/#{obj.name}" }
+
+    model GithubInstallation do
+      action "github_page", "GitHub Page" do
+        type :direct
+        run(&github_page_run)
+      end
+    end
+
+    model GithubRepository do
+      action "github_page", "GitHub Page" do
+        type :direct
+        run(&github_page_run)
+      end
+
+      action "show_job_log", "Show Job Log" do
+        type :content
+        param :job_ids, typecast: :nonempty_str!, label: "Job IDs (comma-separated)"
+        run do |obj, job_ids|
+          client = obj.installation.client
+          items = job_ids.split(",").filter_map do |job_id|
+            job_id.strip!
+            next if job_id.empty?
+
+            unless (id = Integer(job_id, exception: false)) && id.between?(1, 2**63 - 1)
+              next "<li>Job #{Erubi.h(job_id)}: invalid job ID</li>"
+            end
+
+            begin
+              url = client.workflow_run_job_logs(obj.name, id)
+              "<li><a href=\"#{Erubi.h(url)}\" target=\"_blank\">Job #{id}: Show Log</a></li>"
+            rescue Octokit::Error => e
+              "<li>Job #{id}: #{e.class}: #{Erubi.h(e.message)}</li>"
+            end
+          end
+          "<ol>#{items.join}</ol>"
+        end
+      end
+    end
+
+    model GithubRunner do
+      action "provision", "Provision Spare Runner" do
+        flash "Spare runner provisioned"
+        type :form
+        run(&:provision_spare_runner)
+      end
+    end
+
+    model Invoice do
+      action "download_pdf", "Download PDF" do
+        type :direct
+        run do |obj|
+          obj.generate_download_link
+        end
+      end
+    end
+
+    model OidcProvider do
+      action "add_allowed_domain", "Add Allowed Domain" do
+        flash "Added allowed domain"
+        param :domain, typecast: :nonempty_str!
+        run do |obj, domain|
+          obj.add_allowed_domain(domain)
+        end
+      end
+
+      action "remove_allowed_domain", "Remove Allowed Domain" do
+        flash "Removed allowed domain"
+        param :domain, typecast: :nonempty_str!, type: "select", add_blank: true, required: true, options: ->(obj) { obj.allowed_domains }
+        run do |obj, domain|
           obj.remove_allowed_domain(domain)
-        end,
-    },
-    "Page" => {
-      "resolve" => object_action("Resolve", flash: "Resolve scheduled for Page", &:incr_resolve),
-      "retrigger" => object_action("Retrigger", flash: "Retrigger scheduled for Page", &:incr_retrigger),
-    },
-    "PostgresResource" => {
-      "restart" => object_action("Restart", flash: "Restart scheduled for PostgresResource") do |obj|
-        obj.server_incr("restart")
-      end,
-    },
-    "PostgresServer" => {
-      "recycle" => object_action("Recycle", flash: "Recycle scheduled for PostgresServer", &:incr_recycle),
-    },
-    "Project" => {
-      "add_credit" => object_action("Add credit", flash: "Added credit", params: {credit: {typecast: :float!, type: "number", attr: {min: -10**6, max: 10**6}}}) do |obj, credit|
-        obj.this.update(credit: Sequel[:credit] + credit)
-      end,
-      "set_feature_flag" => object_action("Set Feature Flag", flash: "Set feature flag", params: {
-        name: {
+        end
+      end
+    end
+
+    model Page do
+      action "resolve", "Resolve" do
+        flash "Resolve scheduled for Page"
+        run(&:incr_resolve)
+      end
+
+      action "retrigger", "Retrigger" do
+        flash "Retrigger scheduled for Page"
+        run(&:incr_retrigger)
+      end
+    end
+
+    model PostgresResource do
+      action "restart", "Restart" do
+        flash "Restart scheduled for PostgresResource"
+        run do |obj|
+          obj.server_incr("restart")
+        end
+      end
+    end
+
+    model PostgresServer do
+      action "recycle", "Recycle" do
+        flash "Recycle scheduled for PostgresServer"
+        run(&:incr_recycle)
+      end
+    end
+
+    model Project do
+      action "add_credit", "Add credit" do
+        flash "Added credit"
+        param :credit, typecast: :float!, type: "number", attr: {min: -10**6, max: 10**6}
+        run do |obj, credit|
+          obj.this.update(credit: Sequel[:credit] + credit)
+        end
+      end
+
+      action "set_feature_flag", "Set Feature Flag" do
+        flash "Set feature flag"
+        param :name,
           typecast: :str!,
           type: "select",
           add_blank: true,
-          options: Project.instance_methods.grep(/\Aset_ff_/).map! { it[7...] }.sort!,
-        },
-        value: {
+          options: Project.instance_methods.grep(/\Aset_ff_/).map! { it[7...] }.sort!
+        param :value,
           typecast: :nonempty_str,
           placeholder: "JSON",
-          required: nil,
-        },
-      }) do |obj, name, value|
-        begin
-          value = JSON.parse(value) if value
-        rescue JSON::ParserError
-          fail CloverError.new(400, "InvalidRequest", "invalid JSON for feature flag value")
+          required: nil
+        run do |obj, name, value|
+          begin
+            value = JSON.parse(value) if value
+          rescue JSON::ParserError
+            fail CloverError.new(400, "InvalidRequest", "invalid JSON for feature flag value")
+          end
+          obj.send("set_ff_#{name}", value)
         end
-        obj.send("set_ff_#{name}", value)
-      end,
-      "set_quota" => object_action("Set Quota", flash: "Set quota", params: {
-        resource_type: {
+      end
+
+      action "set_quota", "Set Quota" do
+        flash "Set quota"
+        param :resource_type,
           typecast: :str!,
           type: "select",
           add_blank: true,
-          options: ProjectQuota.default_quotas.keys,
-        },
-        value: {
+          options: ProjectQuota.default_quotas.keys
+        param :value,
           typecast: :int,
           type: "number",
           placeholder: "blank to reset to default",
-          required: nil,
-        },
-      }) do |obj, resource_type, value|
-        quota_id = ProjectQuota.default_quotas[resource_type]["id"]
-        if (existing_quota = obj.quotas_dataset.first(quota_id:))
-          if value
-            existing_quota.update(value:)
-          else
-            existing_quota.destroy
+          required: nil
+        run do |obj, resource_type, value|
+          quota_id = ProjectQuota.default_quotas[resource_type]["id"]
+          if (existing_quota = obj.quotas_dataset.first(quota_id:))
+            if value
+              existing_quota.update(value:)
+            else
+              existing_quota.destroy
+            end
+          elsif value
+            obj.add_quota(quota_id:, value:)
           end
-        elsif value
-          obj.add_quota(quota_id:, value:)
         end
-      end,
-    },
-    "Strand" => {
-      "subject" => object_action("Subject", type: :direct) do |obj|
-        "/model/#{obj.subject.class}/#{obj.subject.ubid}"
-      end,
-      "schedule" => object_action("Schedule Strand to Run Immediately", flash: "Scheduled strand to run immediately", type: :form) do |obj|
-        obj.this.update(schedule: Sequel::CURRENT_TIMESTAMP)
-      end,
-      "extend" => object_action("Extend Schedule", flash: "Extended schedule", params: {minutes: {typecast: :pos_int!, type: "number", attr: {min: 1, max: 1440}}}) do |obj, minutes|
-        obj.this.update(schedule: Sequel.date_add(:schedule, minutes:))
-      end,
-      "incr_semaphore" => object_action("Increment Semaphore", flash: "Incremented semaphore", params: ->(obj) {
-        subject_class = obj.subject.class
-        options = subject_class.respond_to?(:semaphore_names) ? subject_class.semaphore_names.map(&:name).sort! : [].freeze
-        {
-          name: {typecast: :nonempty_str!, type: "select", add_blank: true, required: true, options:},
-          name_confirmation: {typecast: :nonempty_str!, type: "select", add_blank: true, required: true, options:},
-        }
-      }) do |obj, name, name_confirmation|
-        fail CloverError.new(400, "InvalidRequest", "Semaphore name confirmation does not match") unless name == name_confirmation
-        Semaphore.incr(obj.id, name)
-      end,
-      "decr_semaphore" => object_action("Decrement Semaphore", flash: "Decremented semaphore", params: ->(obj) {
-        options = obj.semaphores_dataset.distinct.select_order_map(:name)
-        {
-          name: {typecast: :nonempty_str!, type: "select", add_blank: true, required: true, options:},
-          name_confirmation: {typecast: :nonempty_str!, type: "select", add_blank: true, required: true, options:},
-        }
-      }) do |obj, name, name_confirmation|
-        fail CloverError.new(400, "InvalidRequest", "Semaphore name confirmation does not match") unless name == name_confirmation
-        Semaphore.where(strand_id: obj.id, name:).destroy
-      end,
-    },
-    "Vm" => {
-      "restart" => object_action("Restart", flash: "Restart scheduled for Vm", &:incr_restart),
-      "stop" => object_action("Stop", flash: "Stop scheduled for Vm") do |obj|
-        DB.transaction do
-          obj.incr_admin_stop
-          obj.incr_stop
+      end
+    end
+
+    model Strand do
+      action "subject", "Subject" do
+        type :direct
+        run do |obj|
+          "/model/#{obj.subject.class}/#{obj.subject.ubid}"
         end
-      end,
-      "prepare_to_move" => object_action("Prepare to Move", flash: "Prepare to move scheduled for Vm") do |obj|
-        fail CloverError.new(400, "InvalidRequest", "Prepare to move is only supported for metal Vms") unless obj.location.metal?
-        DB.transaction do
-          obj.incr_prepare_to_move
-          obj.incr_stop
+      end
+
+      action "schedule", "Schedule Strand to Run Immediately" do
+        flash "Scheduled strand to run immediately"
+        type :form
+        run do |obj|
+          obj.this.update(schedule: Sequel::CURRENT_TIMESTAMP)
         end
-      end,
-    },
-    "VmHost" => {
-      "accept" => object_action("Move to Accepting", flash: "Host allocation state changed to accepting") do |obj|
-        obj.update(allocation_state: "accepting")
-      end,
-      "drain" => object_action("Move to Draining", flash: "Host allocation state changed to draining") do |obj|
-        obj.update(allocation_state: "draining")
-      end,
-      "reset" => object_action("Hardware Reset", flash: "Hardware reset scheduled for VmHost", &:incr_hardware_reset),
-      "reboot" => object_action("Reboot", flash: "Reboot scheduled for VmHost", &:incr_reboot),
-      "power_on" => object_action("Power On", flash: "Power on requested for VmHost") do |obj|
-        require_vm_host_provider.call(obj)
-        obj.power_on
-      end,
-      "power_status" => object_action("Power Status", type: :content) do |obj|
-        require_vm_host_provider.call(obj)
-        "Power status: #{Erubi.h(obj.power_status)}"
-      end,
-      "move_location" => object_action("Move to Location", flash: "Location updated and missing boot image downloads started", params: {
-        location: {
+      end
+
+      action "extend", "Extend Schedule" do
+        flash "Extended schedule"
+        param :minutes, typecast: :pos_int!, type: "number", attr: {min: 1, max: 1440}
+        run do |obj, minutes|
+          obj.this.update(schedule: Sequel.date_add(:schedule, minutes:))
+        end
+      end
+
+      action "incr_semaphore", "Increment Semaphore" do
+        flash "Incremented semaphore"
+        options = ->(obj) do
+          subject_class = obj.subject.class
+          subject_class.respond_to?(:semaphore_names) ? subject_class.semaphore_names.map(&:name).sort! : [].freeze
+        end
+        param(:name, typecast: :nonempty_str!, type: "select", add_blank: true, required: true, options:)
+        param(:name_confirmation, typecast: :nonempty_str!, type: "select", add_blank: true, required: true, options:)
+        run do |obj, name, name_confirmation|
+          fail CloverError.new(400, "InvalidRequest", "Semaphore name confirmation does not match") unless name == name_confirmation
+          Semaphore.incr(obj.id, name)
+        end
+      end
+
+      action "decr_semaphore", "Decrement Semaphore" do
+        flash "Decremented semaphore"
+        options = ->(obj) { obj.semaphores.map(&:name).sort!.uniq }
+        param(:name, typecast: :nonempty_str!, type: "select", add_blank: true, required: true, options:)
+        param(:name_confirmation, typecast: :nonempty_str!, type: "select", add_blank: true, required: true, options:)
+        run do |obj, name, name_confirmation|
+          fail CloverError.new(400, "InvalidRequest", "Semaphore name confirmation does not match") unless name == name_confirmation
+          Semaphore.where(strand_id: obj.id, name:).delete
+        end
+      end
+    end
+
+    model Vm do
+      action "restart", "Restart" do
+        flash "Restart scheduled for Vm"
+        run(&:incr_restart)
+      end
+
+      action "stop", "Stop" do
+        flash "Stop scheduled for Vm"
+        run do |obj|
+          DB.transaction do
+            obj.incr_admin_stop
+            obj.incr_stop
+          end
+        end
+      end
+
+      action "prepare_to_move", "Prepare to Move" do
+        flash "Prepare to move scheduled for Vm"
+        run do |obj|
+          fail CloverError.new(400, "InvalidRequest", "Prepare to move is only supported for metal Vms") unless obj.location.metal?
+          DB.transaction do
+            obj.incr_prepare_to_move
+            obj.incr_stop
+          end
+        end
+      end
+
+      action "move", "Move to Host" do
+        flash "Vm move scheduled"
+        pass_request!
+        param :vm_host_id,
+          typecast: :ubid_uuid!,
+          type: "select",
+          add_blank: true,
+          required: true,
+          options: ->(obj) { VmHost.where(location_id: obj.location_id).select_order_map(:id).map { UBID.to_ubid(it) } }
+        run do |obj, vm_host_id, request:|
+          Prog::Vm::Metal::MoveVm.assemble(obj, VmHost.with_pk!(vm_host_id))
+        rescue RuntimeError => e
+          request.scope.flash["error"] = e.message
+          request.redirect("/model/Vm/#{obj.ubid}")
+        end
+      end
+    end
+
+    model VmHost do
+      action "accept", "Move to Accepting" do
+        flash "Host allocation state changed to accepting"
+        allow_if { it.allocation_state != "accepting" }
+        run do |obj|
+          obj.update(allocation_state: "accepting")
+        end
+      end
+
+      action "drain", "Move to Draining" do
+        flash "Host allocation state changed to draining"
+        allow_if { it.allocation_state != "draining" }
+        run do |obj|
+          obj.update(allocation_state: "draining")
+        end
+      end
+
+      action "reset", "Hardware Reset" do
+        flash "Hardware reset scheduled for VmHost"
+        run(&:incr_hardware_reset)
+      end
+
+      action "reboot", "Reboot" do
+        flash "Reboot scheduled for VmHost"
+        run(&:incr_reboot)
+      end
+
+      require_vm_host_provider = lambda do |obj|
+        fail CloverError.new(400, "InvalidRequest", "VmHost has no provider") unless obj.provider
+      end
+
+      action "power_on", "Power On" do
+        flash "Power on requested for VmHost"
+        run do |obj|
+          require_vm_host_provider.call(obj)
+          obj.power_on
+        end
+      end
+
+      action "power_status", "Power Status" do
+        type :content
+        run do |obj|
+          require_vm_host_provider.call(obj)
+          "Power status: #{Erubi.h(obj.power_status)}"
+        end
+      end
+
+      action "provision_spare_runners", "Provision Spare Runners" do
+        type :form
+        flash "Spare runners provisioned for GitHub runners on this host"
+        run do |obj|
+          DB.ignore_duplicate_queries do
+            GithubRunner.where(vm_id: obj.vms_dataset.select(:id)).eager(:semaphores, :installation).all(&:provision_spare_runner)
+          end
+        end
+      end
+
+      action "move_location", "Move to Location" do
+        flash "Location updated and missing boot image downloads started"
+        param :location,
           typecast: :ubid_uuid!,
           type: "select",
           add_blank: true,
@@ -595,36 +840,39 @@ class CloverAdmin < Roda
             .where(project_id: nil, provider: %w[hetzner leaseweb].freeze)
             .or(id: Location::GITHUB_RUNNERS_ID)
             .select_order_map([:display_name, :id])
-            .each { it[1] = UBID.to_ubid(it[1]) },
-        },
-      }) do |obj, target_location_id|
-        obj.move_to_location(target_location_id)
-      end,
-      "force_create_vm" => object_action("Force Create VM", flash: "VM creation scheduled", params: ->(obj) {
-        {
-          project_id: {typecast: :ubid_uuid!, required: true, placeholder: "Project UBID"},
-          public_key: {typecast: :nonempty_str!, required: true},
-          name: {typecast: :nonempty_str, required: nil, placeholder: "auto-generated if blank"},
-          size: {
-            typecast: :nonempty_str!,
-            type: "select",
-            required: true,
-            options: Option::VmSizes.select { it.arch == obj.arch && (it.family == obj.family || (it.family == "burstable" && obj.accepts_slices)) }.map(&:name),
-          },
-          boot_image: {
-            typecast: :nonempty_str!,
-            type: "select",
-            required: true,
-            options: obj.boot_images_dataset.exclude(activated_at: nil).distinct.select_order_map(:name),
-          },
-        }
-      }) do |obj, project_id, public_key, name, size, boot_image|
-        Prog::Vm::Nexus.assemble(public_key, project_id, name:, size:, boot_image:,
-          location_id: obj.location_id, arch: obj.arch, force_host_id: obj.id, enable_ip4: true)
-      end,
-    },
-  }.freeze
-  OBJECT_ACTIONS.each_value(&:freeze)
+            .each { it[1] = UBID.to_ubid(it[1]) }
+        run do |obj, target_location_id|
+          obj.move_to_location(target_location_id)
+        end
+      end
+
+      action "force_create_vm", "Force Create VM" do
+        flash "VM creation scheduled"
+        param :project_id, typecast: :ubid_uuid!, required: true, placeholder: "Project UBID"
+        param :public_key, typecast: :nonempty_str!, required: true
+        param :name, typecast: :nonempty_str, required: nil, placeholder: "auto-generated if blank"
+        param :size, typecast: :nonempty_str!,
+          type: "select",
+          required: true,
+          options: ->(obj) do
+            Option::VmSizes.select { it.arch == obj.arch && (it.family == obj.family || (it.family == "burstable" && obj.accepts_slices)) }.map(&:name)
+          end
+        param :boot_image,
+          typecast: :nonempty_str!,
+          type: "select",
+          required: true,
+          options: ->(obj) do
+            obj.boot_images_dataset.exclude(activated_at: nil).distinct.select_order_map(:name)
+          end
+        run do |obj, project_id, public_key, name, size, boot_image|
+          Prog::Vm::Nexus.assemble(public_key, project_id, name:, size:, boot_image:,
+            location_id: obj.location_id, arch: obj.arch, force_host_id: obj.id, enable_ip4: true)
+        end
+      end
+    end
+  end
+
+  OBJECT_ACTIONS.freeze.each_value(&:freeze)
 
   SEARCH_QUERIES = {
     "Account" => [:email, :name],
@@ -635,8 +883,15 @@ class CloverAdmin < Roda
     "KubernetesCluster" => [:name],
     "PostgresResource" => [:name],
     "Vm" => [:name],
+    "VmHost" => [Sequel[:sshable][:host], Sequel[:host_provider][:server_identifier]],
   }.freeze
   SEARCH_QUERIES.each_value(&:freeze)
+  SEARCH_DATASETS = {
+    "VmHost" => VmHost.dataset
+      .left_join(:sshable, id: :id)
+      .left_join(:host_provider, id: :id)
+      .select_all(:vm_host),
+  }.freeze
   SEARCH_PREFIXES = SEARCH_QUERIES.map { "#{Object.const_get(it[0]).ubid_type} (#{it[0]})" }.join(", ").freeze
 
   OBJECTS_WITH_UI = {
@@ -674,7 +929,11 @@ class CloverAdmin < Roda
     metal
   ].freeze
 
+<<<<<<< HEAD
   CAPACITY_RESERVATION_PROGS = %w[CapacityReservation].freeze
+=======
+  SETUP_VM_HOST_PROVIDERS = [HostProvider::HETZNER_PROVIDER_NAME, *HostProvider::LEASEWEB_PROVIDER_NAMES].freeze
+>>>>>>> 13c340e42af1b46876ff011581f9e7cd317dfa02
 
   plugin :autoforme do
     # simplecov:disable
@@ -741,7 +1000,7 @@ class CloverAdmin < Roda
     end
 
     model Account do
-      order Sequel.desc(Sequel[:accounts][:created_at])
+      order [Sequel.desc(Sequel[:accounts][:created_at]), Sequel.desc(Sequel[:accounts][:id])]
       eager_graph [:identities]
       columns [:name, :email, :status_id, :provider_names, :created_at, :suspended_at]
       column_options email: {type: "text"},
@@ -763,7 +1022,7 @@ class CloverAdmin < Roda
     end
 
     model BillingInfo do
-      order Sequel.desc(Sequel[:billing_info][:created_at])
+      order [Sequel.desc(Sequel[:billing_info][:created_at]), Sequel.desc(Sequel[:billing_info][:id])]
       eager_graph [:project]
       columns do |type_symbol, request|
         cs = [:stripe_id, :project, :valid_vat, :created_at]
@@ -784,7 +1043,7 @@ class CloverAdmin < Roda
     end
 
     model GithubInstallation do
-      order Sequel.desc(:created_at)
+      order [Sequel.desc(:created_at), Sequel.desc(:id)]
       columns [:name, :installation_id, :type, :cache_enabled, :premium_runner_enabled?, :created_at, :allocator_preferences]
 
       column_options type: {type: "select", options: ["Organization", "User"], add_blank: true},
@@ -808,7 +1067,7 @@ class CloverAdmin < Roda
     end
 
     model GithubRepository do
-      order Sequel.desc(:created_at)
+      order [Sequel.desc(:created_at), Sequel.desc(:id)]
       eager [:installation]
       columns do |type_symbol, request|
         if type_symbol == :search_form
@@ -831,7 +1090,7 @@ class CloverAdmin < Roda
     end
 
     model GithubRunner do
-      order Sequel.desc(:created_at)
+      order [Sequel.desc(:created_at), Sequel.desc(Sequel[:github_runner][:id])]
       eager_graph [:strand]
       eager [:installation]
       columns do |type_symbol, request|
@@ -859,7 +1118,7 @@ class CloverAdmin < Roda
     end
 
     model Invoice do
-      order Sequel.desc(:invoice_number)
+      order [Sequel.desc(:invoice_number), Sequel.desc(Sequel[:invoice][:id])]
       eager_graph [:project]
       columns do |type_symbol, request|
         if type_symbol == :search_form
@@ -880,7 +1139,7 @@ class CloverAdmin < Roda
     end
 
     model PaymentMethod do
-      order Sequel.desc(:created_at)
+      order [Sequel.desc(:created_at), Sequel.desc(:id)]
       eager [:billing_info]
       columns do |type_symbol, request|
         if type_symbol == :search_form
@@ -903,12 +1162,12 @@ class CloverAdmin < Roda
     end
 
     model PostgresResource do
-      order Sequel.desc(:created_at)
+      order [Sequel.desc(:created_at), Sequel.desc(:id)]
       eager do |type, _request|
         [:location, :parent, :project] unless type == :association
       end
       columns [:name, :project, :location, :flavor, :target_vm_size, :target_storage_size_gib, :ha_type, :target_version, :parent, :created_at]
-      column_options flavor: {type: "select", options: %w[standard paradedb lantern].freeze, add_blank: true},
+      column_options flavor: {type: "select", options: %w[standard lantern].freeze, add_blank: true},
         ha_type: {type: "select", options: %w[none async sync].freeze, add_blank: true},
         target_version: {type: "select", options: Option::POSTGRES_VERSION_OPTIONS[PostgresResource::Flavor::STANDARD], add_blank: true},
         target_storage_size_gib: {type: "number"},
@@ -927,7 +1186,7 @@ class CloverAdmin < Roda
     end
 
     model PostgresServer do
-      order Sequel.desc(:created_at)
+      order [Sequel.desc(:created_at), Sequel.desc(:id)]
       eager [:resource, :vm]
       columns do |type_symbol, request|
         cs = [:resource, :timeline_access, :synchronization_status, :version, :is_representative, :created_at]
@@ -954,14 +1213,14 @@ class CloverAdmin < Roda
     end
 
     model Project do
-      order Sequel.desc(:created_at)
+      order [Sequel.desc(:created_at), Sequel.desc(:id)]
       columns [:name, :reputation, :billing_info_id, :credit, :created_at]
       column_options reputation: {type: "select", options: %w[new verified limited].freeze, add_blank: true},
         created_at: {type: "text"}
     end
 
     model Strand do
-      order Sequel.desc(:try)
+      order [Sequel.desc(:try), Sequel.desc(:id)]
       columns do |type_symbol, request|
         if type_symbol == :search_form
           [:prog, :label, :try, :parent]
@@ -983,7 +1242,7 @@ class CloverAdmin < Roda
     end
 
     model Vm do
-      order Sequel.desc(:created_at)
+      order [Sequel.desc(:created_at), Sequel.desc(:id)]
       eager do |type, _request|
         [:location, :vm_host, :project, :strand, :semaphores] unless type == :association
       end
@@ -998,7 +1257,7 @@ class CloverAdmin < Roda
     end
 
     model BootImage do
-      order Sequel.desc(:created_at)
+      order [Sequel.desc(:created_at), Sequel.desc(:id)]
       eager [:vm_host]
       columns [:name, :version, :vm_host, :size_gib, :activated_at, :created_at]
       column_options vm_host: ubid_input.call("VmHost"),
@@ -1018,13 +1277,14 @@ class CloverAdmin < Roda
     model VmHost do
       order Sequel[:vm_host][:id]
       eager [:location]
-      eager_graph [:sshable]
+      eager_graph [:sshable, :provider]
       columns do |type_symbol, request|
-        cs = [:sshable_host, :allocation_state, :arch, :location, :data_center, :family, :total_cores, :total_hugepages_1g]
+        cs = [:sshable_host, :allocation_state, :arch, :location, :data_center, :provider_name, :family, :total_cores, :total_hugepages_1g]
         cs.prepend(:ubid) unless type_symbol == :search_form
         cs
       end
       column_options sshable_host: {label: "Sshable", type: :text, value: ""},
+        provider_name: {label: "Provider", type: :text, value: ""},
         allocation_state: {type: "select", options: ["accepting", "draining", "unprepared"], add_blank: true},
         arch: {type: "select", options: ["x64", "arm64"], add_blank: true},
         family: {type: "select", options: Option::VmFamilies.map(&:name), add_blank: true},
@@ -1032,8 +1292,11 @@ class CloverAdmin < Roda
         total_hugepages_1g: {type: "number"}
 
       column_search_filter do |ds, column, value|
-        if column == :sshable_host
+        case column
+        when :sshable_host
           column_grep.call(ds, Sequel[:sshable][:host], value)
+        when :provider_name
+          column_grep.call(ds, Sequel[:provider][:provider_name], value)
         end
       end
     end
@@ -1068,7 +1331,7 @@ class CloverAdmin < Roda
 
       case action
       when "unpause"
-        Semaphore.where(strand_id: strand.id, name: "pause").destroy
+        Semaphore.where(strand_id: strand.id, name: "pause").delete
         strand.this.update(schedule: Sequel::CURRENT_TIMESTAMP)
       else
         Semaphore.incr(strand.id, action)
@@ -1136,9 +1399,11 @@ class CloverAdmin < Roda
         if (actions = OBJECT_ACTIONS[@obj.class.name])
           r.is actions.keys do |key|
             action = actions[key]
+            next unless action.allow?(@obj)
+
             action_type = action.type
             @label = action.label
-            @params = action.params.is_a?(Proc) ? action.params.call(@obj) : action.params
+            @params = action.params
 
             r.get(action_type != :form) do
               if action_type == :direct
@@ -1158,7 +1423,7 @@ class CloverAdmin < Roda
                 next view("object_action")
               end
 
-              result = action.call(@obj, *params)
+              result = action.call(@obj, *params, **({request: r} if action.pass_request))
               if action_type == :content
                 view(content: result)
               else
@@ -1396,6 +1661,51 @@ class CloverAdmin < Roda
       end
     end
 
+    r.on "kubernetes-node-image" do
+      strand_ds = Strand.where(prog: "Kubernetes::BuildNodeImage")
+
+      r.is do
+        r.get do
+          @strands = strand_ds.order(:id).all
+          @location_names = Location.where(id: @strands.map { it.stack[0]["location_id"] }).select_hash(:id, :display_name)
+          view("kubernetes_node_image")
+        end
+
+        r.post do
+          kubernetes_version, image_version = typecast_params.nonempty_str!(%w[kubernetes_version image_version].freeze)
+          location_id = typecast_params.ubid_uuid!("location_id")
+
+          error = if !Option.kubernetes_versions.include?(kubernetes_version)
+            "invalid kubernetes version"
+          elsif Option.kubernetes_locations.none? { it.id == location_id }
+            "invalid location for kubernetes"
+          elsif !Validation::ALLOWED_MACHINE_IMAGE_VERSION_LABEL_PATTERN.match?(image_version)
+            "invalid image version"
+          end
+
+          if error
+            flash["error"] = error
+            r.redirect
+          end
+
+          st = Prog::Kubernetes::BuildNodeImage.assemble(kubernetes_version:, location_id:, image_version:)
+          flash["notice"] = "Started kubernetes node image build strand: #{st.ubid}"
+          r.redirect
+        end
+      end
+
+      r.post :ubid_uuid, "destroy" do |strand_id|
+        unless (strand = strand_ds.with_pk(strand_id))
+          flash["error"] = "Strand not found, it was probably already deleted"
+          r.redirect "/kubernetes-node-image"
+        end
+
+        Semaphore.incr(strand.id, "destroy")
+        flash["notice"] = "Destroying node image build strand: #{strand.ubid}"
+        r.redirect "/kubernetes-node-image"
+      end
+    end
+
     r.on "local-e2e" do
       strand_ds = Strand.where(Sequel.like(:prog, "Test::%"))
 
@@ -1427,6 +1737,7 @@ class CloverAdmin < Roda
       strand_semaphore_action(strand_ds, LOCAL_E2E_PROGS + ["LocalE2eLoop"])
     end
 
+<<<<<<< HEAD
     r.on "capacity_reservations" do
       strand_ds = Strand.where(prog: CAPACITY_RESERVATION_PROGS)
 
@@ -1454,6 +1765,34 @@ class CloverAdmin < Roda
 
         flash["notice"] = "Strand #{strand.ubid} #{(action == "rebalance") ? "rebalance requested" : "#{action}d"}"
         r.redirect "/capacity_reservations"
+=======
+    r.is "setup-vm-host" do
+      r.get do
+        @unprepared_hosts = VmHost.where(allocation_state: "unprepared")
+          .reverse(:created_at, :id)
+          .eager(:sshable, :provider, :strand, :assigned_subnets, :storage_devices)
+          .all
+        view("setup_vm_host")
+      end
+
+      r.post do
+        host, family, provider_name, server_identifier, vhost_block_backend_version =
+          typecast_params.nonempty_str!(%w[host family provider_name server_identifier vhost_block_backend_version].freeze)
+        location_id = typecast_params.ubid_uuid!("location_id")
+        default_boot_images = typecast_params.array(:nonempty_str, "default_boot_images") || []
+        install_os = typecast_params.bool("install_os") || false
+
+        begin
+          NetAddr.parse_ip(host)
+        rescue NetAddr::ValidationError
+          fail CloverError.new(400, "InvalidRequest", "invalid IP address")
+        end
+
+        st = Prog::Vm::HostNexus.assemble(host, location_id:, family:, provider_name:,
+          server_identifier:, vhost_block_backend_version:, default_boot_images:, install_os:)
+        flash["notice"] = "VM host setup started: #{st.ubid} (#{provider_name} #{server_identifier})"
+        r.redirect
+>>>>>>> 13c340e42af1b46876ff011581f9e7cd317dfa02
       end
     end
 
@@ -1532,16 +1871,79 @@ class CloverAdmin < Roda
       view("github_runner_usage")
     end
 
+    r.get "cogs" do
+      @rate = BigDecimal(typecast_params.nonempty_str("rate") || "1.14", exception: false)
+      fail CloverError.new(400, "InvalidRequest", "invalid conversion rate") unless @rate&.positive?
+
+      minio_host_ids = Vm.where(id: MinioServer.select(:vm_id)).exclude(vm_host_id: nil).select(:vm_host_id)
+      nonrunner_vcpus = DB[:vm]
+        .where(vm_host_id: DB[:vm_host].where(location_id: COGS_LOCATION_IDS).select(:id))
+        .left_join(:github_runner, vm_id: :id)
+        .where(Sequel[:github_runner][:id] => nil)
+        .select_group(Sequel[:vm][:vm_host_id].as(:id))
+        .select_append(
+          Sequel.function(:sum, Sequel.case({{family: "burstable"} => Sequel[:vcpus] * 0.5}, :vcpus)).as(:nonrunner_vcpus),
+        )
+
+      memory_per_vcpu = Sequel.case({"arm64" => 3.2}, 4, Sequel[:vm_host][:arch])
+      sellable_vcpus = Sequel.function(:greatest,
+        Sequel.function(:least,
+          Sequel.function(:coalesce, Sequel[:vm_host][:total_cpus], 0) - 1,
+          Sequel.function(:floor, Sequel[:vm_host][:total_hugepages_1g] / memory_per_vcpu)), 0).cast(:integer)
+      monthly_price = Sequel[:vm_host_inventory][:monthly_price]
+      monthly_usd = Sequel.case({"EUR" => monthly_price * @rate}, monthly_price, Sequel[:vm_host_inventory][:currency])
+      server_type = Sequel.function(:coalesce, Sequel.function(:split_part, Sequel[:vm_host_inventory][:server_model], "-", 1), "unknown")
+
+      hosts = DB[:vm_host]
+        .join(:location, id: :location_id)
+        .join(:vm_host_inventory, id: Sequel[:vm_host][:id])
+        .left_join(nonrunner_vcpus.as(:nrv), id: Sequel[:vm_host][:id])
+        .exclude(Sequel[:vm_host][:id] => minio_host_ids)
+        .exclude(Sequel[:vm_host][:allocation_state] => "unprepared")
+        .where(Sequel[:vm_host][:location_id] => COGS_LOCATION_IDS)
+        .select(
+          Sequel[:location][:name].as(:location),
+          Sequel[:vm_host][:location_id],
+          Sequel[:vm_host][:family],
+          Sequel[:vm_host][:arch],
+          sellable_vcpus.as(:sellable_vcpus),
+          monthly_usd.as(:monthly_usd),
+          server_type.as(:server_type),
+          Sequel[:nrv][:nonrunner_vcpus],
+        )
+        .all
+
+      inventory_hosts = hosts.select { it[:arch] == "x64" }
+      @by_location = inventory_hosts.group_by { [it[:location_id], it[:location], it[:family]] }.sort_by { |(location_id, _, family), _| [COGS_LOCATION_IDS.index(location_id), family] }.map do |(_, location, family), group|
+        cogs_row(group, {"Location" => location, "Family" => family})
+      end
+      @by_type = inventory_hosts.group_by { it[:server_type] }.sort_by(&:first).map do |type, group|
+        cogs_row(group, {"Type" => type})
+      end
+
+      runner_hosts = hosts.select { COGS_RUNNER_LOCATION_IDS.include?(it[:location_id]) }
+      @runners_by_type = runner_hosts.group_by { [it[:server_type], it[:arch], it[:family]] }.sort_by(&:first).map do |(type, arch, family), group|
+        cogs_runner_row(group, {"Type" => type, "Arch" => arch, "Family" => family})
+      end
+      @runners_by_family = runner_hosts.group_by { [it[:family], it[:arch]] }.sort_by(&:first).map do |(family, arch), group|
+        cogs_runner_row(group, {"Family" => family, "Arch" => arch})
+      end
+
+      view("cogs")
+    end
+
     r.get "vm-host-usage" do
       @locations = Location.where(id: VmHost.select(:location_id)).select_order_map([:name, :id]).map { |name, id| [name, UBID.to_ubid(id)] }
       @archs = %w[x64 arm64].freeze
       @core_counts = VmHost.exclude(total_cores: nil).distinct.select_order_map(:total_cores)
       @states = %w[unprepared accepting draining].freeze
+      @providers = HostProvider.distinct.select_order_map(:provider_name)
 
       @location_id = typecast_params.ubid("location_id")
       @arch = typecast_params.nonempty_str("arch")
       @cores = typecast_params.pos_int("cores")
       @state = typecast_params.nonempty_str("state")
+      @provider = typecast_params.nonempty_str("provider")
 
       unless r.query_string.empty?
         storage_agg = DB[:storage_device]
@@ -1577,11 +1979,13 @@ class CloverAdmin < Roda
           .left_join(boot_agg.as(:bi), vm_host_id:)
           .left_join(ip4_agg.as(:ip), routed_to_host_id: vmh[:id])
           .left_join(vm_agg.as(:vm), vm_host_id:)
+          .left_join(Sequel[:host_provider].as(:hp), id: vmh[:id])
           .select(
             vmh[:id],
             Sequel[:location][:name].as(:location),
             vmh[:allocation_state],
             vmh[:data_center],
+            Sequel[:hp][:provider_name],
             vmh[:family],
             Sequel.function(:coalesce, Sequel[:vm][:vm_count], 0).as(:vm_count),
             vmh[:used_cores],
@@ -1600,6 +2004,7 @@ class CloverAdmin < Roda
         ds = ds.where(vmh[:arch] => @arch) if @arch
         ds = ds.where(vmh[:total_cores] => @cores) if @cores
         ds = ds.where(vmh[:allocation_state] => @state) if @state
+        ds = ds.where(Sequel[:hp][:provider_name] => @provider) if @provider
 
         @data = ds.map do |row|
           used_storage = row[:total_storage] - row[:available_storage]
@@ -1609,6 +2014,7 @@ class CloverAdmin < Roda
             location: row[:location],
             state: row[:allocation_state],
             datacenter: row[:data_center],
+            provider: row[:provider_name],
             family: row[:family],
             vms: row[:vm_count],
             cores: "#{row[:used_cores]} / #{row[:total_cores]}",
@@ -1700,6 +2106,22 @@ class CloverAdmin < Roda
       r.redirect "/admin-list"
     end
 
+    r.get "presigned-certs" do
+      @rows = %i[presigned_postgres_cert presigned_load_balancer_cert].freeze.map do |table|
+        row = DB[table].select do
+          [
+            count.function.*.as(:count),
+            min(:created_at).as(:min_created_at),
+            max(:created_at).as(:max_created_at),
+          ]
+        end.single_record
+
+        {table:, **row}
+      end
+
+      view("presigned_certs")
+    end
+
     r.get "search" do
       @query = typecast_params.str!("q")
       prefix, term = @query.split(":", 2)
@@ -1717,7 +2139,8 @@ class CloverAdmin < Roda
         next view("search")
       end
       patterns = terms.map { "%#{klass.dataset.escape_like(it)}%" }
-      @search_results = klass.grep(columns, patterns, case_insensitive: true).limit(11).all
+      ds = SEARCH_DATASETS[klass.name] || klass.dataset
+      @search_results = ds.grep(columns, patterns, case_insensitive: true).limit(11).all
       if @search_results.length > 10
         @truncated = @search_results.pop
       end

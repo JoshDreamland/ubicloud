@@ -26,6 +26,7 @@ class Prog::Vm::HostNexus < Prog::Base
       if [HostProvider::HETZNER_PROVIDER_NAME, *HostProvider::LEASEWEB_PROVIDER_NAMES].include?(provider_name)
         vmh.create_addresses
         vmh.set_data_center
+        vmh.create_inventory if vmh.leaseweb?
         # Avoid overriding custom server names for development hosts.
         vmh.set_server_name unless Config.development?
       else
@@ -245,6 +246,10 @@ class Prog::Vm::HostNexus < Prog::Base
     free_hugepages_match = host_meminfo.match(/^HugePages_Free:\s+(\d+)$/)
     fail "Couldn't extract free hugepage count" unless free_hugepages_match
 
+    available_memory_match = host_meminfo.match(/^MemAvailable:\s+(\d+) kB$/)
+    fail "Couldn't extract available memory" unless available_memory_match
+    fail "Insufficient memory left for the host OS" if Integer(available_memory_match.captures.first) < 2 * 1024 * 1024
+
     total_hugepages = Integer(total_hugepages_match.captures.first)
     free_hugepages = Integer(free_hugepages_match.captures.first)
 
@@ -288,7 +293,10 @@ class Prog::Vm::HostNexus < Prog::Base
       end
     end
 
-    vm_host.update(allocation_state: "accepting") if vm_host.allocation_state == "unprepared"
+    if vm_host.allocation_state == "unprepared"
+      vm_host.update(allocation_state: "accepting")
+      delete_from_stack("install_os", "default_boot_images", "vhost_block_backend_version")
+    end
 
     hop_configure_metrics
   end

@@ -71,15 +71,35 @@ RSpec.describe Prog::Vm::HostNexus do
         {ip: "216.22.15.65/26", prefixLength: 26, type: "NORMAL_IP", networkType: "PUBLIC", mainIp: false, gateway: ""},
         {ip: "2607:f5b7:3:104::_64/64", prefixLength: 64, type: "NORMAL_IP", networkType: "PUBLIC", mainIp: false, gateway: ""},
       ]
-      Excon.stub({path: "/bareMetals/v2/servers/123/ips", query: {limit: 50, offset: 0}},
-        {status: 200, body: JSON.generate(ips: rows, _metadata: {totalCount: rows.length})})
-      Excon.stub({path: "/bareMetals/v2/servers/123", method: :get},
-        {status: 200, body: JSON.generate(location: {site: "AMS-01", suite: "8", rack: "9200"})})
-      Excon.stub({path: "/bareMetals/v2/servers/123", method: :put}, {status: 204})
+      stub_request(:get, "https://api.leaseweb.com/bareMetals/v2/servers/123/ips").with(query: {limit: 50, offset: 0})
+        .to_return(status: 200, body: JSON.generate(ips: rows, _metadata: {totalCount: rows.length}))
+      stub_request(:get, "https://api.leaseweb.com/bareMetals/v2/servers/123")
+        .to_return(status: 200, body: JSON.generate(
+          location: {site: "AMS-01", suite: "8", rack: "9200"},
+          rack: {capacity: "10G"},
+          specs: {
+            chassis: "HPE RL300",
+            cpu: {type: "Ampere Altra Max M128-30", quantity: 2},
+            ram: {size: 512, unit: "GB"},
+            hdd: [{size: 3.84, unit: "TB", amount: 2, type: "NVME"}],
+          },
+          contract: {billingCycle: 1, billingFrequency: "MONTH", pricePerFrequency: "512.34", currency: "EUR"},
+        ))
+      stub_request(:put, "https://api.leaseweb.com/bareMetals/v2/servers/123").to_return(status: 204)
 
       st = described_class.assemble("216.22.50.197", provider_name: HostProvider::LEASEWEB_PROVIDER_NAME, server_identifier: "123")
       expect(st.subject.provider_name).to eq(HostProvider::LEASEWEB_PROVIDER_NAME)
       expect(st.subject.data_center).to eq("AMS-01-8-9200")
+      expect(st.subject.inventory).to have_attributes(
+        server_model: "HPE RL300",
+        cpu: "2x Ampere Altra Max M128-30",
+        memory: "512GB",
+        storage: "2x 3.84TB NVMe SSD",
+        uplink: "10Gbps",
+        gpu: nil,
+        monthly_price: BigDecimal("512.34"),
+        currency: "EUR",
+      )
       expect(st.subject.assigned_subnets.map { it.cidr.to_s }.sort).to eq(["216.22.15.64/26", "216.22.50.197/32", "2607:f5b7:3:104::/64"])
       # Only the gatewayed main IP is claimed; the routed block and prefix are VM space.
       expect(st.subject.assigned_host_addresses.map { it.ip.to_s }).to eq ["216.22.50.197/32"]
@@ -96,15 +116,26 @@ RSpec.describe Prog::Vm::HostNexus do
         {ip: "212.95.60.214/26", prefixLength: 26, type: "NORMAL_IP", networkType: "PUBLIC", mainIp: true, gateway: "212.95.60.254"},
       ]
       eu = {headers: {"X-Lsw-Auth" => "eu-key"}}
-      Excon.stub(eu.merge(path: "/bareMetals/v2/servers/456/ips", query: {limit: 50, offset: 0}),
-        {status: 200, body: JSON.generate(ips: rows, _metadata: {totalCount: rows.length})})
-      Excon.stub(eu.merge(path: "/bareMetals/v2/servers/456", method: :get),
-        {status: 200, body: JSON.generate(location: {site: "FRA-10", suite: "2", rack: "11"})})
-      Excon.stub(eu.merge(path: "/bareMetals/v2/servers/456", method: :put), {status: 204})
+      stub_request(:get, "https://api.leaseweb.com/bareMetals/v2/servers/456/ips").with(query: {limit: 50, offset: 0}, **eu)
+        .to_return(status: 200, body: JSON.generate(ips: rows, _metadata: {totalCount: rows.length}))
+      stub_request(:get, "https://api.leaseweb.com/bareMetals/v2/servers/456").with(**eu)
+        .to_return(status: 200, body: JSON.generate(
+          location: {site: "FRA-10", suite: "2", rack: "11"},
+          rack: {capacity: "10G"},
+          specs: {
+            chassis: "Dell R6615",
+            cpu: {type: "AMD EPYC 9354P", quantity: 1},
+            ram: {size: 384, unit: "GB"},
+            hdd: [{size: 1.92, unit: "TB", amount: 2, type: "NVME"}],
+          },
+          contract: {billingCycle: 1, billingFrequency: "MONTH", pricePerFrequency: "441.00", currency: "EUR"},
+        ))
+      stub_request(:put, "https://api.leaseweb.com/bareMetals/v2/servers/456").with(**eu).to_return(status: 204)
 
       st = described_class.assemble("212.95.60.214", provider_name: HostProvider::LEASEWEB_EU_PROVIDER_NAME, server_identifier: "456")
       expect(st.subject.provider_name).to eq(HostProvider::LEASEWEB_EU_PROVIDER_NAME)
       expect(st.subject.data_center).to eq("FRA-10-2-11")
+      expect(st.subject.inventory.monthly_price).to eq(BigDecimal("441.00"))
       expect(st.subject.assigned_host_addresses.map { it.ip.to_s }).to eq ["212.95.60.214/32"]
     end
 
@@ -659,7 +690,7 @@ RSpec.describe Prog::Vm::HostNexus do
       expect { nx.start_vms }.to hop("configure_metrics")
 
       # The VM was signaled to restart, exactly as on a requested reboot.
-      expect(vm.reload.start_after_host_reboot_set?).to be true
+      expect(vm.start_after_host_reboot_set?(cached: false)).to be true
     end
 
     it "verify_spdk hops to verify_hugepages if spdk started" do
@@ -684,9 +715,11 @@ RSpec.describe Prog::Vm::HostNexus do
       vm_host.update(allocation_state: "unprepared")
       vm = create_vm(vm_host_id: vm_host.id)
       Strand.create(id: vm.id, prog: "Vm::Nexus", label: "wait")
+      expect(nx.strand.stack.first.keys).to include("install_os", "default_boot_images", "vhost_block_backend_version")
       expect { nx.start_vms }.to hop("configure_metrics")
       expect(vm_host.reload.allocation_state).to eq("accepting")
       expect(vm.start_after_host_reboot_set?).to be true
+      expect(nx.strand.stack.first.keys).not_to include("install_os", "default_boot_images", "vhost_block_backend_version")
     end
 
     it "start_vms starts vms & becomes accepting & hops to configure_metrics if was draining and in graceful reboot" do
@@ -782,9 +815,21 @@ RSpec.describe Prog::Vm::HostNexus do
       expect { nx.verify_hugepages }.to raise_error RuntimeError, "Couldn't extract free hugepage count"
     end
 
-    it "fails if not enough hugepages for VMs" do
+    it "fails if available memory couldn't be extracted" do
       expect(sshable).to receive(:_cmd).with("cat /proc/meminfo")
         .and_return("Hugepagesize: 1048576 kB\nHugePages_Total: 5\nHugePages_Free: 2")
+      expect { nx.verify_hugepages }.to raise_error RuntimeError, "Couldn't extract available memory"
+    end
+
+    it "fails if hugepages leave too little memory for the host OS" do
+      expect(sshable).to receive(:_cmd).with("cat /proc/meminfo")
+        .and_return("Hugepagesize: 1048576 kB\nHugePages_Total: 120\nHugePages_Free: 120\nMemAvailable: 76148 kB")
+      expect { nx.verify_hugepages }.to raise_error RuntimeError, "Insufficient memory left for the host OS"
+    end
+
+    it "fails if not enough hugepages for VMs" do
+      expect(sshable).to receive(:_cmd).with("cat /proc/meminfo")
+        .and_return("Hugepagesize: 1048576 kB\nHugePages_Total: 5\nHugePages_Free: 2\nMemAvailable: 4194304 kB")
       SpdkInstallation.create(vm_host_id: vm_host.id, version: "v1", allocation_weight: 100, hugepages: 4)
       create_vm(vm_host_id: vm_host.id, name: "vm1", memory_gib: 1)
       create_vm(vm_host_id: vm_host.id, name: "vm2", memory_gib: 2)
@@ -793,14 +838,14 @@ RSpec.describe Prog::Vm::HostNexus do
 
     it "fails if used hugepages exceed spdk hugepages" do
       expect(sshable).to receive(:_cmd).with("cat /proc/meminfo")
-        .and_return("Hugepagesize: 1048576 kB\nHugePages_Total: 10\nHugePages_Free: 5")
+        .and_return("Hugepagesize: 1048576 kB\nHugePages_Total: 10\nHugePages_Free: 5\nMemAvailable: 4194304 kB")
       SpdkInstallation.create(vm_host_id: vm_host.id, version: "v1", allocation_weight: 100, hugepages: 4)
       expect { nx.verify_hugepages }.to raise_error RuntimeError, "Used hugepages exceed SPDK hugepages"
     end
 
     it "calculates used memory for slices and hops" do
       expect(sshable).to receive(:_cmd).with("cat /proc/meminfo")
-        .and_return("Hugepagesize: 1048576 kB\nHugePages_Total: 10\nHugePages_Free: 8")
+        .and_return("Hugepagesize: 1048576 kB\nHugePages_Total: 10\nHugePages_Free: 8\nMemAvailable: 4194304 kB")
       SpdkInstallation.create(vm_host_id: vm_host.id, version: "v1", allocation_weight: 100, hugepages: 4)
       vm_host.update(accepts_slices: true)
       create_vm_host_slice(vm_host_id: vm_host.id, name: "standard1", total_memory_gib: 2)
@@ -812,7 +857,7 @@ RSpec.describe Prog::Vm::HostNexus do
 
     it "updates vm_host with hugepage stats and hops" do
       expect(sshable).to receive(:_cmd).with("cat /proc/meminfo")
-        .and_return("Hugepagesize: 1048576 kB\nHugePages_Total: 10\nHugePages_Free: 8")
+        .and_return("Hugepagesize: 1048576 kB\nHugePages_Total: 10\nHugePages_Free: 8\nMemAvailable: 4194304 kB")
       SpdkInstallation.create(vm_host_id: vm_host.id, version: "v1", allocation_weight: 100, hugepages: 4)
       create_vm(vm_host_id: vm_host.id, name: "vm1", memory_gib: 1)
       create_vm(vm_host_id: vm_host.id, name: "vm2", memory_gib: 2)

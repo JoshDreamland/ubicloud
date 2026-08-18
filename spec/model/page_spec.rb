@@ -28,7 +28,7 @@ RSpec.describe Page do
       pg = create_postgres_resource(project:, location_id: Location::HETZNER_FSN1_ID)
       expect(described_class.root_resources(pg)).to eq [pg.id]
 
-      pv = PostgresServer.create(timeline: pt, resource_id: pg.id, is_representative: false, version: PostgresResource::DEFAULT_VERSION)
+      pv = PostgresServer.create(timeline: pt, resource_id: pg.id, is_representative: false, version: PostgresResource.default_version)
       expect(described_class.root_resources(pv)).to eq [pg.id]
 
       pv = create_postgres_server(resource: pg)
@@ -107,9 +107,7 @@ RSpec.describe Page do
 
     describe "#trigger" do
       it "triggers a page if key is present" do
-        Excon.stub({
-          url: "https://api.incident.io/v2/alert_events/http/source-id",
-          method: "post",
+        stub_request(:post, "https://api.incident.io/v2/alert_events/http/source-id").with(
           body: {
             deduplication_key: p.client.send(:deduplication_key, p.tag),
             status: "firing",
@@ -121,14 +119,12 @@ RSpec.describe Page do
             "Authorization" => "Bearer dummy-key",
             "Content-Type" => "application/json",
           },
-        }, {status: 202})
+        ).to_return(status: 202)
         expect(p.trigger.status).to eq(202)
       end
 
       it "triggers a page with extra links" do
-        Excon.stub({
-          url: "https://api.incident.io/v2/alert_events/http/source-id",
-          method: "post",
+        stub_request(:post, "https://api.incident.io/v2/alert_events/http/source-id").with(
           body: {
             deduplication_key: p.client.send(:deduplication_key, p.tag),
             status: "firing",
@@ -143,16 +139,14 @@ RSpec.describe Page do
             "Authorization" => "Bearer dummy-key",
             "Content-Type" => "application/json",
           },
-        }, {status: 202})
+        ).to_return(status: 202)
         expect(p.client.trigger(p.tag, summary: "title", severity: "low", details: {}, links: [nil, "https://example.com"]).status).to eq(202)
       end
     end
 
     describe "#resolve" do
       it "resolves the page if key is present" do
-        Excon.stub({
-          url: "https://api.incident.io/v2/alert_events/http/source-id",
-          method: "post",
+        stub_request(:post, "https://api.incident.io/v2/alert_events/http/source-id").with(
           body: {
             deduplication_key: p.client.send(:deduplication_key, p.tag),
             status: "resolved",
@@ -162,7 +156,7 @@ RSpec.describe Page do
             "Authorization" => "Bearer dummy-key",
             "Content-Type" => "application/json",
           },
-        }, {status: 202})
+        ).to_return(status: 202)
         expect(p.resolve.status).to eq(202)
       end
     end

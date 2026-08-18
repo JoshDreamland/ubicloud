@@ -51,6 +51,12 @@ RSpec.describe Prog::Vm::Metal::Nexus do
       state: "active")
   }
 
+  def create_load_balancer
+    lb = LoadBalancer.create(name: "test-lb", private_subnet_id: private_subnet.id, project_id: project.id, health_check_endpoint: "/up")
+    LoadBalancerVm.create(load_balancer_id: lb.id, vm_id: vm.id)
+    lb
+  end
+
   describe ".assemble" do
     it "fails if there is no project" do
       expect {
@@ -118,12 +124,34 @@ RSpec.describe Prog::Vm::Metal::Nexus do
       expect(st.stack.first["storage_volumes"].first["track_written"]).to be(false)
     end
 
+    it "supports remote_storage_server_id argument, but only if metal vm" do
+      vm = create_archive_ready_vm
+      source_volume = VmStorageVolume.first(vm_id: vm.id)
+      rss = RemoteStorageServer.create(
+        source_vm_storage_volume_id: source_volume.id, vm_host_id: vm.vm_host_id,
+        psk: "supersecretpsk", psk_identity: "ubiblk-rss", port: 5500,
+      )
+      st = Prog::Vm::Nexus.assemble("some_ssh key", project.id, remote_storage_server_id: rss.id)
+      expect(st.stack.first["storage_volumes"].first["remote_storage_server_id"]).to eq rss.id
+
+      vm.location.update(provider: "aws")
+      expect do
+        Prog::Vm::Nexus.assemble("some_ssh key", project.id, remote_storage_server_id: rss.id)
+      end.to raise_error(RuntimeError, "Booting from a remote storage server is only supported for metal locations")
+    end
+
     it "sets machine_image_version_id on boot volume when boot_image is name@version" do
       miv = create_machine_image_version_metal(project_id: project.id).machine_image_version
       st = Prog::Vm::Nexus.assemble("some_ssh key", project.id, boot_image: "test-mi@v1", storage_volumes: [{size_gib: 20}, {size_gib: 10, read_only: true}])
       vols = st.stack.first["storage_volumes"]
       expect(vols[0]["machine_image_version_id"]).to eq(miv.id)
       expect(vols[1]).not_to have_key("machine_image_version_id")
+    end
+
+    it "uses a machine image version supplied by the caller without looking it up by name" do
+      miv = create_machine_image_version_metal.machine_image_version
+      st = Prog::Vm::Nexus.assemble("some_ssh key", project.id, boot_image: "ubuntu-noble", storage_volumes: [{size_gib: 20, machine_image_version_id: miv.id}])
+      expect(st.stack.first["storage_volumes"].first["machine_image_version_id"]).to eq(miv.id)
     end
 
     it "fails if machine image name does not exist in project/location" do
@@ -385,7 +413,7 @@ RSpec.describe Prog::Vm::Metal::Nexus do
   describe "#create_unix_user" do
     it "runs adduser" do
       expect(nx).to receive(:rand).and_return(1111)
-      expect(sshable).to receive(:_cmd).with(<<~COMMAND)
+      expect(sshable).to receive(:_cmd).with(<<~COMMAND, log: :on_error)
         set -ueo pipefail
         if id #{nx.vm_name} &>/dev/null; then
           procs=$(ps -u #{nx.vm_name} -o pid,comm,args --no-headers) || [ $? -eq 1 ]
@@ -441,7 +469,7 @@ RSpec.describe Prog::Vm::Metal::Nexus do
         project.set_ff_ipv6_disabled(true)
 
         expect(sshable).to receive(:_cmd).with("common/bin/daemonizer --check prep_#{nx.vm_name}").and_return("NotStarted")
-        expect(sshable).to receive(:_cmd).with(/sudo -u vm[0-9a-z]+ tee/, stdin: String) do |**kwargs|
+        expect(sshable).to receive(:_cmd).with(/sudo -u vm[0-9a-z]+ tee/, stdin: String, log: :on_error) do |**kwargs|
           require "json"
           params = JSON(kwargs.fetch(:stdin))
           expect(params).to include(
@@ -462,7 +490,7 @@ RSpec.describe Prog::Vm::Metal::Nexus do
             **frame_update,
           )
         end
-        expect(sshable).to receive(:_cmd).with("common/bin/daemonizer sudo\\ host/bin/setup-vm\\ prep\\ vm4hjdwr prep_vm4hjdwr", {stdin: /{"storage":{"vm.*_0":{"key":"key","init_vector":"iv","algorithm":"aes-256-gcm","auth_data":"somedata"}}}/})
+        expect(sshable).to receive(:_cmd).with("common/bin/daemonizer sudo\\ host/bin/setup-vm\\ prep\\ vm4hjdwr prep_vm4hjdwr", {stdin: /{"storage":{"vm.*_0":{"key":"key","init_vector":"iv","algorithm":"aes-256-gcm","auth_data":"somedata"}}}/, log: :on_error})
 
         expect { nx.prep }.to nap(1)
       end
@@ -476,7 +504,7 @@ RSpec.describe Prog::Vm::Metal::Nexus do
 
   describe "#clean_prep" do
     it "cleans and hops" do
-      expect(sshable).to receive(:_cmd).with(/common\/bin\/daemonizer --clean prep_/)
+      expect(sshable).to receive(:_cmd).with(/common\/bin\/daemonizer --clean prep_/, log: :on_error)
       expect { nx.clean_prep }.to hop("wait_sshable")
     end
   end
@@ -565,7 +593,7 @@ RSpec.describe Prog::Vm::Metal::Nexus do
       # Second run is able to allocate, but there are still vms in the queue, so we don't resolve the page
       expect(Scheduling::Allocator).to receive(:allocate)
       expect { nx.start }.to hop("create_unix_user")
-        .and change { vm.reload.waiting_for_capacity_set? }.from(true).to(false)
+        .and change { vm.waiting_for_capacity_set?(cached: false) }.from(true).to(false)
       expect(Page.active.count).to eq(1)
       expect(Page.active.first.resolve_set?).to be false
 
@@ -681,6 +709,52 @@ RSpec.describe Prog::Vm::Metal::Nexus do
         data_center_exclusion_filter: [],
         location_filter: [Location::GITHUB_RUNNERS_ID, Location::HETZNER_FSN1_ID, Location::HETZNER_HEL1_ID, Location::LEASEWEB_WDC02_ID],
         location_preference: [Location::LEASEWEB_WDC02_ID],
+        gpu_count: 0,
+        gpu_device: nil,
+        family_filter: ["standard"],
+      )
+      expect { nx.start }.to hop("create_unix_user")
+    end
+
+    it "excludes hosts for runners if set for the installation" do
+      excluded_host_id = VmHost.generate_uuid
+      installation = GithubInstallation.create(name: "ubicloud", type: "Organization", installation_id: 123, project_id: project.id, allocator_preferences: {"host_exclusion_filter" => [excluded_host_id]})
+      GithubRunner.create(vm_id: vm.id, repository_name: "ubicloud/test", label: "ubicloud", installation_id: installation.id)
+      vm.location_id = Location::GITHUB_RUNNERS_ID
+
+      expect(Scheduling::Allocator).to receive(:allocate).with(
+        vm, storage_volumes,
+        allocation_state_filter: ["accepting"],
+        distinct_storage_devices: false,
+        host_filter: [],
+        host_exclusion_filter: [excluded_host_id],
+        data_center_exclusion_filter: [],
+        location_filter: [Location::GITHUB_RUNNERS_ID, Location::HETZNER_FSN1_ID, Location::HETZNER_HEL1_ID],
+        location_preference: [Location::GITHUB_RUNNERS_ID],
+        gpu_count: 0,
+        gpu_device: nil,
+        family_filter: ["standard"],
+      )
+      expect { nx.start }.to hop("create_unix_user")
+    end
+
+    it "combines installation host exclusions with the caller-provided exclude_host_ids" do
+      excluded_host_id = VmHost.generate_uuid
+      called_host_id = VmHost.generate_uuid
+      installation = GithubInstallation.create(name: "ubicloud", type: "Organization", installation_id: 123, project_id: project.id, allocator_preferences: {"host_exclusion_filter" => [excluded_host_id]})
+      GithubRunner.create(vm_id: vm.id, repository_name: "ubicloud/test", label: "ubicloud", installation_id: installation.id)
+      vm.location_id = Location::GITHUB_RUNNERS_ID
+      st.stack = [{"storage_volumes" => storage_volumes, "exclude_host_ids" => [called_host_id]}]
+
+      expect(Scheduling::Allocator).to receive(:allocate).with(
+        vm, storage_volumes,
+        allocation_state_filter: ["accepting"],
+        distinct_storage_devices: false,
+        host_filter: [],
+        host_exclusion_filter: [called_host_id, excluded_host_id],
+        data_center_exclusion_filter: [],
+        location_filter: [Location::GITHUB_RUNNERS_ID, Location::HETZNER_FSN1_ID, Location::HETZNER_HEL1_ID],
+        location_preference: [Location::GITHUB_RUNNERS_ID],
         gpu_count: 0,
         gpu_device: nil,
         family_filter: ["standard"],
@@ -873,7 +947,7 @@ RSpec.describe Prog::Vm::Metal::Nexus do
   describe "#wait_sshable" do
     it "naps 6 seconds if it's the first time we execute wait_sshable" do
       expect { nx.wait_sshable }.to nap(6)
-        .and change { vm.reload.update_firewall_rules_set? }.from(false).to(true)
+        .and change { vm.update_firewall_rules_set?(cached: false) }.from(false).to(true)
     end
 
     it "naps if not sshable" do
@@ -913,7 +987,7 @@ RSpec.describe Prog::Vm::Metal::Nexus do
       VmStorageVolume.create(vm_id: vm.id, boot: false, size_gib: 15, disk_index: 1, use_bdev_ubi: false, storage_device_id: sd.id)
     end
 
-    it "hops to wait when no volume has machine_image_version_id" do
+    it "hops to wait when no volume has no machine_image_version_id or remote_storage_server_id" do
       expect { nx.wait_storage_catchup }.to hop("wait")
     end
 
@@ -925,13 +999,22 @@ RSpec.describe Prog::Vm::Metal::Nexus do
       expect { nx.wait_storage_catchup }.to nap(30)
     end
 
-    it "clears machine_image_version_id and hops to wait when volume is caught up" do
+    it "clears machine_image_version_id and remote_storage_server_id and hops to wait when volume is caught up" do
       miv = create_machine_image_version_metal
-      vm.vm_storage_volumes_dataset.where(boot: false).update(machine_image_version_id: miv.id)
+      sv = vm.vm_storage_volumes_dataset.first(boot: false)
+      sv.update(machine_image_version_id: miv.id)
+      rvm = create_vm(vm_host_id: vm.vm_host_id)
+      Strand.create_with_id(rvm.id, prog: "Vm::Metal::Nexus", label: "stopped_by_admin")
+      VhostBlockBackend.create(version: "0.5.1", allocation_weight: 100, vm_host_id: vm.vm_host_id)
+      rsv = VmStorageVolume.create(vm_id: rvm.id, boot: false, size_gib: 15, disk_index: 0, use_bdev_ubi: false, storage_device_id: sv.storage_device_id, key_encryption_key_1_id: StorageKeyEncryptionKey.create_random(auth_data: "abcdef1234567890").id)
+      rss = Prog::Storage::RemoteStorageServer::Nexus.assemble(rsv.id).subject
+      VmStorageVolume.create(vm_id: vm.id, boot: false, size_gib: 15, disk_index: 2, use_bdev_ubi: false, storage_device_id: sv.storage_device_id, remote_storage_server_id: rss.id)
       payload = {command: "status"}
       expect(vm.vm_host.sshable).to receive(:_cmd).with("sudo nc -U /var/storage/#{vm.inhost_name}/1/rpc.sock -q 2 -w 2 | head -n 1", stdin: payload.to_json).and_return('{"status": {"stripes": {"fetched": 100, "source": 100}}}')
+      expect(vm.vm_host.sshable).to receive(:_cmd).with("sudo nc -U /var/storage/#{vm.inhost_name}/2/rpc.sock -q 2 -w 2 | head -n 1", stdin: payload.to_json).and_return('{"status": {"stripes": {"fetched": 100, "source": 100}}}')
       expect { nx.wait_storage_catchup }.to hop("wait")
-      expect(vm.vm_storage_volumes.first.reload.machine_image_version_id).to be_nil
+        .and change { rss.destroy_set?(cached: false) }.from(false).to(true)
+        .and change { vm.vm_storage_volumes_dataset.where(machine_image_version_id: nil).where(remote_storage_server_id: nil).count }.from(1).to(3)
     end
   end
 
@@ -1043,9 +1126,22 @@ RSpec.describe Prog::Vm::Metal::Nexus do
       expect { nx.wait }.to hop("update_firewall_rules")
     end
 
-    it "hops to wait_storage_catchup when needed" do
+    it "hops to wait_storage_catchup when storage volume has machine_image_version_id" do
       miv = create_machine_image_version_metal
       VmStorageVolume.create(vm_id: vm.id, boot: true, size_gib: 20, disk_index: 0, use_bdev_ubi: false, machine_image_version_id: miv.id)
+      expect { nx.wait }.to hop("wait_storage_catchup")
+    end
+
+    it "hops to wait_storage_catchup when storage volume has remote_storage_server_id" do
+      target_host = create_vm_host
+      rss_source_vm = create_vm(vm_host_id: target_host.id, name: "rss-source-vm")
+      sd = StorageDevice.create(vm_host_id: target_host.id, name: "rss-sd", total_storage_gib: 10, available_storage_gib: 10)
+      Strand.create_with_id(rss_source_vm.id, prog: "Vm::Metal::Nexus", label: "stopped_by_admin")
+      VhostBlockBackend.create(version: "0.5.1", allocation_weight: 100, vm_host_id: target_host.id)
+      rss_source_volume = VmStorageVolume.create(vm_id: rss_source_vm.id, boot: true, size_gib: 5, disk_index: 0, storage_device_id: sd.id,
+        key_encryption_key_1_id: StorageKeyEncryptionKey.create_random(auth_data: "rss-src").id)
+      rss = Prog::Storage::RemoteStorageServer::Nexus.assemble(rss_source_volume.id).subject
+      VmStorageVolume.create(vm_id: vm.id, boot: true, size_gib: 20, disk_index: 0, use_bdev_ubi: false, remote_storage_server_id: rss.id)
       expect { nx.wait }.to hop("wait_storage_catchup")
     end
 
@@ -1084,7 +1180,7 @@ RSpec.describe Prog::Vm::Metal::Nexus do
       vm.incr_update_firewall_rules
       expect(nx).to receive(:push).with(Prog::Vnet::Metal::UpdateFirewallRules, {}, :update_firewall_rules)
       expect { nx.update_firewall_rules }
-        .to change { vm.reload.update_firewall_rules_set? }.from(true).to(false)
+        .to change { vm.update_firewall_rules_set?(cached: false) }.from(true).to(false)
     end
 
     it "hops to wait if firewall rules are applied" do
@@ -1099,7 +1195,7 @@ RSpec.describe Prog::Vm::Metal::Nexus do
       expect(nx).to receive(:write_params_json)
       expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm reinstall-systemd-units #{vm.inhost_name}")
       expect { nx.update_spdk_dependency }.to hop("wait")
-        .and change { vm.reload.update_spdk_dependency_set? }.from(true).to(false)
+        .and change { vm.update_spdk_dependency_set?(cached: false) }.from(true).to(false)
     end
   end
 
@@ -1108,7 +1204,7 @@ RSpec.describe Prog::Vm::Metal::Nexus do
       vm.incr_restart
       expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm restart #{vm.inhost_name}")
       expect { nx.restart }.to hop("wait")
-        .and change { vm.reload.restart_set? }.from(true).to(false)
+        .and change { vm.restart_set?(cached: false) }.from(true).to(false)
     end
   end
 
@@ -1117,7 +1213,7 @@ RSpec.describe Prog::Vm::Metal::Nexus do
       vm.incr_start
       expect(sshable).to receive(:_cmd).with("sudo systemctl start #{vm.inhost_name}")
       expect { nx.start_after_stop }.to nap(5)
-        .and change { vm.reload.start_set? }.from(true).to(false)
+        .and change { vm.start_set?(cached: false) }.from(true).to(false)
     end
 
     it "hops to wait if vm is available" do
@@ -1152,24 +1248,24 @@ RSpec.describe Prog::Vm::Metal::Nexus do
       vm.incr_stopping
       expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{vm.inhost_name}")
       expect { nx.stopped }.to hop("stopped_by_admin")
-        .and change { vm.reload.admin_stop_set? }.from(true).to(false)
-        .and change { vm.reload.stop_set? }.from(true).to(false)
-        .and change { vm.reload.stopping_set? }.from(true).to(false)
+        .and change { vm.admin_stop_set?(cached: false) }.from(true).to(false)
+        .and change { vm.stop_set?(cached: false) }.from(true).to(false)
+        .and change { vm.stopping_set?(cached: false) }.from(true).to(false)
     end
 
     it "decrements stop semaphore with stop and stopping semaphores" do
       vm.incr_stop
       vm.incr_stopping
       expect { nx.stopped }.to nap(0)
-        .and change { vm.reload.stop_set? }.from(true).to(false)
-        .and not_change { vm.reload.stopping_set? }
+        .and change { vm.stop_set?(cached: false) }.from(true).to(false)
+        .and not_change { vm.stopping_set?(cached: false) }
     end
 
     it "naps if not running with stop semaphore" do
       vm.incr_stop
       expect(sshable).to receive(:_cmd).with("systemctl is-active #{vm.inhost_name} #{vm.inhost_name}-dnsmasq").and_return("inactive\nactive\n")
       expect { nx.stopped }.to nap(0)
-        .and change { vm.reload.stop_set? }.from(true).to(false)
+        .and change { vm.stop_set?(cached: false) }.from(true).to(false)
     end
 
     it "does a soft stop if running with stop semaphore" do
@@ -1177,15 +1273,15 @@ RSpec.describe Prog::Vm::Metal::Nexus do
       expect(sshable).to receive(:_cmd).with("systemctl is-active #{vm.inhost_name} #{vm.inhost_name}-dnsmasq").and_return("active\nactive\n")
       expect(sshable).to receive(:_cmd).with("sudo host/bin/stop-vm #{vm.inhost_name}")
       expect { nx.stopped }.to nap(10)
-        .and change { vm.reload.stop_set? }.from(true).to(false)
-        .and change { vm.reload.stopping_set? }.from(false).to(true)
+        .and change { vm.stop_set?(cached: false) }.from(true).to(false)
+        .and change { vm.stopping_set?(cached: false) }.from(false).to(true)
     end
 
     it "decrements stopping semaphore when stopping semaphore if vm not running" do
       vm.incr_stopping
       expect(sshable).to receive(:_cmd).with("systemctl is-active #{vm.inhost_name} #{vm.inhost_name}-dnsmasq").and_return("inactive\nactive\n")
       expect { nx.stopped }.to nap(0)
-        .and change { vm.reload.stopping_set? }.from(true).to(false)
+        .and change { vm.stopping_set?(cached: false) }.from(true).to(false)
     end
 
     it "attempts nice shutdown with stopping semaphore and vm is running" do
@@ -1227,7 +1323,7 @@ RSpec.describe Prog::Vm::Metal::Nexus do
       vm.incr_start
       vm.incr_restart
       expect { nx.stopped }.to hop("stopped_by_admin")
-        .and not_change { vm.reload.prepare_to_move_set? }
+        .and not_change { vm.prepare_to_move_set?(cached: false) }
     end
   end
 
@@ -1235,14 +1331,14 @@ RSpec.describe Prog::Vm::Metal::Nexus do
     it "hops to start_after_host_reboot when needed" do
       vm.incr_start_after_host_reboot
       expect { nx.unavailable }.to hop("start_after_host_reboot")
-        .and change { vm.reload.checkup_set? }.from(false).to(true)
+        .and change { vm.checkup_set?(cached: false) }.from(false).to(true)
     end
 
     it "restarts the VM when needed" do
       vm.incr_restart
       expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm restart #{vm.inhost_name}")
       expect { nx.unavailable }.to nap(0)
-        .and change { vm.reload.restart_set? }.from(true).to(false)
+        .and change { vm.restart_set?(cached: false) }.from(true).to(false)
     end
 
     it "hops to start_after_stop when needed" do
@@ -1340,7 +1436,7 @@ RSpec.describe Prog::Vm::Metal::Nexus do
       page = Prog::PageNexus.assemble("#{vm.ubid} stopped unexpectedly", ["VmExit", vm.ubid], vm.ubid).subject
       expect(sshable).to receive(:_cmd).with("systemctl is-active #{vm.inhost_name} #{vm.inhost_name}-dnsmasq").and_return("active\nactive\n")
       expect { nx.unavailable }.to hop("wait")
-        .and change { page.reload.resolve_set? }.from(false).to(true)
+        .and change { page.resolve_set?(cached: false) }.from(false).to(true)
     end
   end
 
@@ -1359,35 +1455,35 @@ RSpec.describe Prog::Vm::Metal::Nexus do
     end
 
     it "absorbs an already deleted errors as a success" do
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10).and_raise(
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10, log: :on_error).and_raise(
         Sshable::SshError.new("stop", "", "Failed to stop #{nx.vm_name} Unit .* not loaded.", 1, nil),
       )
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq").and_raise(
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq", log: :on_error).and_raise(
         Sshable::SshError.new("stop", "", "Failed to stop #{nx.vm_name} Unit .* not loaded.", 1, nil),
       )
-      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete #{nx.vm_name}")
+      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete #{nx.vm_name}", log: :on_error)
 
       expect { nx.destroy }.to hop("destroy_slice")
     end
 
     it "raises unexpected vm stop errors" do
       ex = Sshable::SshError.new("stop", "", "unknown error", 1, nil)
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10).and_raise(ex)
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10, log: :on_error).and_raise(ex)
 
       expect { nx.destroy }.to raise_error ex
     end
 
     it "raises unexpected dnsmasq stop errors" do
       ex = Sshable::SshError.new("stop", "", "unknown error", 1, nil)
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10)
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq").and_raise(ex)
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10, log: :on_error)
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq", log: :on_error).and_raise(ex)
       expect { nx.destroy }.to raise_error ex
     end
 
     it "hops when all commands are succeeded" do
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10)
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq")
-      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete #{nx.vm_name}")
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10, log: :on_error)
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq", log: :on_error)
+      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete #{nx.vm_name}", log: :on_error)
 
       expect { nx.destroy }.to hop("destroy_slice")
       expect(vm.display_state).to eq("deleting")
@@ -1400,9 +1496,9 @@ RSpec.describe Prog::Vm::Metal::Nexus do
       dev = StorageDevice.create(name: "DEFAULT", total_storage_gib: 1000, available_storage_gib: 500)
       VmStorageVolume.create(vm_id: vm.id, boot: true, size_gib: 20, disk_index: 0, use_bdev_ubi: false, storage_device_id: dev.id)
 
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10)
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq")
-      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete #{nx.vm_name}")
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10, log: :on_error)
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq", log: :on_error)
+      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete #{nx.vm_name}", log: :on_error)
 
       expect { nx.destroy }.to hop("destroy_slice")
         .and change { dev.reload.available_storage_gib }.from(500).to(520)
@@ -1410,17 +1506,17 @@ RSpec.describe Prog::Vm::Metal::Nexus do
 
     it "hops to remove_vm_from_load_balancer if vm is part of a load balancer" do
       expect(vm).to receive(:load_balancer).and_return(instance_double(LoadBalancer)).at_least(:once)
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10)
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq")
-      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete_keep_net #{nx.vm_name}")
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10, log: :on_error)
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq", log: :on_error)
+      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete_keep_net #{nx.vm_name}", log: :on_error)
 
       expect { nx.destroy }.to hop("remove_vm_from_load_balancer")
     end
 
     it "detaches from pci devices" do
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10)
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq")
-      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete #{nx.vm_name}")
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10, log: :on_error)
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq", log: :on_error)
+      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete #{nx.vm_name}", log: :on_error)
 
       pci = PciDevice.create(vm_id: vm.id, vm_host_id: vm_host.id, slot: "01:00.0", device_class: "dc", vendor: "vd", device: "dv", numa_node: 0, iommu_group: 3)
       expect(pci.vm).to eq(vm)
@@ -1430,9 +1526,9 @@ RSpec.describe Prog::Vm::Metal::Nexus do
 
     it "detaches from gpu partition" do
       expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete_gpu_partition #{nx.vm_name}")
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10)
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq")
-      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete #{nx.vm_name}")
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10, log: :on_error)
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq", log: :on_error)
+      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete #{nx.vm_name}", log: :on_error)
 
       pci = PciDevice.create(vm_host_id: vm_host.id, slot: "01:00.0", device_class: "dc", vendor: "vd", device: "dv", numa_node: 0, iommu_group: 3)
       gp = GpuPartition.create(vm_id: vm.id, vm_host_id: vm_host.id, partition_id: 1, gpu_count: 1)
@@ -1443,9 +1539,9 @@ RSpec.describe Prog::Vm::Metal::Nexus do
     end
 
     it "updates slice" do
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10)
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq")
-      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete #{nx.vm_name}")
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10, log: :on_error)
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq", log: :on_error)
+      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete #{nx.vm_name}", log: :on_error)
 
       slice = VmHostSlice.create(vm_host_id: vm_host.id, name: "standard", family: "standard", cores: 1, total_cpu_percent: 200, used_cpu_percent: 200, total_memory_gib: 8, used_memory_gib: 8)
       vm.update(vm_host_slice_id: slice.id)
@@ -1455,9 +1551,9 @@ RSpec.describe Prog::Vm::Metal::Nexus do
     end
 
     it "fails if VM cores is 0" do
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10)
-      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq")
-      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete #{nx.vm_name}")
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}", timeout: 10, log: :on_error)
+      expect(sshable).to receive(:_cmd).with("sudo systemctl stop #{nx.vm_name}-dnsmasq", log: :on_error)
+      expect(sshable).to receive(:_cmd).with("sudo host/bin/setup-vm delete #{nx.vm_name}", log: :on_error)
 
       vm.cores = 0
 
@@ -1552,8 +1648,31 @@ RSpec.describe Prog::Vm::Metal::Nexus do
         {stdin: /{"storage":{"vm.*_0":{"key":"key","init_vector":"iv","algorithm":"aes-256-gcm","auth_data":"somedata"}}}/},
       )
       expect { nx.start_after_host_reboot }.to hop("wait")
-        .and change { vm.reload.update_firewall_rules_set? }.from(false).to(true)
+        .and change { vm.update_firewall_rules_set?(cached: false) }.from(false).to(true)
       expect(vm.reload.display_state).to eq("running")
+    end
+
+    it "hops to restore_load_balancer if the vm is part of a load balancer" do
+      create_load_balancer
+      expect(sshable).to receive(:_cmd).with(/sudo host\/bin\/setup-vm recreate-unpersisted #{nx.vm_name}/, {stdin: '{"storage":{}}'})
+      expect { nx.start_after_host_reboot }.to hop("restore_load_balancer")
+    end
+  end
+
+  describe "#restore_load_balancer" do
+    it "reinstalls the load balancer rules in the recreated network namespace" do
+      lb = create_load_balancer
+      expect { nx.restore_load_balancer }.to hop(:update_load_balancer, "Vnet::UpdateLoadBalancerNode") { it.strand_update_args[:stack].first["load_balancer_id"] == lb.id }
+    end
+
+    it "hops to wait after the rules are reinstalled" do
+      create_load_balancer
+      st.update(retval: {"msg" => "load balancer is updated"})
+      expect { nx.restore_load_balancer }.to hop("wait")
+    end
+
+    it "hops to wait if the vm is no longer part of a load balancer" do
+      expect { nx.restore_load_balancer }.to hop("wait")
     end
   end
 

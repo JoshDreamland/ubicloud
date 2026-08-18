@@ -249,7 +249,7 @@ class Clover < Roda
     end
 
     case e
-    when Sequel::ValidationFailed, Roda::RodaPlugins::InvalidRequestBody::Error, Roda::RodaPlugins::TypecastParams::Error
+    when Sequel::ValidationFailed, Roda::RodaPlugins::InvalidRequestBody::Error, Roda::RodaPlugins::TypecastParams::Error, Roda::RodaPlugins::DisallowFileUploads::Error
       code = 400
       type = "InvalidRequest"
       message = e.to_s
@@ -284,11 +284,11 @@ class Clover < Roda
       code = 500
       type = "InternalServerError"
       message = "There was a temporary error attempting to make this change, please try again."
-      Clog.emit("route exception", Util.exception_to_hash(e))
+      Clog.emit("route exception", Util.exception_to_hash(e, into: {request: request.inspect}))
     else
       raise e if Config.test? && e.message != "test error"
 
-      Clog.emit("route exception", Util.exception_to_hash(e))
+      Clog.emit("route exception", Util.exception_to_hash(e, into: {request: request.inspect}))
 
       code = 500
       type = "UnexpectedError"
@@ -369,7 +369,7 @@ class Clover < Roda
       :disallow_password_reuse, :password_grace_period, :active_sessions,
       :verify_login_change, :change_password_notify, :confirm_password,
       :otp, :webauthn, :recovery_codes, :omniauth, :otp_unlock, :otp_lockout_email,
-      :audit_logging
+      :audit_logging, :close_account_email
 
     title_instance_variable :@page_title
     check_csrf? false
@@ -755,6 +755,14 @@ class Clover < Roda
     close_account_redirect "/login"
     close_account_route "account/close-account"
     close_account_view { view "account/close_account", "My Account" }
+    send_close_account_email do
+      user = Account[account_id]
+      Util.send_email(user.email, "Ubicloud Account Closed",
+        greeting: "Hello #{user.name},",
+        body: ["This email is a confirmation that you have closed your account.",
+          "If you did not initiate this request, reach out to our team at support@ubicloud.com.",
+          "Otherwise, thank you for using Ubicloud, and we hope you see you again in the future."])
+    end
 
     before_close_account do
       scope.handle_validation_failure(true) do

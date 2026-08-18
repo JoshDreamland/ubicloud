@@ -11,9 +11,10 @@ class PostgresTimeline < Sequel::Model
 
   plugin ResourceMethods, encrypted_columns: :secret_key
   plugin ProviderDispatcher, __FILE__
-  plugin SemaphoreMethods, :destroy, :take_backup_for_converge
+  plugin SemaphoreMethods, :destroy, :take_backup_for_converge, :refresh_blob_storage_policy
 
   BACKUP_BUCKET_EXPIRATION_DAYS = 8
+  DOWNLOAD_CREDENTIALS_DURATION_SECONDS = 60 * 60 * 36
 
   def bucket_name
     ubid
@@ -67,7 +68,7 @@ class PostgresTimeline < Sequel::Model
 
     @backups = list_objects("basebackups_005/", delimiter: "/").select { it.key.end_with?("backup_stop_sentinel.json") }
   rescue => ex
-    recoverable_errors = ["The AWS Access Key Id you provided does not exist in our records.", "The specified bucket does not exist", "AccessDenied", "No route to host", "Connection refused"]
+    recoverable_errors = ["Access Key Id you provided does not exist in our records.", "The specified bucket does not exist", "AccessDenied", "No route to host", "Connection refused"]
     Clog.emit("Backup fetch exception", Util.exception_to_hash(ex))
     raise unless recoverable_errors.any? { ex.message.include?(it) }
 
@@ -124,6 +125,17 @@ class PostgresTimeline < Sequel::Model
 
   def blob_storage_policy
     {Version: "2012-10-17", Statement: [{Effect: "Allow", Action: ["s3:*"], Resource: ["arn:aws:s3:::#{ubid}*"]}]}
+  end
+
+  # Least-privilege, read-only policy handed to customers for downloading their own
+  # backups. Passed as an inline STS session policy when minting temporary credentials
+  # (see #create_download_credentials) rather than attached to a persistent IAM/canned
+  # policy object, since no standing credential is created for this feature.
+  def download_blob_storage_policy
+    {Version: "2012-10-17", Statement: [
+      {Effect: "Allow", Action: ["s3:ListBucket", "s3:GetBucketLocation"], Resource: ["arn:aws:s3:::#{ubid}"]},
+      {Effect: "Allow", Action: ["s3:GetObject", "s3:GetObjectVersion"], Resource: ["arn:aws:s3:::#{ubid}/basebackups_005/*", "arn:aws:s3:::#{ubid}/wal_005/*"]},
+    ]}
   end
 end
 

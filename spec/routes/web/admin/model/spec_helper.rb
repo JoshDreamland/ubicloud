@@ -375,6 +375,11 @@ module AdminModelSpecHelper
       LocationAz.create(location_id: location.id, az: "us-east-1a", zone_id: "use1-az1")
     end
 
+    def create_provider_ip_range
+      location = Location.create(name: "us-west-2", display_name: "AWS US West 2", ui_name: "AWS US West", visible: true, provider: "aws", project_id: nil)
+      ProviderIpRange.create(location_id: location.id, bucket_id: "intra_region", ip_version: 4, cidrs: Sequel.pg_array(["3.5.140.0/22"], :cidr))
+    end
+
     def create_location_credential_aws
       location = Location.create(name: "test-loc-cred", display_name: "Test Location", ui_name: "Test", visible: true, provider: "aws")
       LocationCredentialAws.create(access_key: "test-key", secret_key: "test-secret") { it.id = location.id }
@@ -516,6 +521,12 @@ module AdminModelSpecHelper
       project = Project.create(name: "test-project")
       code = DiscountCode.create(code: "TEST123", credit_amount: 10, expires_at: Time.now + 86400)
       ProjectDiscountCode.create(project_id: project.id, discount_code_id: code.id)
+    end
+
+    def create_remote_storage_server
+      volume = create_vm_storage_volume
+      host = create_vm_host
+      RemoteStorageServer.create(source_vm_storage_volume_id: volume.id, vm_host_id: host.id, psk: "supersecretpsk", psk_identity: "ubiblk-rss", port: 5500)
     end
 
     def create_rhizome_installation

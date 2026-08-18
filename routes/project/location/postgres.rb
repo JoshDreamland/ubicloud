@@ -75,18 +75,12 @@ class Clover
 
         validate_postgres_input(pg.name, postgres_params)
 
-        if target_storage_size_gib < pg.representative_server.storage_size_gib && (tsdb_client = PostgresServer.victoria_metrics_client)
-          disk_usage = begin
-            query = Metrics::POSTGRES_METRICS[:disk_usage].series[0].query.gsub("$ubicloud_resource_id", pg.ubid)
-            tsdb_client.query(query:).last
-          rescue
-            nil
-          end
+        if target_storage_size_gib < pg.representative_server.storage_size_gib
+          disk_usage_percent = pg.representative_server.observed_disk_usage_percent
 
-          fail CloverError.new(400, "InvalidRequest", "Metrics unavailable right now to verify scale down safety", {}) unless disk_usage
+          fail CloverError.new(400, "InvalidRequest", "Metrics unavailable right now to verify scale down safety", {}) unless disk_usage_percent
 
-          disk_usage_percentage = disk_usage["value"][1].to_f
-          current_disk_usage = disk_usage_percentage * pg.representative_server.storage_size_gib / 100
+          current_disk_usage = disk_usage_percent * pg.representative_server.storage_size_gib / 100.0
 
           if target_storage_size_gib * 0.8 < current_disk_usage
             fail Validation::ValidationFailed.new({storage_size: "Insufficient storage size is requested. It is only possible to reduce the storage size if the current usage is less than 80% of the requested size."})
@@ -253,13 +247,20 @@ class Clover
           authorize("Postgres:edit", pg)
           handle_validation_failure("postgres/show") { @page = "charts" }
 
-          password_param = (api? ? "password" : "metric-destination-password")
-          url, username, password = typecast_params.nonempty_str!(["url", "username", password_param])
+          url = typecast_params.nonempty_str!("url")
+          if api?
+            username = typecast_params.nonempty_str("username")
+            password = typecast_params.nonempty_str("password")
+            options = typecast_params.Hash("options")
+          else
+            username, password = typecast_params.nonempty_str!(["username", "metric-destination-password"])
+          end
 
           Validation.validate_url(url)
+          Validation.validate_metric_destination_auth(username, password, options)
 
           DB.transaction do
-            md = PostgresMetricDestination.create(postgres_resource_id: pg.id, url:, username:, password:)
+            md = PostgresMetricDestination.create(postgres_resource_id: pg.id, url:, username:, password:, options:)
             pg.server_incr("configure_metrics")
             audit_log(md, "create", pg)
           end
@@ -758,6 +759,43 @@ class Clover
           items: backups,
           count: backups.count,
         }
+      end
+
+      r.post "backup-credentials" do
+        authorize("Postgres:view", pg)
+
+        if (message = pg.backup_download_unavailable_message)
+          raise CloverError.new(400, "InvalidRequest", message)
+        end
+
+        timeline = pg.timeline
+        credentials =
+          begin
+            timeline.create_download_credentials
+          rescue Aws::STS::Errors::AccessDenied
+            # Writer users created before this feature shipped lack sts:GetFederationToken;
+            # their policy needs a refresh before downloads work (see aws_setup_blob_storage).
+            raise CloverError.new(400, "InvalidRequest", "Backup downloads are not yet available for this database. Please contact support if this persists.")
+          end
+        audit_log(pg, "create_backup_credentials")
+
+        response_data = {
+          bucket: timeline.bucket_name,
+          endpoint: timeline.blob_storage_endpoint,
+          region: timeline.walg_config_region,
+          access_key_id: credentials[:access_key_id],
+          secret_access_key: credentials[:secret_access_key],
+          session_token: credentials[:session_token],
+          expiration: credentials[:expiration].utc.iso8601,
+        }
+
+        if api?
+          response_data
+        else
+          @backup_credentials = response_data
+          @page = "backup-restore"
+          view "postgres/show"
+        end
       end
 
       r.get "metrics", r.accepts_json? do

@@ -95,17 +95,19 @@ RSpec.describe Prog::Vnet::Metal::SubnetNexus do
       Strand.create(prog: "Vnet::Metal::SubnetNexus", label: "wait", id: leader_ps.id)
       nx
       ps.connect_subnet(leader_ps)
-      Semaphore.where(strand_id: [ps.id, leader_ps.id], name: "refresh_keys").destroy
+      Semaphore.where(strand_id: [ps.id, leader_ps.id], name: "refresh_keys").delete
       nx.incr_refresh_keys
       expect { nx.wait }.to nap(0)
       expect(ps.refresh_keys_set?).to be false
       expect(leader_ps.refresh_keys_set?).to be true
     end
 
-    it "consumes refresh_keys and hops to refresh_keys as the leader" do
+    it "consumes refresh_keys, registers a deadline and hops to refresh_keys as the leader" do
       nx.incr_refresh_keys
       expect { nx.wait }.to hop("refresh_keys")
       expect(ps.refresh_keys_set?).to be false
+      expect(nx.strand.stack.first["deadline_target"]).to eq "wait"
+      expect(Time.parse(nx.strand.stack.first["deadline_at"])).to be_within(5).of(Time.now + 30 * 60)
     end
 
     it "triggers update_firewall_rules if when_update_firewall_rules_set?" do
@@ -113,7 +115,7 @@ RSpec.describe Prog::Vnet::Metal::SubnetNexus do
       vm = Prog::Vm::Nexus.assemble("pub key", prj.id, name: "test-vm", private_subnet_id: ps.id, nic_id: nic.id).subject
       nx.incr_update_firewall_rules
       expect { nx.wait }.to nap(10 * 60)
-      expect(vm.reload.update_firewall_rules_set?).to be true
+      expect(vm.update_firewall_rules_set?(cached: false)).to be true
     end
 
     it "increments refresh_keys as the leader if it passed more than a day" do
@@ -126,7 +128,7 @@ RSpec.describe Prog::Vnet::Metal::SubnetNexus do
       Strand.create(prog: "Vnet::Metal::SubnetNexus", label: "wait", id: leader_ps.id)
       nx
       ps.connect_subnet(leader_ps)
-      Semaphore.where(strand_id: [ps.id, leader_ps.id], name: "refresh_keys").destroy
+      Semaphore.where(strand_id: [ps.id, leader_ps.id], name: "refresh_keys").delete
       ps.update(last_rekey_at: Time.now - 60 * 60 * 24 - 1)
       expect { nx.wait }.to nap(10 * 60)
       expect(ps.refresh_keys_set?).to be false
@@ -154,7 +156,7 @@ RSpec.describe Prog::Vnet::Metal::SubnetNexus do
       Strand.create(prog: "Vnet::Metal::SubnetNexus", label: "wait", id: leader_ps.id)
       nx
       ps.connect_subnet(leader_ps)
-      Semaphore.where(strand_id: [ps.id, leader_ps.id], name: "refresh_keys").destroy
+      Semaphore.where(strand_id: [ps.id, leader_ps.id], name: "refresh_keys").delete
       expect { nx.refresh_keys }.to hop("wait")
       expect(ps.refresh_keys_set?).to be true
     end
@@ -211,13 +213,13 @@ RSpec.describe Prog::Vnet::Metal::SubnetNexus do
     it "triggers outbound setup once all nics are inbound" do
       nic.update(rekey_phase: "inbound")
       expect { nx.wait_inbound_setup }.to hop("wait_outbound_setup")
-      expect(nic.reload.trigger_outbound_update_set?).to be true
+      expect(nic.trigger_outbound_update_set?(cached: false)).to be true
     end
 
-    it "consumes nic_phase_done and naps while nics are still idle" do
+    it "consumes nic_phase_done and hibernates while nics are still idle" do
       nic
       nx.incr_nic_phase_done
-      expect { nx.wait_inbound_setup }.to nap(5)
+      expect { nx.wait_inbound_setup }.to hibernate
         .and change { Semaphore.where(strand_id: ps.id, name: "nic_phase_done").count }.from(1).to(0)
     end
   end
@@ -238,13 +240,13 @@ RSpec.describe Prog::Vnet::Metal::SubnetNexus do
     it "triggers old state drop once all nics are outbound" do
       nic.update(rekey_phase: "outbound")
       expect { nx.wait_outbound_setup }.to hop("wait_old_state_drop")
-      expect(nic.reload.old_state_drop_trigger_set?).to be true
+      expect(nic.old_state_drop_trigger_set?(cached: false)).to be true
     end
 
-    it "consumes nic_phase_done and naps while nics are still inbound" do
+    it "consumes nic_phase_done and hibernates while nics are still inbound" do
       nic.update(rekey_phase: "inbound")
       nx.incr_nic_phase_done
-      expect { nx.wait_outbound_setup }.to nap(5)
+      expect { nx.wait_outbound_setup }.to hibernate
         .and change { Semaphore.where(strand_id: ps.id, name: "nic_phase_done").count }.from(1).to(0)
     end
   end
@@ -296,10 +298,10 @@ RSpec.describe Prog::Vnet::Metal::SubnetNexus do
       expect(leader.reload.last_rekey_at).to be_within(5).of(Time.now)
     end
 
-    it "consumes nic_phase_done and naps while nics are still outbound" do
+    it "consumes nic_phase_done and hibernates while nics are still outbound" do
       nic.update(rekey_phase: "outbound")
       nx.incr_nic_phase_done
-      expect { nx.wait_old_state_drop }.to nap(5)
+      expect { nx.wait_old_state_drop }.to hibernate
         .and change { Semaphore.where(strand_id: ps.id, name: "nic_phase_done").count }.from(1).to(0)
     end
   end
@@ -348,7 +350,7 @@ RSpec.describe Prog::Vnet::Metal::SubnetNexus do
       nic
       expect(nx).to receive(:rand).with(5..10).and_return(6)
       expect { nx.destroy }.to nap(6)
-      expect(nic.reload.destroy_set?).to be true
+      expect(nic.destroy_set?(cached: false)).to be true
     end
 
     it "deletes and pops if nics are destroyed" do

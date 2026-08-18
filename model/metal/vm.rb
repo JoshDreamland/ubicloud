@@ -153,7 +153,24 @@ class Vm < Sequel::Model
         }.tap { |v|
           v["cpus"] = cpus if add_cpus
           v["archive_source"] = storage_archive_source(s) if s.machine_image_version_id
+          v["remote_source"] = storage_remote_source(s) if s.remote_storage_server_id
         }
+      }
+    end
+
+    # Descriptor for a boot volume whose stripes come from a remote storage
+    # server. The PSK is wrapped with the volume's KEK, mirroring how archive
+    # credentials are delivered, so it is never sent to the host in plaintext.
+    def storage_remote_source(sv)
+      server = sv.remote_storage_server
+      {
+        "address" => server.address,
+        "psk_identity" => server.psk_identity,
+        "encrypted_psk" => sv.key_encryption_key_1.encrypt(Base64.decode64(server.psk), "remote-psk"),
+        "autofetch" => true,
+        # Size the target's disk.raw from the source's actual byte size so an
+        # oversized source (e.g. an SPDK-migrated disk.raw) is carried forward.
+        "disk_size_bytes" => server.source_disk_file_size,
       }
     end
 
@@ -212,6 +229,7 @@ class Vm < Sequel::Model
             track_written: params.fetch(:track_written, false),
             key_encryption_key_1_id: key_encryption_key&.id,
             machine_image_version_id: params[:machine_image_version_id],
+            remote_storage_server_id: params[:remote_storage_server_id],
           )
         end
       end

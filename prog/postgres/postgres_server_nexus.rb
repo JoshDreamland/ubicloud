@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "forwardable"
+require "yaml"
 
 class Prog::Postgres::PostgresServerNexus < Prog::Base
   subject_is :postgres_server
@@ -283,14 +284,13 @@ tls_server_config:
 CONFIG
     vm.sshable.write_file("/home/prometheus/web-config.yml", web_config, user: "prometheus")
 
-    metric_destinations = resource.metric_destinations.map {
-      <<METRIC_DESTINATION
-- url: '#{it.url}'
-  basic_auth:
-    username: '#{it.username}'
-    password: '#{it.password}'
-METRIC_DESTINATION
-    }.prepend("remote_write:").join("\n")
+    remote_write = resource.metric_destinations.map do |md|
+      entry = {"url" => md.url}
+      entry["basic_auth"] = {"username" => md.username, "password" => md.password} if md.username
+      entry.merge!(md.options) if md.options
+      entry
+    end
+    metric_destinations = YAML.dump({"remote_write" => remote_write}).delete_prefix("---\n")
 
     prometheus_config = <<CONFIG
 global:
@@ -360,13 +360,13 @@ After=postgresql.service
 [Service]
 Type=oneshot
 User=ubi_monitoring
-# group ubi: traverse /home/ubi (0750) to exec the script; ambient
-# capabilities are not in the effective set at execve time.
-SupplementaryGroups=ubi
-# read the postgres-owned pg_wal/archive_status directory without sudo
+# Exec ruby via env, not the script directly: /home/ubi/postgres/bin is 0700
+# and CAP_DAC_READ_SEARCH is not effective at execve time. ruby then opens the
+# script and the postgres-owned pg_wal/archive_status directory under the
+# capability, which is effective at runtime.
 AmbientCapabilities=CAP_DAC_READ_SEARCH
 NoNewPrivileges=true
-ExecStart=/home/ubi/postgres/bin/collect-pg-metrics #{postgres_server.version}
+ExecStart=/usr/bin/env ruby /home/ubi/postgres/bin/collect-pg-metrics #{postgres_server.version}
 StandardOutput=journal
 StandardError=journal
 SERVICE
@@ -386,8 +386,13 @@ WantedBy=timers.target
 TIMER
     vm.sshable.write_file("/etc/systemd/system/pg-collect-metrics.timer", pg_metrics_timer)
 
+<<<<<<< HEAD
     setup_override_metrics
     setup_otel if Config.postgres_otel_otlp_export_enabled
+=======
+    install_network_metering(resource.location.provider)
+
+>>>>>>> 13c340e42af1b46876ff011581f9e7cd317dfa02
     vm.sshable.cmd("sudo systemctl daemon-reload")
     # The old User=ubi unit leaves its safe_write_to_file lock and possibly
     # a stale tmp file owned ubi:ubi 0644, which the new user cannot write.
@@ -422,7 +427,7 @@ TIMER
     when "Succeeded"
       vm.sshable.d_clean("configure_logs")
       when_initial_provisioning_set? do
-        hop_setup_cloudwatch if postgres_server.timeline.aws? && resource.project.get_ff_aws_cloudwatch_logs
+        hop_setup_cloudwatch if postgres_server.aws_cloudwatch_logs?
         hop_setup_hugepages
       end
       hop_wait
@@ -446,12 +451,6 @@ TIMER
             "log_group_name": "/#{postgres_server.ubid}/postgresql",
             "log_stream_name": "#{postgres_server.ubid}/postgresql",
             "timestamp_format": "%Y-%m-%d %H:%M:%S"
-          },
-          {
-            "file_path": "/var/log/auth.log",
-            "log_group_name": "/#{postgres_server.ubid}/auth",
-            "log_stream_name": "#{postgres_server.ubid}/auth",
-            "timestamp_format": "%Y-%m-%d %H:%M:%S"
           }
         ]
       }
@@ -469,15 +468,6 @@ CONFIG
     case vm.sshable.d_check("setup_hugepages")
     when "Succeeded"
       vm.sshable.d_clean("setup_hugepages")
-
-      when_initial_provisioning_set? do
-        if resource.flavor == PostgresResource::Flavor::PARADEDB
-          postgres_server.vm.sshable.cmd(<<CMD, version: postgres_server.version)
-set -ueo pipefail
-sudo apt-get install -y /var/cache/paradedb/postgresql-:version-pg-analytics.deb /var/cache/paradedb/postgresql-:version-pg-search.deb
-CMD
-        end
-      end
 
       hop_configure
     when "Failed", "NotStarted"
@@ -547,15 +537,6 @@ SQL
   label def run_post_installation_script
     case vm.sshable.d_check("post_installation_script")
     when "Succeeded"
-      if postgres_server.paradedb_and_primary?
-        postgres_server.run_query(<<SQL)
-CREATE EXTENSION IF NOT EXISTS pg_cron;
-CREATE EXTENSION IF NOT EXISTS pg_search;
-CREATE EXTENSION IF NOT EXISTS pg_analytics;
-CREATE EXTENSION IF NOT EXISTS vector;
-SQL
-      end
-
       hop_wait
     when "Failed", "NotStarted"
       vm.sshable.d_run("post_installation_script", "sudo", "postgres/bin/post-installation-script")
@@ -968,7 +949,7 @@ SQL
   label def destroy
     decr_destroy
     # Resolve server-keyed pages so they don't orphan after the server is gone.
-    %w[PGDiskUsageHigh PGRootDiskUsageHigh PGArchivalBacklogHigh PGMetricsBacklogHigh PGIOThrottleStale PGInitializeDatabaseFromBackupFailed].each do |tag|
+    %w[PGDiskUsageHigh PGRootDiskUsageHigh PGArchivalBacklogHigh PGMetricsBacklogHigh PGIOThrottleStale PGInitializeDatabaseFromBackupFailed PGReplicaLagHigh].each do |tag|
       Page.from_tag_parts(tag, postgres_server.id)&.incr_resolve
     end
     Semaphore.incr(strand.children_dataset.exclude(prog: "Postgres::PostgresServerNexus").select(:id), "destroy")
@@ -1045,5 +1026,62 @@ SQL
   rescue *Sshable::SSH_CONNECTION_ERRORS => ex
     Clog.emit("Postgres restart failed", Util.exception_to_hash(ex, into: {postgres_server_id: postgres_server.id}))
     false
+  end
+
+  # Composes /etc/pg-metering/config.json from provider_ip_range rows
+  # (populated by Prog::LocationNexus) and installs the rhizome nftables
+  # render + node_exporter textfile export as systemd units.
+  NETWORK_METERING_CONFIG_PATH = "/etc/pg-metering/config.json"
+
+  INTERNAL_CIDRS = {
+    "v4" => %w[10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16].freeze,
+    "v6" => %w[fc00::/7 fe80::/10].freeze,
+  }.freeze
+
+  EMPTY_CIDRS = {"v4" => [].freeze, "v6" => [].freeze}.freeze
+
+  METERED_PROVIDERS = %w[aws gcp].freeze
+
+  def install_network_metering(provider)
+    return unless Config.pg_network_metering_enabled
+    return unless METERED_PROVIDERS.include?(provider)
+
+    vm.sshable.cmd("sudo install -d -m 0755 /etc/pg-metering")
+    vm.sshable.write_file(NETWORK_METERING_CONFIG_PATH, JSON.generate(network_metering_config(provider)))
+    vm.sshable.cmd("sudo /home/ubi/postgres/bin/apply-metering-config")
+  end
+
+  def network_metering_config(provider)
+    loc = resource.location
+    partitions = loc.provider_ip_ranges_dataset
+      .select_hash_groups(:bucket_id, [Sequel.function(:concat, Sequel.cast("v", :text), :ip_version).as(:v), Sequel.cast(:cidrs, "text[]").as(:cidrs)])
+      .transform_values!(&:to_h)
+
+    {
+      "version" => 1,
+      "region" => loc.metering_region,
+      "provider" => provider,
+      "rules" => network_metering_rules(provider, partitions).sort_by { |r| r["priority"] },
+    }
+  end
+
+  # Fork prepends to layer operator-specific buckets on top of the defaults.
+  def network_metering_rules(provider, partitions)
+    [
+      {"id" => "internal", "priority" => 10, "label" => "internal", "cidrs" => INTERNAL_CIDRS},
+      {"id" => "control_plane", "priority" => 20, "label" => "control_plane", "cidrs" => network_metering_control_plane_cidrs},
+      {"id" => "excluded_svc", "priority" => 40, "label" => "excluded", "cidrs" => partitions.fetch("excluded_svc", EMPTY_CIDRS)},
+      {"id" => "intra_region", "priority" => 50, "label" => "intra_region", "cidrs" => partitions.fetch("intra_region", EMPTY_CIDRS)},
+      {"id" => "inter_region_t1", "priority" => 61, "label" => "inter_region_t1", "cidrs" => partitions.fetch("inter_region_t1", EMPTY_CIDRS)},
+      {"id" => "public_internet", "priority" => 999, "label" => "public_internet", "type" => "catchall"},
+    ]
+  end
+
+  # 0.0.0.0/0 and ::/0 are the Config defaults; drop those supernets or every
+  # packet would be metered as control_plane.
+  def network_metering_control_plane_cidrs
+    cidrs = Config.control_plane_outbound_cidrs.reject { |c| c == "0.0.0.0/0" || c == "::/0" }
+    v4, v6 = cidrs.partition { NetAddr.parse_net(it).is_a?(NetAddr::IPv4Net) }
+    {"v4" => v4, "v6" => v6}
   end
 end

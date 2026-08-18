@@ -24,10 +24,11 @@ RSpec.describe Prog::RolloutSemaphore do
       expect(frame["increment"]).to be true
       expect(frame.fetch("wait_label")).to be true
       expect(frame.fetch("current")).to be_nil
+      expect(frame["auto_exit"]).to be false
     end
 
-    it "supports gap, initial_gap, initial_range, increment, and wait_label arguments" do
-      st = described_class.assemble(semaphore: "resolve", ids: page_ids, gap: 10, initial_gap: 15, initial_range: 1..5, increment: false, wait: "wait")
+    it "supports gap, initial_gap, initial_range, increment, wait_label, and auto_exit arguments" do
+      st = described_class.assemble(semaphore: "resolve", ids: page_ids, gap: 10, initial_gap: 15, initial_range: 1..5, increment: false, wait: "wait", auto_exit: true)
       expect(st.label).to eq("start")
       expect(st.prog).to eq("RolloutSemaphore")
 
@@ -41,6 +42,7 @@ RSpec.describe Prog::RolloutSemaphore do
       expect(frame["increment"]).to be false
       expect(frame["wait_label"]).to eq "wait"
       expect(frame.fetch("current")).to be_nil
+      expect(frame["auto_exit"]).to be true
     end
 
     it "raises when ids reference more than one class" do
@@ -79,7 +81,7 @@ RSpec.describe Prog::RolloutSemaphore do
     it "increments semaphore on next object and naps if not waiting" do
       refresh_frame(nx, new_values: {"wait_label" => false})
       expect { nx.start }.to nap(295...305)
-        .and change { pages.first.reload.resolve_set? }.from(false).to(true)
+        .and change { pages.first.resolve_set?(cached: false) }.from(false).to(true)
       expect(st.stack[0]["next_increment_time"]).to be_within(5).of(Time.now.to_i + 300)
       expect(st.stack[0]["completed"]).to eq [page_ids[0]]
       expect(st.stack[0].fetch("current")).to be_nil
@@ -88,7 +90,7 @@ RSpec.describe Prog::RolloutSemaphore do
 
     it "increments semaphore on next object and hops to wait_current" do
       expect { nx.start }.to hop("wait_current")
-        .and change { pages.first.reload.resolve_set? }.from(false).to(true)
+        .and change { pages.first.resolve_set?(cached: false) }.from(false).to(true)
       expect(st.stack[0]["next_increment_time"]).to be_within(5).of(Time.now.to_i + 300)
       expect(st.stack[0]["completed"]).to eq []
       expect(st.stack[0]["current"]).to eq page_ids[0]
@@ -99,7 +101,7 @@ RSpec.describe Prog::RolloutSemaphore do
       pages.first.incr_resolve
       refresh_frame(nx, new_values: {"increment" => false})
       expect { nx.start }.to nap(295...305)
-        .and change { pages.first.reload.resolve_set? }.from(true).to(false)
+        .and change { pages.first.resolve_set?(cached: false) }.from(true).to(false)
       expect(st.stack[0]["next_increment_time"]).to be_within(5).of(Time.now.to_i + 300)
       expect(st.stack[0]["completed"]).to eq [page_ids[0]]
       expect(st.stack[0].fetch("current")).to be_nil
@@ -114,7 +116,7 @@ RSpec.describe Prog::RolloutSemaphore do
     it "naps using regular gap after passing the initial number of records" do
       refresh_frame(nx, new_values: {"initial_num" => 0})
       expect { nx.start }.to hop("wait_current")
-        .and change { pages.first.reload.resolve_set? }.from(false).to(true)
+        .and change { pages.first.resolve_set?(cached: false) }.from(false).to(true)
       expect(st.stack[0]["next_increment_time"]).to be_within(5).of(Time.now.to_i + 60)
       expect(st.stack[0]["completed"]).to eq []
       expect(st.stack[0]["current"]).to eq page_ids[0]
@@ -159,6 +161,11 @@ RSpec.describe Prog::RolloutSemaphore do
   describe "#destroy" do
     it "exits if destroy semaphore is set" do
       nx.incr_destroy
+      expect { nx.destroy }.to exit("msg" => "rollout completed")
+    end
+
+    it "exits without waiting when auto_exit is set" do
+      refresh_frame(nx, new_values: {"auto_exit" => true})
       expect { nx.destroy }.to exit("msg" => "rollout completed")
     end
 

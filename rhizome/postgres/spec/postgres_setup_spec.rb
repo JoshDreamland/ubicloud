@@ -87,9 +87,99 @@ RSpec.describe PostgresSetup do
   end
 
   describe "#create_cluster" do
-    it "creates a postgres cluster" do
-      expect(pg_setup).to receive(:_run_command).with("pg_createcluster", "17", "main", "--port=5432", "--locale=C.UTF8")
+    builtin = ["--", "--locale-provider=builtin", "--builtin-locale=C.UTF-8"]
+
+    it "creates a postgres cluster with the builtin C.UTF-8 provider" do
+      expect(pg_setup).to receive(:_run_command).with("pg_createcluster", "17", "main", "--port=5432", *builtin)
       pg_setup.create_cluster
+    end
+
+    it "uses the builtin provider on 18" do
+      pg_setup = described_class.new("18")
+      expect(pg_setup).to receive(:_run_command).with("pg_createcluster", "18", "main", "--port=5432", *builtin)
+      pg_setup.create_cluster
+    end
+
+    it "handles the integer version passed by the upgrade path" do
+      pg_setup = described_class.new(18)
+      expect(pg_setup).to receive(:_run_command).with("pg_createcluster", "18", "main", "--port=5432", *builtin)
+      pg_setup.create_cluster
+    end
+
+    it "keeps the libc provider on 16, which has no builtin provider" do
+      pg_setup = described_class.new("16")
+      expect(pg_setup).to receive(:_run_command).with("pg_createcluster", "16", "main", "--port=5432", "--locale=C.UTF8")
+      pg_setup.create_cluster
+    end
+  end
+
+  describe "#configure_journald" do
+    it "writes the drop-in, restarts journald, purges rsyslog and reclaims what it wrote" do
+      expect(File).to receive(:exist?).with(PostgresSetup::JOURNALD_CONF_PATH).and_return(false)
+      expect(pg_setup).to receive(:_run_command).with("mkdir", "-p", "/etc/systemd/journald.conf.d")
+      expect(pg_setup).to receive(:safe_write_to_file).with(PostgresSetup::JOURNALD_CONF_PATH, <<~JOURNALD)
+        [Journal]
+        Storage=persistent
+        SystemMaxUse=4G
+        Compress=yes
+        ForwardToSyslog=no
+      JOURNALD
+      expect(pg_setup).to receive(:_run_command).with("systemctl", "restart", "systemd-journald")
+      expect(File).to receive(:exist?).with("/usr/sbin/rsyslogd").and_return(true)
+      expect(pg_setup).to receive(:_run_command).with("env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "purge", "-y", "rsyslog")
+      expect(Dir).to receive(:glob).with(PostgresSetup::RSYSLOG_LOGS_GLOB).and_return(["/var/log/syslog", "/var/log/syslog.1", "/var/log/auth.log.2.gz"])
+      expect(FileUtils).to receive(:rm_f).with(["/var/log/syslog", "/var/log/syslog.1", "/var/log/auth.log.2.gz"])
+
+      pg_setup.configure_journald
+    end
+
+    it "skips the write and the journald restart when the drop-in already matches" do
+      expect(File).to receive(:exist?).with(PostgresSetup::JOURNALD_CONF_PATH).and_return(true)
+      expect(File).to receive(:read).with(PostgresSetup::JOURNALD_CONF_PATH).and_return(PostgresSetup::JOURNALD_CONF)
+      expect(pg_setup).not_to receive(:safe_write_to_file)
+      expect(File).to receive(:exist?).with("/usr/sbin/rsyslogd").and_return(false)
+
+      pg_setup.configure_journald
+    end
+
+    it "rewrites the drop-in when the content differs" do
+      expect(File).to receive(:exist?).with(PostgresSetup::JOURNALD_CONF_PATH).and_return(true)
+      expect(File).to receive(:read).with(PostgresSetup::JOURNALD_CONF_PATH).and_return("[Journal]\nSystemMaxUse=1G\n")
+      expect(pg_setup).to receive(:_run_command).with("mkdir", "-p", "/etc/systemd/journald.conf.d")
+      expect(pg_setup).to receive(:safe_write_to_file).with(PostgresSetup::JOURNALD_CONF_PATH, PostgresSetup::JOURNALD_CONF)
+      expect(pg_setup).to receive(:_run_command).with("systemctl", "restart", "systemd-journald")
+      expect(File).to receive(:exist?).with("/usr/sbin/rsyslogd").and_return(false)
+
+      pg_setup.configure_journald
+    end
+
+    it "leaves rsyslog alone on a server built from an image that has none" do
+      expect(File).to receive(:exist?).with(PostgresSetup::JOURNALD_CONF_PATH).and_return(true)
+      expect(File).to receive(:read).with(PostgresSetup::JOURNALD_CONF_PATH).and_return(PostgresSetup::JOURNALD_CONF)
+      expect(File).to receive(:exist?).with("/usr/sbin/rsyslogd").and_return(false)
+      expect(Dir).not_to receive(:glob)
+      expect(FileUtils).not_to receive(:rm_f)
+
+      pg_setup.configure_journald
+    end
+
+    it "covers every file the stock rsyslog config writes" do
+      stock_paths = [
+        "/var/log/syslog", "/var/log/mail.info", "/var/log/mail.warn", "/var/log/mail.err",
+        "/var/log/mail.log", "/var/log/daemon.log", "/var/log/kern.log", "/var/log/auth.log",
+        "/var/log/user.log", "/var/log/lpr.log", "/var/log/cron.log", "/var/log/debug",
+        "/var/log/messages",
+      ]
+      stock_paths.each do |path|
+        expect(File.fnmatch?(PostgresSetup::RSYSLOG_LOGS_GLOB, path, File::FNM_EXTGLOB)).to be(true), "#{path} not covered"
+        expect(File.fnmatch?(PostgresSetup::RSYSLOG_LOGS_GLOB, "#{path}.2.gz", File::FNM_EXTGLOB)).to be(true), "#{path}.2.gz not covered"
+      end
+    end
+
+    it "does not match unrelated files under /var/log" do
+      ["/var/log/postgresql.log", "/var/log/journal", "/var/log/wtmp", "/var/log/dpkg.log"].each do |path|
+        expect(File.fnmatch?(PostgresSetup::RSYSLOG_LOGS_GLOB, path, File::FNM_EXTGLOB)).to be(false), "#{path} matched"
+      end
     end
   end
 

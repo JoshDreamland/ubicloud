@@ -6,6 +6,8 @@ require_relative "../../common/lib/util"
 
 class VhostBlockBackend
   SHA256_BY_VERSION_AND_ARCH = {
+    ["v0.5.1", :x64] => "7b82f4769a7ee52b1fa71d17f12dbe02a4795e4bdb5e8fe4cea98bb3a7913972",
+    ["v0.5.1", :arm64] => "f538c4ee0618274a738d5cb3695c720004a46d3edef89bce6c17a0a0df12b719",
     ["v0.4.2", :x64] => "e7e430f2e722a2d5d7c18a4f609360e003798d481e26da6db380e698ccb079eb",
     ["v0.4.2", :arm64] => "ada92fe076e49f731f5d343d445b1e80d7685b811c33cde7fe88918e93649093",
     ["v0.3.1", :x64] => "3b4a6d3387a8da7c914d85203955c0a879168518aed76679a334070403630262",
@@ -18,7 +20,9 @@ class VhostBlockBackend
 
   def initialize(version)
     @version = version
-    @v0_4_or_later = Gem::Version.new(version.delete_prefix("v")) >= Gem::Version.new("0.4.0")
+    parsed = Gem::Version.new(version.delete_prefix("v"))
+    @v0_4_or_later = parsed >= Gem::Version.new("0.4.0")
+    @v0_5_or_later = parsed >= Gem::Version.new("0.5.0")
   end
 
   def config_v2?
@@ -27,6 +31,12 @@ class VhostBlockBackend
 
   def supports_archive?
     @v0_4_or_later
+  end
+
+  # The remote stripe server (serve a volume over the remote stripe protocol)
+  # ships from v0.5.0 onwards.
+  def supports_remote_stripe_server?
+    @v0_5_or_later
   end
 
   def sha256
@@ -62,6 +72,10 @@ class VhostBlockBackend
 
   def dump_metadata_path
     "#{dir}/dump-metadata"
+  end
+
+  def remote_stripe_server_path
+    "#{dir}/remote-stripe-server"
   end
 
   def download

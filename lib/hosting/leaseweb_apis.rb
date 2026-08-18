@@ -14,6 +14,8 @@ class Hosting::LeasewebApis < Hosting::ProviderApis
 
   NetworkInterfaces = Data.define(:public_mac, :internal_mac, :internal_ip)
 
+  DISK_TYPES = {"NVME" => "NVMe SSD", "SATA" => "SATA SSD"}.freeze
+
   IPS_PAGE_SIZE = 50
 
   def hardware_reset
@@ -102,6 +104,30 @@ class Hosting::LeasewebApis < Hosting::ProviderApis
     end
 
     singles + blocks.uniq.map { IpInfo.new(it, main_ip4, nil) }
+  end
+
+  def pull_inventory
+    server = pull_server
+    specs = server.fetch("specs")
+    contract = server.fetch("contract")
+    monthly = contract.fetch("billingFrequency") == "MONTH" && contract.fetch("billingCycle") == 1
+
+    cpu = specs.fetch("cpu")
+    ram = specs.fetch("ram")
+    storage = presence(specs.fetch("hdd").map do |disk|
+      type = disk.fetch("type")
+      "#{disk.fetch("amount")}x #{disk.fetch("size")}#{disk.fetch("unit")} #{DISK_TYPES.fetch(type, type)}"
+    end.join(" + "))
+    {
+      server_model: specs.fetch("chassis"),
+      cpu: (cpu.fetch("quantity") > 1) ? "#{cpu.fetch("quantity")}x #{cpu.fetch("type")}" : cpu.fetch("type"),
+      memory: "#{ram.fetch("size")}#{ram.fetch("unit")}",
+      storage:,
+      uplink: server.fetch("rack").fetch("capacity").sub(/G\z/, "Gbps"),
+      gpu: nil,
+      monthly_price: (BigDecimal(contract.fetch("pricePerFrequency")) if monthly),
+      currency: (contract.fetch("currency") if monthly),
+    }
   end
 
   private

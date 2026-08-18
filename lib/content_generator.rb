@@ -10,11 +10,11 @@ module ContentGenerator
       ssh_public_key.name
     end
 
-    def self.private_subnet(location, private_subnet)
+    def self.private_subnet_id(location, private_subnet)
       private_subnet[:display_name]
     end
 
-    def self.enable_ipv4(location, value)
+    def self.enable_ip4(location, value)
       unit_price = BillingRate.unit_price_from_resource_properties("IPAddress", "IPv4", location.name)
 
       "Enable Public IPv4 ($#{"%.2f" % (unit_price * 60 * 672)}/mo)"
@@ -132,14 +132,12 @@ module ContentGenerator
       ]
     end
 
+    def self.restrict_by_default(_)
+      "Restrict access by default"
+    end
+
     def self.partnership_notice(flavor)
       notice = {
-        PostgresResource::Flavor::PARADEDB => [[
-          "ParadeDB is an Elasticsearch alternative built on Postgres. ParadeDB instances are managed by the ParadeDB team and are optimal for search and analytics workloads.",
-          "You can get ParadeDB specific support via email at <a href='mailto:support@paradedb.com' class='text-orange-600 font-semibold'>support@paradedb.com</a> or via Slack at <a href='https://join.slack.com/t/paradedbcommunity/shared_invite/zt-2lkzdsetw-OiIgbyFeiibd1DG~6wFgTQ' target='_blank' class='text-orange-600 font-semibold'>ParadeDB Community Slack</a>",
-          "By creating a ParadeDB PostgreSQL database on Ubicloud you consent to your contact information being shared with ParadeDB team.",
-        ],
-          "Accept <a href='https://paradedb.notion.site/Terms-of-Use-d17c9916a5b746fab86c274feb35da75' target='_blank' class='text-orange-600 font-semibold'>Terms of Service</a> and <a href='https://paradedb.notion.site/Privacy-Policy-a7ce333c45c8478fb03250dff7e573b7?pvs=4' target='_blank' class='text-orange-600 font-semibold'> Privacy Policy</a>"],
         PostgresResource::Flavor::LANTERN => [[
           "Lantern is a PostgreSQL-based vector database designed specifically for building AI applications. Lantern instances are managed by the Lantern team and are optimal for AI workloads.",
           "You can reach to Lantern team for support at <a href='mailto:support@lantern.dev' class='text-orange-600 font-semibold'>support@lantern.dev</a>",

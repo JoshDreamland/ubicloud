@@ -346,6 +346,50 @@ RSpec.describe StorageVolume do
     end
   end
 
+  describe "#vhost_backend_disk_size_mib" do
+    def remote_source_sv(remote_source)
+      described_class.new("test", {
+        "disk_index" => 2,
+        "device_id" => "xyz01",
+        "encrypted" => true,
+        "size_gib" => 40,
+        "vhost_block_backend_version" => "v0.4.2",
+        "remote_source" => {
+          "address" => "10.0.0.5:4600", "psk_identity" => "id", "encrypted_psk" => "p",
+        }.merge(remote_source),
+      })
+    end
+
+    it "uses the requested size for a locally-sourced vhost volume" do
+      expect(encrypted_vhost_sv.vhost_backend_disk_size_mib).to eq(12 * 1024)
+    end
+
+    it "sizes the target to an oversized (e.g. SPDK-migrated) source's disk.raw" do
+      # A 40 GiB SPDK-migrated source keeps 8 MiB of former bdev_ubi metadata.
+      bytes = (40 * 1024 + 8) * 1024 * 1024
+      expect(remote_source_sv("disk_size_bytes" => bytes).vhost_backend_disk_size_mib).to eq(40 * 1024 + 8)
+    end
+
+    it "uses the requested size when the source disk.raw matches size_gib" do
+      bytes = 40 * 1024 * 1024 * 1024
+      expect(remote_source_sv("disk_size_bytes" => bytes).vhost_backend_disk_size_mib).to eq(40 * 1024)
+    end
+
+    it "never shrinks below the requested size" do
+      bytes = 10 * 1024 * 1024 * 1024
+      expect(remote_source_sv("disk_size_bytes" => bytes).vhost_backend_disk_size_mib).to eq(40 * 1024)
+    end
+
+    it "rounds a non-MiB-aligned source size up to whole MiB" do
+      bytes = (40 * 1024 + 1) * 1024 * 1024 + 1
+      expect(remote_source_sv("disk_size_bytes" => bytes).vhost_backend_disk_size_mib).to eq(40 * 1024 + 2)
+    end
+
+    it "falls back to the requested size when the source size is unknown" do
+      expect(remote_source_sv({}).vhost_backend_disk_size_mib).to eq(40 * 1024)
+    end
+  end
+
   describe "#set_disk_file_permissions" do
     it "can set disk file permissions" do
       expect(FileUtils).to receive(:chown).with("test", "test", disk_file)
@@ -663,6 +707,43 @@ RSpec.describe StorageVolume do
         })
       sv.vhost_backend_create_config(encryption_key, key_wrapping_secrets)
     end
+
+    it "writes v2 config with remote source" do
+      sv = described_class.new("test", {
+        "disk_index" => 2,
+        "device_id" => "xyz01",
+        "encrypted" => true,
+        "size_gib" => 12,
+        "vhost_block_backend_version" => "v0.5.0",
+        "remote_source" => {
+          "address" => "10.0.0.5:4600",
+          "psk_identity" => "ubiblk-rss",
+          "encrypted_psk" => "encrypted_psk_value",
+        },
+      })
+
+      expect(sv).to receive(:write_through_device?).and_return(true)
+      expect(sv).to receive(:write_config_file)
+        .with("/var/storage/test/2/vhost-backend-stripe-source.conf", satisfy { |content|
+          lines = content.split("\n")
+          lines.include?("[stripe_source]") &&
+            lines.include?("type = \"remote\"") &&
+            lines.include?("address = \"10.0.0.5:4600\"") &&
+            lines.include?("autofetch = false") &&
+            lines.include?("psk.identity = \"ubiblk-rss\"") &&
+            lines.include?("psk.secret.ref = \"remote-psk\"")
+        })
+      expect(sv).to receive(:write_config_file)
+        .with("/var/storage/test/2/vhost-backend-secrets.conf", satisfy { |content|
+          lines = content.split("\n")
+          lines.include?("[secrets.remote-psk]") &&
+            lines.include?("source.inline = \"encrypted_psk_value\"") &&
+            lines.include?("encrypted_by.ref = \"kek\"")
+        })
+      expect(sv).to receive(:write_config_file)
+        .with("/var/storage/test/2/vhost-backend.conf", anything)
+      sv.vhost_backend_create_config(encryption_key, key_wrapping_secrets)
+    end
   end
 
   describe "#write_through_device" do
@@ -737,6 +818,23 @@ RSpec.describe StorageVolume do
         "size_gib" => 12,
         "vhost_block_backend_version" => "v0.4.0",
         "archive_source" => {"bucket" => "b", "region" => "r", "endpoint" => "e"},
+      })
+      service_file = "/etc/systemd/system/test-2-storage.service"
+      expect(File).to receive(:write).with(service_file, satisfy { |content|
+        content.include?("AF_UNIX AF_INET AF_INET6") &&
+          content.include?("PrivateNetwork=no")
+      })
+      sv.vhost_backend_create_service_file
+    end
+
+    it "uses broader network access restrictions when remote_source is set" do
+      sv = described_class.new("test", {
+        "disk_index" => 2,
+        "device_id" => "xyz01",
+        "encrypted" => true,
+        "size_gib" => 12,
+        "vhost_block_backend_version" => "v0.5.0",
+        "remote_source" => {"address" => "10.0.0.5:4600", "psk_identity" => "id", "encrypted_psk" => "p"},
       })
       service_file = "/etc/systemd/system/test-2-storage.service"
       expect(File).to receive(:write).with(service_file, satisfy { |content|

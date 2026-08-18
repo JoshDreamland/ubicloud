@@ -17,6 +17,16 @@ RSpec.describe PostgresTimeline do
     loc
   end
 
+  def create_gcp_location
+    Location.create(name: "us-central1", display_name: "gcp-us-central1", ui_name: "GCP US Central 1", visible: true, provider: "gcp")
+  end
+
+  def create_minio_cluster
+    project = Project.create(name: "minio-service")
+    allow(Config).to receive(:postgres_service_project_id).and_return(project.id)
+    MinioCluster.create(project_id: project.id, location_id: postgres_timeline.location_id, name: "test-mc", admin_user: "admin", admin_password: "pw", root_cert_1: "ca-bundle")
+  end
+
   it "returns ubid as bucket name" do
     expect(postgres_timeline.bucket_name).to eq(postgres_timeline.ubid)
   end
@@ -290,7 +300,7 @@ PGDATA=/dat/17/data
   it "returns empty array if user is not created yet" do
     expect(postgres_timeline).to receive(:blob_storage).and_return(instance_double(MinioCluster, url: "https://blob-endpoint", root_certs: "certs")).at_least(:once)
     minio_client = instance_double(Minio::Client)
-    expect(minio_client).to receive(:list_objects).and_raise(RuntimeError.new("The AWS Access Key Id you provided does not exist in our records."))
+    expect(minio_client).to receive(:list_objects).and_raise(RuntimeError.new("The Access Key Id you provided does not exist in our records."))
     expect(Minio::Client).to receive(:new).and_return(minio_client)
     expect(postgres_timeline.backups).to eq([])
   end
@@ -368,6 +378,15 @@ PGDATA=/dat/17/data
     policy = {Version: "2012-10-17", Statement: [{Effect: "Allow", Action: ["s3:*"], Resource: ["arn:aws:s3:::dummy-ubid*"]}]}
     expect(postgres_timeline).to receive(:ubid).and_return("dummy-ubid")
     expect(postgres_timeline.blob_storage_policy).to eq(policy)
+  end
+
+  it "returns read-only download blob storage policy" do
+    ubid = postgres_timeline.ubid
+    policy = {Version: "2012-10-17", Statement: [
+      {Effect: "Allow", Action: ["s3:ListBucket", "s3:GetBucketLocation"], Resource: ["arn:aws:s3:::#{ubid}"]},
+      {Effect: "Allow", Action: ["s3:GetObject", "s3:GetObjectVersion"], Resource: ["arn:aws:s3:::#{ubid}/basebackups_005/*", "arn:aws:s3:::#{ubid}/wal_005/*"]},
+    ]}
+    expect(postgres_timeline.download_blob_storage_policy).to eq(policy)
   end
 
   it "returns earliest restore time" do
@@ -575,6 +594,150 @@ PGDATA=/dat/17/data
         expect(minio_client).to receive(:set_lifecycle_policy).with(postgres_timeline.ubid, postgres_timeline.ubid, 30).and_return(true)
         expect(postgres_timeline.set_lifecycle_policy(expiration_days: 30)).to be(true)
       end
+    end
+  end
+
+  describe "#create_download_credentials" do
+    context "when aws" do
+      before do
+        postgres_timeline.update(location_id: create_aws_location(name: "us-east-2").id)
+      end
+
+      it "federates a session down from the timeline's own writer credential" do
+        sts_client = Aws::STS::Client.new(stub_responses: true)
+        expect(Aws::STS::Client).to receive(:new) do |region:, credentials:|
+          expect(region).to eq("us-east-2")
+          expect(credentials.access_key_id).to eq("dummy-access-key")
+          expect(credentials.secret_access_key).to eq("dummy-secret-key")
+          sts_client
+        end
+        expiration = Time.at((Time.now + 36 * 60 * 60).to_i)
+        sts_client.stub_responses(:get_federation_token, credentials: {access_key_id: "AKID", secret_access_key: "SECRET", session_token: "TOKEN", expiration:})
+        expect(sts_client).to receive(:get_federation_token).with(hash_including(name: postgres_timeline.ubid, duration_seconds: PostgresTimeline::DOWNLOAD_CREDENTIALS_DURATION_SECONDS)).and_call_original
+
+        result = postgres_timeline.create_download_credentials
+        expect(result).to eq({access_key_id: "AKID", secret_access_key: "SECRET", session_token: "TOKEN", expiration:})
+      end
+
+      it "raises when the timeline has no static writer credential to federate from" do
+        postgres_timeline.update(access_key: nil, secret_key: nil)
+        expect { postgres_timeline.create_download_credentials }.to raise_error(RuntimeError, "Backup download credentials require per-timeline blob storage credentials, which are not configured for this resource")
+      end
+    end
+
+    context "when metal" do
+      it "assumes role from its own bucket-scoped blob storage client" do
+        create_minio_cluster
+        expiration = Time.now + 36 * 60 * 60
+        minio_client = instance_double(Minio::Client)
+        expect(Minio::Client).to receive(:new).and_return(minio_client)
+        expect(minio_client).to receive(:assume_role).with(policy: postgres_timeline.download_blob_storage_policy, duration_seconds: PostgresTimeline::DOWNLOAD_CREDENTIALS_DURATION_SECONDS)
+          .and_return({access_key_id: "AKID", secret_access_key: "SECRET", session_token: "TOKEN", expiration:})
+
+        result = postgres_timeline.create_download_credentials
+        expect(result).to eq({access_key_id: "AKID", secret_access_key: "SECRET", session_token: "TOKEN", expiration:})
+      end
+    end
+
+    context "when gcp" do
+      it "raises, since backup downloads are not supported for gcp" do
+        postgres_timeline.update(location_id: create_gcp_location.id)
+        expect { postgres_timeline.create_download_credentials }.to raise_error(RuntimeError, "Backup download credentials are not supported for GCP-hosted PostgreSQL resources")
+      end
+    end
+  end
+
+  describe "#refresh_blob_storage_policy" do
+    context "when aws" do
+      let(:iam_client) { Aws::IAM::Client.new(stub_responses: true) }
+
+      before do
+        postgres_timeline.update(location_id: create_aws_location(name: "us-east-2").id)
+        credential = postgres_timeline.location.location_credential_aws
+        allow(credential).to receive_messages(iam_client:, aws_iam_account_id: "123456789012")
+      end
+
+      it "sets a new default policy version from the current policy document" do
+        iam_client.stub_responses(:list_policy_versions, versions: [{version_id: "v1", is_default_version: true}])
+        expect(iam_client).not_to receive(:delete_policy_version)
+        expect(iam_client).to receive(:create_policy_version) do |args|
+          expect(args[:policy_arn]).to eq(postgres_timeline.aws_s3_policy_arn)
+          expect(args[:set_as_default]).to be(true)
+          actions = JSON.parse(args[:policy_document])["Statement"].map { it["Action"] }
+          expect(actions).to include(["sts:GetFederationToken"])
+        end
+
+        postgres_timeline.refresh_blob_storage_policy
+      end
+
+      it "drops the oldest non-default version when the 5-version limit is reached" do
+        now = Time.now
+        iam_client.stub_responses(:list_policy_versions, versions: [
+          {version_id: "v1", is_default_version: false, create_date: now - 500},
+          {version_id: "v2", is_default_version: false, create_date: now - 400},
+          {version_id: "v3", is_default_version: false, create_date: now - 300},
+          {version_id: "v4", is_default_version: false, create_date: now - 200},
+          {version_id: "v5", is_default_version: true, create_date: now - 100},
+        ])
+        expect(iam_client).to receive(:delete_policy_version).with(policy_arn: postgres_timeline.aws_s3_policy_arn, version_id: "v1")
+        expect(iam_client).to receive(:create_policy_version).with(hash_including(set_as_default: true))
+
+        postgres_timeline.refresh_blob_storage_policy
+      end
+
+      it "prunes against a fresh listing and retries once when a stale count lets the create hit the limit" do
+        now = Time.now
+        five = [
+          {version_id: "v1", is_default_version: false, create_date: now - 500},
+          {version_id: "v2", is_default_version: false, create_date: now - 400},
+          {version_id: "v3", is_default_version: false, create_date: now - 300},
+          {version_id: "v4", is_default_version: false, create_date: now - 200},
+          {version_id: "v5", is_default_version: true, create_date: now - 100},
+        ]
+        # First listing undercounts (skips the prune), so the create trips the cap; the
+        # re-read then shows all five and the retry prunes before succeeding.
+        iam_client.stub_responses(:list_policy_versions, {versions: [{version_id: "v5", is_default_version: true}]}, {versions: five})
+        iam_client.stub_responses(:create_policy_version, "LimitExceeded", {})
+
+        expect(iam_client).to receive(:delete_policy_version).with(policy_arn: postgres_timeline.aws_s3_policy_arn, version_id: "v1")
+        expect(iam_client).to receive(:create_policy_version).twice.and_call_original
+
+        postgres_timeline.refresh_blob_storage_policy
+      end
+
+      it "gives up after one retry when the limit is exceeded persistently" do
+        now = Time.now
+        five = [
+          {version_id: "v1", is_default_version: false, create_date: now - 500},
+          {version_id: "v2", is_default_version: false, create_date: now - 400},
+          {version_id: "v3", is_default_version: false, create_date: now - 300},
+          {version_id: "v4", is_default_version: false, create_date: now - 200},
+          {version_id: "v5", is_default_version: true, create_date: now - 100},
+        ]
+        iam_client.stub_responses(:list_policy_versions, {versions: five}, {versions: five})
+        iam_client.stub_responses(:create_policy_version, "LimitExceeded")
+        allow(iam_client).to receive(:delete_policy_version)
+
+        expect(iam_client).to receive(:create_policy_version).twice.and_call_original
+        expect { postgres_timeline.refresh_blob_storage_policy }.to raise_error(Aws::IAM::Errors::LimitExceeded)
+      end
+    end
+
+    it "does nothing for aws timelines using instance-profile credentials" do
+      postgres_timeline.update(location_id: create_aws_location(name: "us-east-2").id)
+      expect(Config).to receive(:aws_postgres_iam_access).and_return(true)
+      expect(Aws::IAM::Client).not_to receive(:new)
+
+      expect(postgres_timeline.refresh_blob_storage_policy).to be_nil
+    end
+
+    it "is a no-op for gcp timelines" do
+      postgres_timeline.update(location_id: create_gcp_location.id)
+      expect(postgres_timeline.refresh_blob_storage_policy).to be_nil
+    end
+
+    it "is a no-op for metal timelines" do
+      expect(postgres_timeline.refresh_blob_storage_policy).to be_nil
     end
   end
 end

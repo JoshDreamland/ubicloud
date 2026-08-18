@@ -57,6 +57,7 @@ class Prog::Vm::Metal::Nexus < Prog::Base
           runner_location_preference = [Location::GITHUB_RUNNERS_ID]
           installation = runner&.installation
           prefs = installation&.allocator_preferences || {}
+          host_exclusion_filter |= prefs["host_exclusion_filter"] || []
 
           runner_family_filter = if runner&.not_upgrade_premium_set? || vm.family == "premium"
             [vm.family]
@@ -146,7 +147,7 @@ class Prog::Vm::Metal::Nexus < Prog::Base
       sudo usermod -a -G kvm :vm_name
     COMMAND
 
-    host.sshable.cmd(command, vm_name:, vm_home:, uid:)
+    host.sshable.cmd(command, vm_name:, vm_home:, uid:, log: :on_error)
 
     hop_create_billing_record
   end
@@ -164,20 +165,20 @@ class Prog::Vm::Metal::Nexus < Prog::Base
       write_params_json
 
       d_command = NetSsh.command("sudo host/bin/setup-vm prep :vm_name", vm_name:)
-      host.sshable.cmd("common/bin/daemonizer :d_command prep_:vm_name", d_command:, vm_name:, stdin: secrets_json)
+      host.sshable.cmd("common/bin/daemonizer :d_command prep_:vm_name", d_command:, vm_name:, stdin: secrets_json, log: :on_error)
     end
 
     nap 1
   end
 
   label def clean_prep
-    host.sshable.cmd("common/bin/daemonizer --clean prep_:vm_name", vm_name:)
+    host.sshable.cmd("common/bin/daemonizer --clean prep_:vm_name", vm_name:, log: :on_error)
     hop_wait_sshable
   end
 
   def write_params_json
     host.sshable.cmd("sudo -u :vm_name tee :params_path > /dev/null", vm_name:, params_path:,
-      stdin: vm.params_json(**frame.slice("swap_size_bytes", "hugepages", "hypervisor", "ch_version", "firmware_version").transform_keys!(&:to_sym)))
+      stdin: vm.params_json(**frame.slice("swap_size_bytes", "hugepages", "hypervisor", "ch_version", "firmware_version").transform_keys!(&:to_sym)), log: :on_error)
   end
 
   label def wait_sshable
@@ -204,14 +205,15 @@ class Prog::Vm::Metal::Nexus < Prog::Base
   end
 
   label def wait_storage_catchup
-    vm.vm_storage_volumes.each { |vol|
-      next unless vol.machine_image_version_id
+    vm.vm_storage_volumes.each do |vol|
+      next unless vol.machine_image_version_id || vol.remote_storage_server_id
       if vol.caught_up?
-        vol.update(machine_image_version_id: nil)
+        vol.remote_storage_server&.incr_destroy
+        vol.update(machine_image_version_id: nil, remote_storage_server_id: nil)
       else
         nap 30
       end
-    }
+    end
     hop_wait
   end
 
@@ -227,13 +229,13 @@ class Prog::Vm::Metal::Nexus < Prog::Base
         amount: vm.vcpus,
       )
 
-      vm.storage_volumes.each do |vol|
+      vm.vm_storage_volumes.each do |vol|
         BillingRecord.create(
           project_id: project.id,
           resource_id: vm.id,
-          resource_name: "Disk ##{vol["disk_index"]} of #{vm.name}",
+          resource_name: "Disk ##{vol.disk_index} of #{vm.name}",
           billing_rate_id: BillingRate.from_resource_properties("VmStorage", vm.family, vm.location.name)["id"],
-          amount: vol["size_gib"],
+          amount: vol.size_gib,
         )
       end
 
@@ -279,7 +281,7 @@ class Prog::Vm::Metal::Nexus < Prog::Base
       hop_update_firewall_rules
     end
 
-    unless vm.vm_storage_volumes_dataset.exclude(machine_image_version_id: nil).empty?
+    unless vm.vm_storage_volumes_dataset.exclude(machine_image_version_id: nil, remote_storage_server_id: nil).empty?
       register_deadline("wait", 30 * 60)
       hop_wait_storage_catchup
     end
@@ -529,13 +531,13 @@ class Prog::Vm::Metal::Nexus < Prog::Base
       end
 
       begin
-        host.sshable.cmd("sudo systemctl stop :vm_name", vm_name:, timeout: 10)
+        host.sshable.cmd("sudo systemctl stop :vm_name", vm_name:, timeout: 10, log: :on_error)
       rescue Sshable::SshError => ex
         raise unless /Failed to stop .* Unit .* not loaded\./.match?(ex.stderr)
       end
 
       begin
-        host.sshable.cmd("sudo systemctl stop :vm_name-dnsmasq", vm_name:)
+        host.sshable.cmd("sudo systemctl stop :vm_name-dnsmasq", vm_name:, log: :on_error)
       rescue Sshable::SshError => ex
         raise unless /Failed to stop .* Unit .* not loaded\./.match?(ex.stderr)
       end
@@ -543,7 +545,7 @@ class Prog::Vm::Metal::Nexus < Prog::Base
       # If there is a load balancer setup, we want to keep the network setup in
       # tact for a while
       action = vm.load_balancer ? "delete_keep_net" : "delete"
-      host.sshable.cmd("sudo host/bin/setup-vm :action :vm_name", action:, vm_name:)
+      host.sshable.cmd("sudo host/bin/setup-vm :action :vm_name", action:, vm_name:, log: :on_error)
     end
 
     vm.vm_storage_volumes.each do |vol|
@@ -636,7 +638,17 @@ class Prog::Vm::Metal::Nexus < Prog::Base
     decr_start_after_host_reboot
 
     vm.incr_update_firewall_rules
+    hop_restore_load_balancer if vm.load_balancer
     hop_wait
+  end
+
+  # Recreating the network namespace resets its nat table, which drops the load
+  # balancer rules the namespace was serving, so they have to be reinstalled.
+  label def restore_load_balancer
+    load_balancer = vm.load_balancer
+    hop_wait if retval || load_balancer.nil?
+
+    push Prog::Vnet::UpdateLoadBalancerNode, {"load_balancer_id" => load_balancer.id}, :update_load_balancer
   end
 
   def available?

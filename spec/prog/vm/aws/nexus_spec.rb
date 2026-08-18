@@ -114,6 +114,12 @@ usermod -L ubuntu
       }.to raise_error("Machine images are only supported for metal locations")
     end
 
+    it "fails if a machine image version id is provided for non-metal location" do
+      expect {
+        Prog::Vm::Nexus.assemble("some_ssh key", project.id, location_id: assemble_loc.id, storage_volumes: [{size_gib: 20, machine_image_version_id: MachineImageVersion.generate_uuid}])
+      }.to raise_error("Machine images are only supported for metal locations")
+    end
+
     it "creates a management NIC when use_separate_management_nic is set" do
       vm = Prog::Vm::Nexus.assemble("some_ssh key", project.id, location_id: assemble_loc.id, use_separate_management_nic: true).subject
       expect(vm.nics.count).to eq(2)
@@ -631,7 +637,7 @@ usermod -L ubuntu
       it "adds failed AZ to exclude_availability_zones on first failure" do
         expect(Clog).to receive(:emit).with("retrying in different az", instance_of(Hash)).and_call_original
         expect { nx.create_instance }.to hop("wait_old_nic_deleted")
-          .and change { nic.reload.destroy_set? }.from(false).to(true)
+          .and change { nic.destroy_set?(cached: false) }.from(false).to(true)
         expect(st.stack.last["exclude_availability_zones"]).to eq(["a"])
         expect(st.stack.last["unsupported_azs"]).to eq([])
       end
@@ -669,7 +675,7 @@ usermod -L ubuntu
       it "adds failed AZ to unsupported_azs on first failure" do
         expect(Clog).to receive(:emit).with("retrying in different az", instance_of(Hash)).and_call_original
         expect { nx.create_instance }.to hop("wait_old_nic_deleted")
-          .and change { nic.reload.destroy_set? }.from(false).to(true)
+          .and change { nic.destroy_set?(cached: false) }.from(false).to(true)
         expect(st.stack.last["unsupported_azs"]).to eq(["a"])
         expect(st.stack.last["exclude_availability_zones"]).to eq([])
       end
@@ -887,7 +893,7 @@ usermod -L ubuntu
       expect(Clog).to receive(:emit).with("aws internal error on launch", instance_of(Hash)).and_call_original
       expect { nx.wait_instance_created }.to nap(60 * 60)
         .and change(GithubRunner, :count).from(1).to(2)
-        .and change { runner.reload.destroy_set? }.from(false).to(true)
+        .and change { runner.destroy_set?(cached: false) }.from(false).to(true)
     end
 
     it "does not provision another spare runner if one was already provisioned" do
@@ -899,7 +905,7 @@ usermod -L ubuntu
       client.stub_responses(:describe_instances, reservations: [{instances: [{state: {name: "terminated"}, state_reason: {code: "Server.InternalError", message: "Server.InternalError: Internal error on launch"}}]}])
       expect { nx.wait_instance_created }.to nap(60 * 60)
         .and not_change(GithubRunner, :count)
-        .and not_change { runner.reload.destroy_set? }
+        .and not_change { runner.destroy_set?(cached: false) }
     end
 
     it "naps without recreating when the instance is terminated due to a non-internal-error reason" do
@@ -1038,7 +1044,7 @@ usermod -L ubuntu
   describe "#wait_sshable" do
     it "naps 6 seconds if it's the first time we execute wait_sshable" do
       expect { nx.wait_sshable }.to nap(6)
-        .and change { vm.reload.update_firewall_rules_set? }.from(false).to(true)
+        .and change { vm.update_firewall_rules_set?(cached: false) }.from(false).to(true)
     end
 
     it "naps if not sshable" do
