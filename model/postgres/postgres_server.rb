@@ -818,10 +818,10 @@ class PostgresServer < Sequel::Model
     Clog.emit("Failed to observe root disk usage", Util.exception_to_hash(ex, into: {postgres_server_id: id}))
   end
 
-<<<<<<< HEAD
   def apply_lockout
     vm.sshable.cmd("timeout 10 sudo postgres/bin/lockout :version", version:, timeout: 15)
-=======
+  end
+
   def observe_replica_lag(session)
     return if primary? || (read_replica? && resource.parent.nil?)
 
@@ -855,7 +855,6 @@ class PostgresServer < Sequel::Model
     end
   rescue => ex
     Clog.emit("Failed to observe replica lag", Util.exception_to_hash(ex, into: {postgres_server_id: id}))
->>>>>>> 13c340e42af1b46876ff011581f9e7cd317dfa02
   end
 
   METRICS_BACKLOG_THRESHOLD_SECONDS = 300

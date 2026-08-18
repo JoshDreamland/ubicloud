@@ -278,11 +278,7 @@ class Project < Sequel::Model
     :postgres_init_script,
     :postgres_lantern,
     :postgres_maintenance_window_platform_only,
-<<<<<<< HEAD
-    :postgres_paradedb,
     :postgres_wal_shadow,
-=======
->>>>>>> 13c340e42af1b46876ff011581f9e7cd317dfa02
     :private_locations,
     :require_mfa_or_omniauth,
     :skip_runner_pool,

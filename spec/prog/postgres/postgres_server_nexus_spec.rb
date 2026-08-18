@@ -948,26 +948,16 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       standby_nx = described_class.new(standby.strand)
       standby_server = standby_nx.postgres_server
       standby_sshable = standby_server.vm.sshable
-<<<<<<< HEAD
       allow(Config).to receive(:postgres_otel_otlp_export_enabled).and_return(true)
       expect(standby_nx).to receive(:setup_otel)
       expect(standby_nx).to receive(:setup_override_metrics)
-=======
       prometheus_config = nil
->>>>>>> 13c340e42af1b46876ff011581f9e7cd317dfa02
 
       # Prometheus expectations
       expect(standby_sshable).to receive(:_cmd).with("sudo mkdir -p /usr/local/share/postgresql")
       expect(standby_sshable).to receive(:_cmd).with("sudo tee /usr/local/share/postgresql/postgres_exporter_queries.yaml > /dev/null", stdin: anything)
       expect(standby_sshable).to receive(:_cmd).with("sudo -u prometheus tee /home/prometheus/web-config.yml > /dev/null", stdin: anything)
-<<<<<<< HEAD
-      expect(standby_sshable).to receive(:_cmd).with("sudo -u prometheus tee /home/prometheus/prometheus.yml > /dev/null", stdin: /remote_write:.*url:.*metrics\.example\.com/m)
-=======
       expect(standby_sshable).to receive(:_cmd).with("sudo -u prometheus tee /home/prometheus/prometheus.yml > /dev/null", stdin: anything) { |_, stdin:| prometheus_config = stdin }
-      expect(standby_sshable).to receive(:_cmd).with("sudo systemctl reload postgres_exporter || sudo systemctl restart postgres_exporter")
-      expect(standby_sshable).to receive(:_cmd).with("sudo systemctl reload node_exporter || sudo systemctl restart node_exporter")
-      expect(standby_sshable).to receive(:_cmd).with("sudo systemctl reload prometheus || sudo systemctl restart prometheus")
->>>>>>> 13c340e42af1b46876ff011581f9e7cd317dfa02
 
       # Configure metrics expectations
       expect(standby_server).to receive(:metrics_config).and_return(metrics_config)
@@ -1266,7 +1256,6 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
   end
 
   describe "#run_post_installation_script" do
-<<<<<<< HEAD
     # The override at override/prog/postgres/postgres_server_nexus.rb prepends a
     # CREATE EXTENSION pg_stat_ch step on STANDARD primaries, which calls
     # d_check itself before delegating to super. Stub the CREATE EXTENSION
@@ -1280,22 +1269,8 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       ).and_return("")
     end
 
-    it "creates extensions for non-standard flavor and hops wait when succeeded" do
-      postgres_server.resource.update(flavor: PostgresResource::Flavor::PARADEDB)
-      expect(sshable).to receive(:d_check).with("post_installation_script").and_return("Succeeded")
-      expect(sshable).to receive(:_cmd).with(
-        "PGOPTIONS='-c statement_timeout=60s' psql -U postgres -t --csv -v 'ON_ERROR_STOP=1'",
-        hash_including(stdin: /CREATE EXTENSION IF NOT EXISTS pg_cron/),
-      ).and_return("")
-      expect { nx.run_post_installation_script }.to hop("wait")
-    end
-
-    it "hops wait when succeeded on standard flavor (pg_stat_ch created by override)" do
-      allow(sshable).to receive(:d_check).with("post_installation_script").and_return("Succeeded")
-=======
     it "hops to wait when succeeded" do
-      expect(sshable).to receive(:d_check).with("post_installation_script").and_return("Succeeded")
->>>>>>> 13c340e42af1b46876ff011581f9e7cd317dfa02
+      allow(sshable).to receive(:d_check).with("post_installation_script").and_return("Succeeded")
       expect { nx.run_post_installation_script }.to hop("wait")
     end
 

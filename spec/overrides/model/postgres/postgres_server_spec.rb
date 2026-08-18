@@ -100,7 +100,7 @@ RSpec.describe PostgresServer::PrependMethods do # rubocop:disable RSpec/SpecFil
     end
 
     it "leaves shared_preload_libraries untouched for non-standard flavors" do
-      resource.update(flavor: PostgresResource::Flavor::PARADEDB)
+      resource.update(flavor: PostgresResource::Flavor::LANTERN)
       base_method = postgres_server.method(:configure_hash).super_method
       base_libs = base_method.call[:configs]["shared_preload_libraries"]
       expect(postgres_server.configure_hash[:configs]["shared_preload_libraries"]).to eq(base_libs)

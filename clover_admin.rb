@@ -929,11 +929,8 @@ class CloverAdmin < Roda
     metal
   ].freeze
 
-<<<<<<< HEAD
   CAPACITY_RESERVATION_PROGS = %w[CapacityReservation].freeze
-=======
   SETUP_VM_HOST_PROVIDERS = [HostProvider::HETZNER_PROVIDER_NAME, *HostProvider::LEASEWEB_PROVIDER_NAMES].freeze
->>>>>>> 13c340e42af1b46876ff011581f9e7cd317dfa02
 
   plugin :autoforme do
     # simplecov:disable
@@ -1737,7 +1734,6 @@ class CloverAdmin < Roda
       strand_semaphore_action(strand_ds, LOCAL_E2E_PROGS + ["LocalE2eLoop"])
     end
 
-<<<<<<< HEAD
     r.on "capacity_reservations" do
       strand_ds = Strand.where(prog: CAPACITY_RESERVATION_PROGS)
 
@@ -1765,7 +1761,9 @@ class CloverAdmin < Roda
 
         flash["notice"] = "Strand #{strand.ubid} #{(action == "rebalance") ? "rebalance requested" : "#{action}d"}"
         r.redirect "/capacity_reservations"
-=======
+      end
+    end
+
     r.is "setup-vm-host" do
       r.get do
         @unprepared_hosts = VmHost.where(allocation_state: "unprepared")
@@ -1792,7 +1790,6 @@ class CloverAdmin < Roda
           server_identifier:, vhost_block_backend_version:, default_boot_images:, install_os:)
         flash["notice"] = "VM host setup started: #{st.ubid} (#{provider_name} #{server_identifier})"
         r.redirect
->>>>>>> 13c340e42af1b46876ff011581f9e7cd317dfa02
       end
     end
 

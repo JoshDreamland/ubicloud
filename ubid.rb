@@ -148,43 +148,6 @@ class UBID
   end
 
   # Prepended to UBID.singleton_class and UBID when Config.ubid_routing_stamp
-<<<<<<< HEAD
-  # is set (see bottom of file), reserving the top 18 bits of rand_b (3 zero
-  # bits, 5-bit scheme version, 10-bit routing stamp) and setting variant
-  # 0b11, so string chars 13-16 become "r" + version + stamp.
-  module RoutingStamp
-    def self.apply(klass)
-      return unless Config.ubid_routing_stamp
-      klass.singleton_class.prepend(SingletonMethods)
-      klass.prepend(InstanceMethods)
-    end
-
-    VARIANT = 0b11
-    VERSION = 1
-    VERSION_BIT_COUNT = 5
-    STAMP_BIT_COUNT = 10
-    SHIFT = 44
-    VERSION_SHIFT = SHIFT + STAMP_BIT_COUNT
-    RANDOM_MASK = (1 << SHIFT) - 1
-
-    module SingletonMethods
-      def from_random_value(unix_ts_ms, type, random_value)
-        code = (VERSION << STAMP_BIT_COUNT) | to_base32_n(Config.ubid_routing_stamp)
-        rand_b = (code << SHIFT) | ((random_value >> 2) & RANDOM_MASK)
-        from_parts(unix_ts_ms, type, random_value & 0b11, rand_b, variant: VARIANT)
-      end
-    end
-
-    module InstanceMethods
-      def routing_version
-        UBID.get_bits(@value, VERSION_SHIFT, VERSION_SHIFT + VERSION_BIT_COUNT - 1)
-      end
-
-      # Only meaningful when routing_version == VERSION.
-      def routing_stamp
-        UBID.from_base32_n(UBID.get_bits(@value, SHIFT, VERSION_SHIFT - 1), 2)
-      end
-=======
   # is set, reserving the top 18 bits of rand_b (3 zero bits, 5-bit scheme
   # version, 10-bit routing stamp) and setting variant 0b11, so string chars
   # 13-16 become "r" + version + stamp.
@@ -226,7 +189,6 @@ class UBID
       # simplecov:disable
       apply(UBID) if Config.ubid_routing_stamp
       # simplecov:enable
->>>>>>> 13c340e42af1b46876ff011581f9e7cd317dfa02
     end
   end
 
@@ -521,5 +483,3 @@ class UBID
     bits_i.to_s(16).rjust(digit_count, "0")
   end
 end
-
-UBID::RoutingStamp.apply(UBID)

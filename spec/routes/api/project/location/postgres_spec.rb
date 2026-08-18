@@ -1701,7 +1701,6 @@ RSpec.describe Clover, "postgres" do
       end
     end
 
-<<<<<<< HEAD
     describe "deactivate lockout" do
       before do
         project.set_ff_chc_postgres_deactivate_lockout(true)
@@ -1746,7 +1745,9 @@ RSpec.describe Clover, "postgres" do
         project.set_ff_chc_postgres_deactivate_lockout(false)
         post "/project/#{project.ubid}/location/#{pg.display_location}/postgres/#{pg.name}/restart"
         expect(last_response.status).not_to eq(409)
-=======
+      end
+    end
+
     describe "backup-credentials" do
       def create_provider_location(provider)
         Location.create(name: "loc-#{provider}", display_name: "#{provider}-loc", ui_name: "#{provider} loc", visible: true, provider:)
@@ -1845,7 +1846,6 @@ RSpec.describe Clover, "postgres" do
         expect(response_body["secret_access_key"]).to eq("SECRET")
         expect(response_body["session_token"]).to eq("TOKEN")
         expect(response_body["expiration"]).to eq(expiration.iso8601)
->>>>>>> 13c340e42af1b46876ff011581f9e7cd317dfa02
       end
     end
   end

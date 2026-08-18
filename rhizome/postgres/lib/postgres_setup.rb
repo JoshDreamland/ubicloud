@@ -1,11 +1,8 @@
 # frozen_string_literal: true
 
 require_relative "../../common/lib/util"
-<<<<<<< HEAD
 require_relative "walg_hardening"
-=======
 require "fileutils"
->>>>>>> 13c340e42af1b46876ff011581f9e7cd317dfa02
 require "logger"
 
 class PostgresSetup

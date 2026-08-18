@@ -20,7 +20,7 @@ RSpec.describe Prog::Test::MoveVm do
 
       frame = st.stack.first
       expect(frame).to include("vm_host_id" => vm_host.id, "markers" => [])
-      expect(Strand.where(prog: "Storage::SetupVhostBlockBackend").count).to eq 1
+      expect(Strand.where(prog: "Storage::SetupVhostBlockBackend").map { it.stack.first["subject_id"] }).to eq [vm_host.id]
 
       vm = Vm[frame["vm_id"]]
       expect(vm.location_id).to eq(vm_host.location_id)

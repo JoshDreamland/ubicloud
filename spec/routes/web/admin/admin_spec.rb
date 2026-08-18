@@ -2563,7 +2563,6 @@ RSpec.describe CloverAdmin do
     end
   end
 
-<<<<<<< HEAD
   describe "capacity reservations" do
     let(:cr_location) do
       Location.create(name: "us-west-2", provider: "aws", project_id: Project.create(name: "cr-prj").id,
@@ -2629,7 +2628,9 @@ RSpec.describe CloverAdmin do
       expect(page).to have_flash_notice("Strand #{strand.ubid} rebalance requested")
       expect(strand.semaphores.map(&:name)).to eq ["rebalance"]
       expect(strand.this.get(:schedule)).to be_within(10).of(Time.now)
-=======
+    end
+  end
+
   describe "setup-vm-host" do
     before do
       click_link "Setup VM Host"
@@ -2727,7 +2728,6 @@ RSpec.describe CloverAdmin do
 
       expect { click_button "Setup VM Host" }.to raise_error(CloverError, "invalid IP address")
       expect(VmHost.count).to eq 0
->>>>>>> 13c340e42af1b46876ff011581f9e7cd317dfa02
     end
   end
 
