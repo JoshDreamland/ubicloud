@@ -78,6 +78,12 @@ gcp:
     instanceResourceFamilies:
       - c4a-standard
       - c4a-highmem
+      - c4-standard
+      - c4-highmem
+      - c4d-standard
+      - c4d-highmem
+      - z3-standardlssd
+      - z3-highlssd
     regions:
       - gcp-us-central1
       - gcp-us-east4
