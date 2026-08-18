@@ -748,6 +748,12 @@ RSpec.describe "UbicloudSetup" do
       expect(Account.where(email: "observability-bot-test@clickhouse.com").count).to eq 1
       expect(ApiKey.count).to eq 2
 
+      # GCP family ffs are enabled unconditionally (like the AWS ones), even for aws-only configs.
+      project = Project.where(name: "clickgres-development").first
+      %w[c4_standard c4_highmem c4d_standard c4d_highmem z3_standardlssd z3_highlssd].each do |family|
+        expect(project.send(:"get_ff_enable_#{family}")).to be(true), "expected ff enable_#{family} to be enabled"
+      end
+
       us_west_2 = Location.where(name: "us-west-2", ui_name: "dev-us-west-2-cell0-clickgres").first
       us_east_1 = Location.where(name: "us-east-1", ui_name: "dev-us-east-1-cell0-clickgres").first
       expect(OtelOtlpDestination[us_west_2.id]).to have_attributes(

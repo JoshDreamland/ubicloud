@@ -519,6 +519,15 @@ module UbicloudSetup
       project.send(:"set_ff_enable_#{family}", true)
     end
 
+    # c4a defaults on (see PostgresResource::Gcp::DEFAULT_ENABLED_FAMILIES); the rest are
+    # gated off by default, so the setup project opts into all of them, mirroring AWS above.
+    gcp_family_options = %w[c4-standard c4-highmem c4d-standard c4d-highmem z3-standardlssd z3-highlssd]
+
+    Clog.emit "Enabling GCP instance families: #{gcp_family_options}"
+    gcp_family_options.each do |family|
+      project.send(:"set_ff_enable_#{family.tr("-", "_")}", true)
+    end
+
     Clog.emit "Enabling Postgres Standbys to always use different AZs for standbys [postgres_aws_use_different_azs_for_standbys]"
     project.send(:set_ff_postgres_aws_use_different_azs_for_standbys, true)
 
