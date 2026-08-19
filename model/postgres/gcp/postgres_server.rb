@@ -34,8 +34,18 @@ class PostgresServer < Sequel::Model
         # switch_to_new_timeline can reach this before the timeline strand
         # ran setup_bucket, so ensure the bucket exists first.
         timeline.create_bucket
-        _gcp_grant_timeline_bucket_access(credential, member)
-        _gcp_detach_parent_timeline_bucket_access(credential, member)
+
+        bucket = credential.storage_client.bucket(timeline.ubid)
+        policy = bucket.policy requested_policy_version: 3
+        # Condition-scoped bindings are skipped: joining one would grant less
+        # than the whole bucket.
+        if (role_binding = policy.bindings.find { it.role == "roles/storage.objectAdmin" && it.condition.nil? })
+          return if role_binding.members.include?(member)
+          role_binding.members << member
+        else
+          policy.bindings.insert(role: "roles/storage.objectAdmin", members: [member])
+        end
+        bucket.policy = policy
         return
       end
 
@@ -112,60 +122,31 @@ class PostgresServer < Sequel::Model
       timeline.update(access_key: service_account.email, secret_key: key_json)
     end
 
-    def _gcp_grant_timeline_bucket_access(credential, member)
-      bucket = credential.storage_client.bucket(timeline.ubid)
-      policy = bucket.policy requested_policy_version: 3
-      # Only unconditioned bindings: appending to a condition-scoped binding
-      # would leave the grant narrower than intended.
-      if (role_binding = policy.bindings.find { it.role == "roles/storage.objectAdmin" && it.condition.nil? })
-        return if role_binding.members.include?(member)
-        role_binding.members += [member]
-      else
-        policy.bindings.insert(role: "roles/storage.objectAdmin", members: [member])
-      end
-      bucket.policy = policy
-    end
-
-    def _gcp_detach_parent_timeline_bucket_access(credential, member)
-      return unless (parent = timeline.parent)
-      _gcp_detach_member_from_bucket(credential, parent.ubid, member)
-    end
-
-    # A deleted SA's policy member becomes a `deleted:...?uid=` entry this
-    # code can no longer match (GCP purges it only after up to 60 days), so
-    # this must succeed before the SA dies; errors deliberately block destroy.
-    def gcp_detach_s3_policy_on_destroy
+    # Must run while the service account exists: once it is deleted GCP rewrites
+    # its policy member to a `deleted:...?uid=` string this can no longer match,
+    # and keeps it for up to 60 days. #destroy retries if an error is raised.
+    # The timeline to detach is passed in because it is not always
+    # timeline.parent: the version upgrade switches with parent_id nil.
+    def gcp_detach_s3_policy(detached_timeline)
       return unless (vm_sa_email = vm.vm_gcp_resource&.service_account_email)
 
-      credential = timeline.location.location_credential_gcp
+      credential = detached_timeline.location.location_credential_gcp
+      return unless (bucket = credential.storage_client.bucket(detached_timeline.ubid))
+
       member = "serviceAccount:#{vm_sa_email}"
-      _gcp_detach_member_from_bucket(credential, timeline.ubid, member)
-      _gcp_detach_parent_timeline_bucket_access(credential, member)
-    end
-
-    def _gcp_detach_member_from_bucket(credential, bucket_ubid, member)
-      return unless (bucket = credential.storage_client.bucket(bucket_ubid))
-
       policy = bucket.policy requested_policy_version: 3
-      to_remove = []
+      emptied = []
       changed = false
       policy.bindings.each do |role_binding|
         next unless role_binding.role == "roles/storage.objectAdmin"
-        next unless role_binding.members.include?(member)
-        remaining = role_binding.members - [member]
-        # Binding requires a non-empty members list, so drop the whole
-        # binding when this member was its only one.
-        if remaining.empty?
-          to_remove << role_binding
-        else
-          role_binding.members = remaining
-        end
+        next unless role_binding.members.delete(member)
+        # A binding cannot carry an empty members list, so it goes with its
+        # last member. Collected because bindings cannot be removed mid-loop.
+        emptied << role_binding if role_binding.members.empty?
         changed = true
       end
-      to_remove.each { |role_binding| policy.bindings.remove(role_binding) }
+      emptied.each { policy.bindings.remove(it) }
       bucket.policy = policy if changed
-    rescue Google::Cloud::NotFoundError
-      nil
     end
 
     def gcp_increment_s3_new_timeline

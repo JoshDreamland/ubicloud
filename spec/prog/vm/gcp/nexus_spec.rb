@@ -457,7 +457,6 @@ RSpec.describe Prog::Vm::Gcp::Nexus do
       before do
         allow(Config).to receive(:gcp_postgres_iam_access).and_return(true)
         allow(nx.send(:credential)).to receive(:iam_client).and_return(iam_client)
-        allow(Clog).to receive(:emit).and_call_original
         nic.strand.update(label: "wait")
         ensure_nic_gcp_resource(nic)
       end
@@ -476,7 +475,8 @@ RSpec.describe Prog::Vm::Gcp::Nexus do
         expect(iam_client).to receive(:get_project_service_account)
           .with("projects/test-gcp-project/serviceAccounts/#{sa_email}")
           .and_raise(Google::Apis::ClientError.new("Not Found", status_code: 404))
-        allow(Config).to receive(:provider_resource_tag_value).and_return("4242")
+        # Once for the instance label, once for the service account description.
+        expect(Config).to receive(:provider_resource_tag_value).twice.and_return("4242")
         expect(iam_client).to receive(:create_service_account).with(
           "projects/test-gcp-project",
           an_instance_of(Google::Apis::IamV1::CreateServiceAccountRequest),
@@ -525,17 +525,16 @@ RSpec.describe Prog::Vm::Gcp::Nexus do
         expect(VmGcpResource[vm.id].service_account_email).to eq(sa_email)
       end
 
-      it "persists the email before creating the service account so destroy can clean up" do
+      it "does not record the email when the service account cannot be created" do
         expect(iam_client).to receive(:get_project_service_account).and_raise(
           Google::Apis::ClientError.new("Not Found", status_code: 404),
         )
-        expect(iam_client).to receive(:create_service_account) do
-          expect(VmGcpResource[vm.id].service_account_email).to eq(sa_email)
-          raise Google::Apis::ClientError.new("Quota exceeded", status_code: 429)
-        end
+        expect(iam_client).to receive(:create_service_account).and_raise(
+          Google::Apis::ClientError.new("Quota exceeded", status_code: 429),
+        )
 
         expect { nx.start }.to raise_error(Google::Apis::ClientError, /Quota exceeded/)
-        expect(VmGcpResource[vm.id].service_account_email).to eq(sa_email)
+        expect(VmGcpResource[vm.id].service_account_email).to be_nil
       end
 
       it "appends the member to an existing binding that lacks it" do
@@ -581,6 +580,7 @@ RSpec.describe Prog::Vm::Gcp::Nexus do
           expect(compute_client).to receive(:insert).and_raise(
             Google::Cloud::InvalidArgumentError.new("Machine type with name 'c4a-standard-8-lssd' does not exist in zone 'us-central1-b'."),
           )
+          expect(Clog).to receive(:emit).with("GCP service account created", anything).and_call_original
           expect(Clog).to receive(:emit).with("GCE zone retry", anything).and_call_original
           expect { nx.start }.to nap(5)
         end
@@ -677,8 +677,7 @@ RSpec.describe Prog::Vm::Gcp::Nexus do
     it "retries from start when the LRO cannot resolve the VM service account" do
       refresh_frame(nx, new_values: {"create_vm" => {"name" => "op-123", "scope" => "zone", "scope_value" => "us-central1-a"}, "gcp_zone_suffix" => "a"})
       ensure_vm_gcp_resource(vm, "a")
-      email = "vm-#{vm.ubid}@test-project.iam.gserviceaccount.com"
-      VmGcpResource[vm.id].update(service_account_email: email)
+      email = "vm-#{vm.ubid}@test-gcp-project.iam.gserviceaccount.com"
 
       error_entry = Google::Cloud::Compute::V1::Errors.new(code: "EXTERNAL_RESOURCE_NOT_FOUND", message: "The resource '#{email}' of type 'serviceAccount' was not found.")
       op = Google::Cloud::Compute::V1::Operation.new(
@@ -689,28 +688,14 @@ RSpec.describe Prog::Vm::Gcp::Nexus do
 
       expect { nx.wait_create_op }.to hop("start")
       stack = st.stack.first
-      expect(stack["create_vm_name"]).to be_nil
+      expect(stack).not_to have_key("create_vm")
       expect(stack["retry_zone_delay"]).to eq(10)
       expect(stack["exclude_zones"]).to be_nil
-    end
-
-    it "raises on EXTERNAL_RESOURCE_NOT_FOUND when the VM has no service account" do
-      refresh_frame(nx, new_values: {"create_vm" => {"name" => "op-123", "scope" => "zone", "scope_value" => "us-central1-a"}})
-
-      error_entry = Google::Cloud::Compute::V1::Errors.new(code: "EXTERNAL_RESOURCE_NOT_FOUND", message: "The resource 'projects/test-project/zones/us-central1-a/disks/x' was not found.")
-      op = Google::Cloud::Compute::V1::Operation.new(
-        status: :DONE,
-        error: Google::Cloud::Compute::V1::Error.new(errors: [error_entry]),
-      )
-      expect(zone_ops_client).to receive(:get).and_return(op)
-
-      expect { nx.wait_create_op }.to raise_error(RuntimeError, /GCE instance creation failed/)
     end
 
     it "raises on EXTERNAL_RESOURCE_NOT_FOUND that does not mention the VM service account" do
       refresh_frame(nx, new_values: {"create_vm" => {"name" => "op-123", "scope" => "zone", "scope_value" => "us-central1-a"}, "gcp_zone_suffix" => "a"})
       ensure_vm_gcp_resource(vm, "a")
-      VmGcpResource[vm.id].update(service_account_email: "vm-#{vm.ubid}@test-project.iam.gserviceaccount.com")
 
       error_entry = Google::Cloud::Compute::V1::Errors.new(code: "EXTERNAL_RESOURCE_NOT_FOUND", message: "The resource 'projects/test-project/zones/us-central1-a/disks/x' was not found.")
       op = Google::Cloud::Compute::V1::Operation.new(
@@ -1041,7 +1026,7 @@ RSpec.describe Prog::Vm::Gcp::Nexus do
       expect { nx.finalize_destroy }.to exit({"msg" => "vm destroyed"})
     end
 
-    it "skips service account deletion when none was recorded" do
+    it "skips service account deletion when the VM never had one" do
       ensure_vm_gcp_resource(vm, "a")
       expect(VmGcpResource[vm.id].service_account_email).to be_nil
       expect(nx.send(:credential)).not_to receive(:iam_client)
@@ -1049,7 +1034,7 @@ RSpec.describe Prog::Vm::Gcp::Nexus do
       expect { nx.finalize_destroy }.to exit({"msg" => "vm destroyed"})
     end
 
-    context "when a service account was recorded" do
+    context "when the VM has a service account" do
       let(:iam_client) { instance_double(Google::Apis::IamV1::IamService) }
       let(:sa_email) { "vm-#{vm.ubid}@test-gcp-project.iam.gserviceaccount.com" }
 
@@ -1066,6 +1051,15 @@ RSpec.describe Prog::Vm::Gcp::Nexus do
         expect { nx.finalize_destroy }.to exit({"msg" => "vm destroyed"})
       end
 
+      it "deletes the derived account even when the email was never recorded" do
+        VmGcpResource[vm.id].update(service_account_email: nil)
+        expect(Config).to receive(:gcp_postgres_iam_access).and_return(true)
+        expect(iam_client).to receive(:delete_project_service_account)
+          .with("projects/-/serviceAccounts/#{sa_email}")
+
+        expect { nx.finalize_destroy }.to exit({"msg" => "vm destroyed"})
+      end
+
       it "ignores an already-deleted service account" do
         expect(iam_client).to receive(:delete_project_service_account).and_raise(
           Google::Apis::ClientError.new("Not Found", status_code: 404),
@@ -1074,13 +1068,21 @@ RSpec.describe Prog::Vm::Gcp::Nexus do
         expect { nx.finalize_destroy }.to exit({"msg" => "vm destroyed"})
       end
 
-      it "re-raises non-404 errors from service account deletion" do
+      it "ignores the 403 IAM returns for a missing account under the project wildcard" do
         expect(iam_client).to receive(:delete_project_service_account).and_raise(
           Google::Apis::ClientError.new("Forbidden", status_code: 403),
         )
 
-        expect { nx.finalize_destroy }.to raise_error(Google::Apis::ClientError, /Forbidden/)
-        expect(Vm[vm.id]).not_to be_nil
+        expect { nx.finalize_destroy }.to exit({"msg" => "vm destroyed"})
+      end
+
+      it "re-raises other errors from service account deletion" do
+        expect(iam_client).to receive(:delete_project_service_account).and_raise(
+          Google::Apis::ClientError.new("Internal", status_code: 500),
+        )
+
+        expect { nx.finalize_destroy }.to raise_error(Google::Apis::ClientError, /Internal/)
+        expect(vm).to exist
       end
     end
   end

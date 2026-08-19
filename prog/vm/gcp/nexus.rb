@@ -147,8 +147,7 @@ class Prog::Vm::Gcp::Nexus < Prog::Base
         self.retry_zone_delay = bump_excluded_zone("GCE operation error: #{error_code}")
         hop_start
       end
-      if error_code == "EXTERNAL_RESOURCE_NOT_FOUND" &&
-          (email = vm.vm_gcp_resource&.service_account_email) && op_error_message(op).include?(email)
+      if error_code == "EXTERNAL_RESOURCE_NOT_FOUND" && op_error_message(op).include?(vm_service_account_email)
         # LRO variant of the SA-propagation race handled at insert above.
         clear_gcp_op("create_vm")
         self.retry_zone_delay = 10
@@ -299,11 +298,13 @@ class Prog::Vm::Gcp::Nexus < Prog::Base
   end
 
   label def finalize_destroy
-    if (email = vm.vm_gcp_resource&.service_account_email)
+    if Config.gcp_postgres_iam_access || vm.vm_gcp_resource&.service_account_email
       begin
-        credential.iam_client.delete_project_service_account("projects/-/serviceAccounts/#{email}")
+        credential.iam_client.delete_project_service_account("projects/-/serviceAccounts/#{vm_service_account_email}")
       rescue Google::Apis::ClientError => e
-        raise unless e.status_code == 404
+        # Under the `-` project wildcard IAM answers 403 ("or it may not
+        # exist") rather than 404 for an account that is not there.
+        raise unless [403, 404].include?(e.status_code)
       end
     end
 
@@ -367,12 +368,19 @@ class Prog::Vm::Gcp::Nexus < Prog::Base
     "projects/#{entry[:project]}/global/images/family/#{family}"
   end
 
-  def ensure_vm_service_account
-    # account_id is 3+26=29 chars, within GCP's 6-30 limit.
-    account_id = "vm-#{vm.ubid}"
-    email = "#{account_id}@#{gcp_project_id}.iam.gserviceaccount.com"
+  # 3+26=29 chars, within GCP's 6-30 account id limit.
+  def vm_service_account_id
+    "vm-#{vm.ubid}"
+  end
 
-    vm.reload.vm_gcp_resource.update(service_account_email: email)
+  # Derived rather than read from vm_gcp_resource, so destroy can still name an
+  # account that create_vm created before its transaction rolled back.
+  def vm_service_account_email
+    "#{vm_service_account_id}@#{gcp_project_id}.iam.gserviceaccount.com"
+  end
+
+  def ensure_vm_service_account
+    email = vm_service_account_email
 
     begin
       service_account = credential.iam_client.get_project_service_account("projects/#{gcp_project_id}/serviceAccounts/#{email}")
@@ -381,7 +389,7 @@ class Prog::Vm::Gcp::Nexus < Prog::Base
       service_account = credential.iam_client.create_service_account(
         "projects/#{gcp_project_id}",
         Google::Apis::IamV1::CreateServiceAccountRequest.new(
-          account_id:,
+          account_id: vm_service_account_id,
           service_account: Google::Apis::IamV1::ServiceAccount.new(
             display_name: "VM #{vm.ubid}",
             description: "Ubicloud VM service account [Ubicloud=#{Config.provider_resource_tag_value}]",
@@ -391,6 +399,8 @@ class Prog::Vm::Gcp::Nexus < Prog::Base
     end
     Clog.emit("GCP service account created",
       {gcp_service_account_created: email})
+
+    vm.reload.vm_gcp_resource.update(service_account_email: email)
 
     target_role = "roles/iam.serviceAccountUser"
     target_member = "serviceAccount:#{credential.service_account_email}"
