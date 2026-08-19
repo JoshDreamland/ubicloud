@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../../model"
+require "aws-sdk-iam"
 
 class PostgresWalShadow < Sequel::Model
   many_to_one :project
@@ -32,6 +33,37 @@ class PostgresWalShadow < Sequel::Model
 
   def self.vm_size_option(vm_size)
     Option::VmSizes.find { it.name == vm_size }
+  end
+
+  def timeline
+    postgres_resource.representative_server&.timeline
+  end
+
+  # The timeline's own policy on the role the VM already has, so walshadow
+  # reads the bucket off the instance profile. VM destroy detaches it.
+  def attach_s3_policy_if_needed
+    return unless Config.aws_postgres_iam_access
+    return unless (tl = timeline)&.aws?
+    return unless (role_name = vm.aws_instance&.iam_role)
+
+    tl.location.location_credential_aws.iam_client.attach_role_policy(role_name:, policy_arn: tl.aws_s3_policy_arn)
+  end
+
+  # The daemon's [backup] table. Inert until a bootstrap mode reads it.
+  def backup_config_hash
+    tl = timeline
+    return {} unless tl&.aws?
+
+    {"backup" => {
+      "archive" => "s3://#{tl.ubid}",
+      "region" => tl.location.name,
+      "endpoint" => tl.blob_storage_endpoint,
+      "force_path_style" => true,
+    }}
+  end
+
+  def backup_config_toml
+    ChConfig.render_toml(backup_config_hash)
   end
 
   def instance_store_path

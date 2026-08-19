@@ -97,6 +97,13 @@ class Prog::Postgres::PostgresWalShadowNexus < Prog::Base
 
   label def wait_vm
     nap 5 unless vm.strand.label == "wait"
+    hop_attach_s3_policy
+  end
+
+  # AttachRolePolicy is eventually consistent; the deps install and build that
+  # follow are the slack before the daemon first reads the bucket.
+  label def attach_s3_policy
+    postgres_wal_shadow.attach_s3_policy_if_needed
     hop_bootstrap_rhizome
   end
 
@@ -158,6 +165,7 @@ class Prog::Postgres::PostgresWalShadowNexus < Prog::Base
 
   label def write_config
     write_base_config
+    write_backup_config
     write_api_config
     hop_start_daemon
   end
@@ -171,6 +179,7 @@ class Prog::Postgres::PostgresWalShadowNexus < Prog::Base
     when_update_config_set? do
       decr_update_config
       write_base_config
+      write_backup_config
       write_api_config
       vm.sshable.cmd("sudo systemctl reload walshadow")
     end
@@ -196,6 +205,10 @@ class Prog::Postgres::PostgresWalShadowNexus < Prog::Base
   # base config is operator-owned; the API fragment lives in ch-config.d/50-api.toml
   def write_base_config
     vm.sshable.cmd("sudo install -d /etc/walshadow && sudo install -d -o postgres -g postgres /etc/walshadow/ch-config.d && sudo install -m 600 -o postgres -g postgres /dev/null /etc/walshadow/ch-config.toml && sudo tee /etc/walshadow/ch-config.toml > /dev/null", stdin: postgres_wal_shadow.base_ch_config, log: false)
+  end
+
+  def write_backup_config
+    vm.sshable.cmd("sudo install -m 600 -o postgres -g postgres /dev/null /etc/walshadow/ch-config.d/10-backup.toml && sudo tee /etc/walshadow/ch-config.d/10-backup.toml > /dev/null", stdin: postgres_wal_shadow.backup_config_toml)
   end
 
   # API-owned fragment, deep-merged over base by the daemon in filename order

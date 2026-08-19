@@ -20,6 +20,7 @@ RSpec.describe Prog::Postgres::PostgresWalShadowNexus do
   let(:ctl_status_cmd) { "sudo -u postgres walshadow-stream ctl status" }
   let(:base_config_cmd) { "sudo install -d /etc/walshadow && sudo install -d -o postgres -g postgres /etc/walshadow/ch-config.d && sudo install -m 600 -o postgres -g postgres /dev/null /etc/walshadow/ch-config.toml && sudo tee /etc/walshadow/ch-config.toml > /dev/null" }
   let(:api_config_cmd) { "sudo install -m 600 -o postgres -g postgres /dev/null /etc/walshadow/ch-config.d/50-api.toml && sudo tee /etc/walshadow/ch-config.d/50-api.toml > /dev/null" }
+  let(:backup_config_cmd) { "sudo install -m 600 -o postgres -g postgres /dev/null /etc/walshadow/ch-config.d/10-backup.toml && sudo tee /etc/walshadow/ch-config.d/10-backup.toml > /dev/null" }
 
   describe ".assemble" do
     it "creates a postgres_wal_shadow model and strand pointed at it" do
@@ -178,7 +179,16 @@ RSpec.describe Prog::Postgres::PostgresWalShadowNexus do
 
     it "hops when vm is ready" do
       vm_strand.update(label: "wait")
-      expect { nx.wait_vm }.to hop("bootstrap_rhizome")
+      expect { nx.wait_vm }.to hop("attach_s3_policy")
+    end
+  end
+
+  describe "#attach_s3_policy" do
+    it "delegates to the model and hops" do
+      ws.update(vm_id: vm_strand.id)
+      expect(ws).to receive(:attach_s3_policy_if_needed)
+      expect(nx).to receive(:postgres_wal_shadow).and_return(ws)
+      expect { nx.attach_s3_policy }.to hop("bootstrap_rhizome")
     end
   end
 
@@ -354,9 +364,10 @@ RSpec.describe Prog::Postgres::PostgresWalShadowNexus do
   end
 
   describe "#write_config" do
-    it "writes base and api configs and hops" do
+    it "writes base, backup and api configs and hops" do
       ws.update(vm_id: vm_strand.id)
       expect(vm_sshable).to receive(:_cmd).with(base_config_cmd, stdin: "[ch]\nurl = \"h\"\n", log: false)
+      expect(vm_sshable).to receive(:_cmd).with(backup_config_cmd, stdin: "")
       expect(vm_sshable).to receive(:_cmd).with(api_config_cmd, stdin: "", log: false)
       expect { nx.write_config }.to hop("start_daemon")
     end
@@ -382,6 +393,7 @@ RSpec.describe Prog::Postgres::PostgresWalShadowNexus do
     it "rewrites configs and reloads daemon on update_config" do
       nx.incr_update_config
       expect(vm_sshable).to receive(:_cmd).with(base_config_cmd, stdin: "[ch]\nurl = \"h\"\n", log: false)
+      expect(vm_sshable).to receive(:_cmd).with(backup_config_cmd, stdin: "")
       expect(vm_sshable).to receive(:_cmd).with(api_config_cmd, stdin: "", log: false)
       expect(vm_sshable).to receive(:_cmd).with("sudo systemctl reload walshadow")
       expect(vm_sshable).to receive(:_cmd).with(ctl_status_cmd).and_return("paused = false\n")
