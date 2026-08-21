@@ -25,6 +25,10 @@ RSpec.describe Prog::DnsZone::SetupDnsServerVm do
     (1..2).map { |i| build_zone.call("zone#{i}.domain.io", 3600) } << build_zone.call("k8s.ubicloud.com", 15)
   end
   let(:project) { Project.create(name: "ubicloud-dns") }
+  let(:gcp_location) do
+    Location.create(name: "gcp-us-central1", provider: "gcp",
+      display_name: "gcp-us-central1", ui_name: "GCP US Central 1", visible: true)
+  end
 
   describe ".assemble" do
     it "validates input" do
@@ -63,15 +67,18 @@ RSpec.describe Prog::DnsZone::SetupDnsServerVm do
     end
 
     it "derives the arch from the vm size for arm64-only GCP sizes" do
-      gcp_location = Location.create(name: "gcp-us-central1", provider: "gcp",
-        display_name: "gcp-us-central1", ui_name: "GCP US Central 1", visible: true)
-
       described_class.assemble(ds, vm_size: "c4a-standard-4", location_id: gcp_location.id)
 
       vm = Vm.first
       expect(vm.arch).to eq "arm64"
       expect(vm.family).to eq "c4a-standard"
       expect(vm.vcpus).to eq 4
+    end
+
+    it "keeps the x64 default for a vm size that exists for both arches" do
+      described_class.assemble(ds, vm_size: "standard-2")
+
+      expect(Vm.first.arch).to eq "x64"
     end
 
     it "excludes host ids of existing dns server vms" do
@@ -89,21 +96,34 @@ RSpec.describe Prog::DnsZone::SetupDnsServerVm do
       end
     end
 
-    it "locks the shared subnet firewall to control-plane SSH when restrict_ssh_to_control_plane is set" do
-      gcp_location = Location.create(name: "gcp-us-central1", provider: "gcp",
-        display_name: "gcp-us-central1", ui_name: "GCP US Central 1", visible: true)
+    it "creates a dedicated dns subnet with control-plane-only SSH when restrict_ssh_to_control_plane is set" do
+      described_class.assemble(ds, vm_size: "c4a-standard-4", location_id: gcp_location.id, restrict_ssh_to_control_plane: true)
+
+      subnet = Vm.first.user_nic.private_subnet
+      expect(subnet.name).to eq "dns-gcp-us-central1"
+      expect(subnet.firewalls.map(&:name)).to eq ["dns-gcp-us-central1"]
+      rules = subnet.firewalls.flat_map(&:firewall_rules)
+      expect(rules.map { it.port_range.begin }.uniq).to eq [22]
+      expect(rules.map(&:protocol).uniq).to eq ["tcp"]
+      expect(rules.map { it.cidr.to_s }.sort).to eq Config.control_plane_outbound_cidrs.sort
+    end
+
+    it "reuses an existing dns subnet without touching its firewall rules" do
+      subnet = Prog::Vnet::SubnetNexus.assemble(project.id, name: "dns-gcp-us-central1", location_id: gcp_location.id).subject
 
       described_class.assemble(ds, vm_size: "c4a-standard-4", location_id: gcp_location.id, restrict_ssh_to_control_plane: true)
 
-      rules = Vm.first.user_nic.private_subnet.firewalls.flat_map(&:firewall_rules)
-      expect(rules.map { it.port_range.begin }.uniq).to eq [22]
-      expect(rules.map { it.cidr.to_s }.sort).to eq Config.control_plane_outbound_cidrs.sort
+      expect(Vm.first.user_nic.private_subnet_id).to eq subnet.id
+      rules = subnet.firewalls.flat_map(&:firewall_rules)
+      expect(rules.map { it.port_range.begin }.uniq).to eq [0]
     end
 
     it "keeps the metal subnet default firewall untouched" do
       described_class.assemble(ds)
 
-      rules = Vm.first.user_nic.private_subnet.firewalls.flat_map(&:firewall_rules)
+      subnet = Vm.first.user_nic.private_subnet
+      expect(subnet.name).to eq "default-eu-central-h1"
+      rules = subnet.firewalls.flat_map(&:firewall_rules)
       expect(rules.map { it.port_range.begin }.uniq).to eq [0]
     end
 
@@ -224,8 +244,8 @@ RSpec.describe Prog::DnsZone::SetupDnsServerVm do
       prog.vm.location.update(provider: "gcp")
       prog.vm.strand.update(label: "wait")
       expect { prog.start }.to hop("prepare")
-      expect(prog.vm.firewalls.map(&:id)).not_to include(other_fw.id)
-      expect(prog.vm.vm_firewalls.map(&:location_id)).to eq [prog.vm.location_id]
+      expect(prog.vm.vm_firewalls_dataset.select_map(:id)).not_to include(other_fw.id)
+      expect(prog.vm.vm_firewalls_dataset.select_map(:location_id)).to eq [prog.vm.location_id]
     end
   end
 
