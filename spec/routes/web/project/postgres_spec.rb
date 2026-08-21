@@ -556,6 +556,15 @@ RSpec.describe Clover, "postgres" do
         expect(pg.init_script.init_script).to eq("sudo ls")
       end
 
+      it "shows an initialization script that contains non-ASCII characters" do
+        PostgresInitScript.create_with_id(pg, init_script: "echo 'héllo wörld'")
+        project.set_ff_postgres_init_script(true)
+        visit "#{project.path}#{pg.path}/settings"
+
+        expect(page.status_code).to eq(200)
+        expect(page).to have_field("init_script", with: "echo 'héllo wörld'")
+      end
+
       it "raises forbidden when does not have permissions" do
         visit "#{project_wo_permissions.path}#{pg_wo_permission.path}/overview"
 
@@ -573,6 +582,9 @@ RSpec.describe Clover, "postgres" do
       end
 
       it "can update PostgreSQL instance size configuration" do
+        # Low disk usage, so that no storage option is disabled for not
+        # holding the data in use.
+        POSTGRES_MONITOR_DB[:postgres_disk_usage_monitor].insert(postgres_server_id: pg.representative_server.id, data_disk_usage_percent: 5, observed_at: Time.now)
         visit "#{project.path}#{pg.path}/resize"
 
         choose option: "standard-8"
@@ -586,6 +598,44 @@ RSpec.describe Clover, "postgres" do
         pg.reload
         expect(pg.target_vm_size).to eq("standard-8")
         expect(pg.target_storage_size_gib).to eq(256)
+      ensure
+        POSTGRES_MONITOR_DB[:postgres_disk_usage_monitor].where(postgres_server_id: pg.representative_server.id).delete
+      end
+
+      it "disables the storage sizes that cannot hold the data in use" do
+        POSTGRES_MONITOR_DB[:postgres_disk_usage_monitor].insert(postgres_server_id: pg.representative_server.id, data_disk_usage_percent: 60, observed_at: Time.now)
+        visit "#{project.path}#{pg.path}/resize"
+
+        expect(page).to have_content "76.8 GB of 128 GB is used"
+        expect(page).to have_content "Too small for 76.8 GB used"
+        expect(page).to have_css("label.form_size_standard-2.option-unavailable input[value='64'][disabled]")
+        expect(page).to have_no_css("label.form_size_standard-2.option-unavailable input[value='128']")
+      ensure
+        POSTGRES_MONITOR_DB[:postgres_disk_usage_monitor].where(postgres_server_id: pg.representative_server.id).delete
+      end
+
+      it "disables the smaller storage sizes when the disk usage is unknown" do
+        visit "#{project.path}#{pg.path}/resize"
+
+        expect(page).to have_content "Current disk usage is unavailable"
+        expect(page).to have_css("label.form_size_standard-2.option-unavailable input[value='64'][disabled]")
+        # The reason is the same for every size, so it is not repeated per card.
+        expect(page).to have_no_content "Too small for"
+      end
+
+      it "shows the maintenance window in the resize failover steps" do
+        pg.update(maintenance_window_start_at: 22, maintenance_window_days_bitmask: PostgresResource.maintenance_window_days_mask(["mon", "thu"]))
+        visit "#{project.path}#{pg.path}/resize"
+
+        expect(page).to have_content "Wait for the maintenance window"
+        expect(page).to have_content "Mon, Thu, 22:00 - 00:00 (UTC)"
+      end
+
+      it "links to the settings page when resizing without a maintenance window" do
+        visit "#{project.path}#{pg.path}/resize"
+
+        expect(page).to have_content "No maintenance window"
+        expect(page).to have_link "Set a maintenance window", href: "#{project.path}#{pg.path}/settings"
       end
 
       it "can update PostgreSQL high availability" do
@@ -1448,6 +1498,32 @@ RSpec.describe Clover, "postgres" do
         pg.strand.update(label: "wait")
         visit "#{project.path}#{pg.path}/upgrade"
         expect(page).to have_button "Start Upgrade"
+      end
+
+      it "shows the maintenance window in the upgrade steps" do
+        pg.strand.update(label: "wait")
+        pg.update(maintenance_window_start_at: 22, maintenance_window_days_bitmask: PostgresResource.maintenance_window_days_mask(["mon", "thu"]))
+        visit "#{project.path}#{pg.path}/upgrade"
+
+        expect(page).to have_content "Wait for the maintenance window"
+        expect(page).to have_content "Mon, Thu, 22:00 - 00:00 (UTC)"
+        expect(page).to have_no_content "Upgrade the read replicas"
+      end
+
+      it "adds a read replica step when the database has read replicas" do
+        pg.strand.update(label: "wait")
+        Prog::Postgres::PostgresResourceNexus.assemble(
+          project_id: project.id,
+          location_id: Location::HETZNER_FSN1_ID,
+          name: "pg-read-replica",
+          target_vm_size: "standard-2",
+          target_storage_size_gib: 128,
+          parent_id: pg.id,
+        )
+        visit "#{project.path}#{pg.path}/upgrade"
+
+        expect(page).to have_content "No maintenance window"
+        expect(page).to have_content "Upgrade the read replicas"
       end
 
       it "starts the upgrade when user clicks on start upgrade button" do

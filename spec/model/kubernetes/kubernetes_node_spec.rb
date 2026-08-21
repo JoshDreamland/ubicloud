@@ -72,6 +72,117 @@ RSpec.describe KubernetesNode do
     end
   end
 
+  describe "#export_metrics" do
+    let(:tsdb_client) { instance_double(VictoriaMetrics::Client) }
+
+    it "observes the metrics backlog at export counts where count % 12 == 1" do
+      session[:export_count] = 12
+      allow(kn).to receive(:scrape_endpoints).and_return([])
+      expect(kn).to receive(:observe_metrics_backlog).with(session)
+
+      kn.export_metrics(session:, tsdb_client:)
+    end
+
+    it "does not observe the metrics backlog when count % 12 != 1" do
+      session[:export_count] = 2
+      allow(kn).to receive(:scrape_endpoints).and_return([])
+      expect(kn).not_to receive(:observe_metrics_backlog)
+
+      kn.export_metrics(session:, tsdb_client:)
+    end
+
+    it "increments export_count in session" do
+      allow(kn).to receive_messages(observe_metrics_backlog: nil, scrape_endpoints: [])
+
+      kn.export_metrics(session:, tsdb_client:)
+      expect(session[:export_count]).to eq 1
+
+      kn.export_metrics(session:, tsdb_client:)
+      expect(session[:export_count]).to eq 2
+    end
+  end
+
+  describe "#observe_metrics_backlog" do
+    let(:find_command) { "echo $(date +%s) $(stat -c %Y /home/ubi/kubernetes/metrics/config.json) $(test -d /home/ubi/kubernetes/metrics/done && stat -c %Y /home/ubi/kubernetes/metrics/done || echo 0) $(test -d /home/ubi/kubernetes/metrics/done && ls /home/ubi/kubernetes/metrics/done | wc -l || echo 0)" }
+    let(:now) { Time.now.utc.to_i }
+    let(:reading) { ->(count, touched_secs_ago: 0, configured_secs_ago: 60 * 60) { "#{now} #{now - configured_secs_ago} #{now - touched_secs_ago} #{count}\n" } }
+
+    it "does nothing when the backlog is within limits" do
+      expect(ssh_session).to receive(:_exec!).with(find_command).and_return(reading.call(10))
+
+      kn.observe_metrics_backlog(session)
+
+      expect(Page.from_tag_parts("KubernetesMetricsBacklogHigh", kn.id)).to be_nil
+    end
+
+    it "creates a page when the backlog exceeds the threshold" do
+      expect(ssh_session).to receive(:_exec!).with(find_command).and_return(reading.call(30))
+
+      kn.observe_metrics_backlog(session)
+
+      page = Page.from_tag_parts("KubernetesMetricsBacklogHigh", kn.id)
+      expect(page.summary).to eq "#{kn.ubid} metrics backlog high"
+      expect(page.severity).to eq "warning"
+      expect(page.details["metrics_backlog"]).to eq 30
+      expect(page.details["related_resources"]).to eq [kn.ubid]
+      expect(DB[:page_root_resource].where(page_id: page.id).select_map(:root_resource_id)).to eq [kn.kubernetes_cluster_id]
+    end
+
+    it "resolves the page when the backlog is back within limits" do
+      Prog::PageNexus.assemble("#{kn.ubid} metrics backlog high", ["KubernetesMetricsBacklogHigh", kn.id], kn.ubid, severity: "warning", extra_data: {metrics_backlog: 30})
+      page = Page.from_tag_parts("KubernetesMetricsBacklogHigh", kn.id)
+      expect(ssh_session).to receive(:_exec!).with(find_command).and_return(reading.call(10))
+
+      kn.observe_metrics_backlog(session)
+
+      expect(page.semaphores_dataset.map(:name)).to eq ["resolve"]
+    end
+
+    it "keeps the page when the backlog is still above the resolve threshold" do
+      Prog::PageNexus.assemble("#{kn.ubid} metrics backlog high", ["KubernetesMetricsBacklogHigh", kn.id], kn.ubid, severity: "warning", extra_data: {metrics_backlog: 30})
+      page = Page.from_tag_parts("KubernetesMetricsBacklogHigh", kn.id)
+      expect(ssh_session).to receive(:_exec!).with(find_command).and_return(reading.call(18))
+
+      kn.observe_metrics_backlog(session)
+
+      expect(page.semaphores_dataset.all).to eq []
+    end
+
+    it "pages when the metrics directory is missing" do
+      expect(ssh_session).to receive(:_exec!).with(find_command).and_return("#{now} #{now - 60 * 60} 0 0\n")
+
+      kn.observe_metrics_backlog(session)
+
+      page = Page.from_tag_parts("KubernetesMetricsBacklogHigh", kn.id)
+      expect(page.summary).to eq "#{kn.ubid} is not collecting metrics"
+      expect(page.severity).to eq "warning"
+    end
+
+    it "pages when the directory has not been written to or drained recently" do
+      expect(ssh_session).to receive(:_exec!).with(find_command).and_return(reading.call(0, touched_secs_ago: 20 * 60))
+
+      kn.observe_metrics_backlog(session)
+
+      expect(Page.from_tag_parts("KubernetesMetricsBacklogHigh", kn.id).summary).to eq "#{kn.ubid} is not collecting metrics"
+    end
+
+    it "does not page a target whose metrics were only just configured" do
+      expect(ssh_session).to receive(:_exec!).with(find_command).and_return("#{now} #{now - 30} 0 0\n")
+
+      kn.observe_metrics_backlog(session)
+
+      expect(Page.from_tag_parts("KubernetesMetricsBacklogHigh", kn.id)).to be_nil
+    end
+
+    it "does nothing when the exporter has just drained the directory" do
+      expect(ssh_session).to receive(:_exec!).with(find_command).and_return(reading.call(0))
+
+      kn.observe_metrics_backlog(session)
+
+      expect(Page.from_tag_parts("KubernetesMetricsBacklogHigh", kn.id)).to be_nil
+    end
+  end
+
   describe "#check_pulse" do
     let(:pulse) {
       {

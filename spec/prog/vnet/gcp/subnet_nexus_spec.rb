@@ -673,6 +673,46 @@ RSpec.describe Prog::Vnet::Gcp::SubnetNexus do
 
       expect(Semaphore.where(strand_id: nic.id, name: "destroy").any?).to be true
       expect(Semaphore.where(strand_id: lb.id, name: "destroy").any?).to be true
+
+      frame = nx.strand.stack.first
+      expect(frame["deadline_target"]).to eq("destroy")
+      expect(Time.new(frame["deadline_at"])).to be_within(10).of(Time.now + 5 * 60)
+    end
+
+    it "registers a longer deadline when the subnet has a dedicated VPC" do
+      gcp_vpc.update(dedicated_for_subnet_id: ps.id)
+      vm = create_vm(project_id: project.id, location_id: location.id)
+      Strand.create_with_id(vm, prog: "Vm::Nexus", label: "wait")
+      nic = Nic.create(private_subnet_id: ps.id, private_ipv6: "fd10:9b0b:6b4b:8fbb:abc::",
+        private_ipv4: "10.0.0.5", mac: "00:00:00:00:00:00",
+        encryption_key: "0x736f6d655f656e6372797074696f6e5f6b6579",
+        name: "default-nic", vm_id: vm.id, state: "active")
+      Strand.create_with_id(nic, prog: "Vnet::NicNexus", label: "wait")
+
+      expect(nx).to receive(:rand).with(5..10).and_return(7)
+      expect { nx.destroy }.to nap(7)
+
+      frame = nx.strand.stack.first
+      expect(frame["deadline_target"]).to eq("destroy")
+      expect(Time.new(frame["deadline_at"])).to be_within(10).of(Time.now + 15 * 60)
+    end
+
+    it "registers the short deadline when the subnet has no VPC linked" do
+      DB[:private_subnet_gcp_vpc].where(private_subnet_id: ps.id).delete
+      vm = create_vm(project_id: project.id, location_id: location.id)
+      Strand.create_with_id(vm, prog: "Vm::Nexus", label: "wait")
+      nic = Nic.create(private_subnet_id: ps.id, private_ipv6: "fd10:9b0b:6b4b:8fbb:abc::",
+        private_ipv4: "10.0.0.5", mac: "00:00:00:00:00:00",
+        encryption_key: "0x736f6d655f656e6372797074696f6e5f6b6579",
+        name: "default-nic", vm_id: vm.id, state: "active")
+      Strand.create_with_id(nic, prog: "Vnet::NicNexus", label: "wait")
+
+      expect(nx).to receive(:rand).with(5..10).and_return(7)
+      expect { nx.destroy }.to nap(7)
+
+      frame = nx.strand.stack.first
+      expect(frame["deadline_target"]).to eq("destroy")
+      expect(Time.new(frame["deadline_at"])).to be_within(10).of(Time.now + 5 * 60)
     end
 
     it "handles policy not found during rule cleanup" do
@@ -772,6 +812,12 @@ RSpec.describe Prog::Vnet::Gcp::SubnetNexus do
       expect(Semaphore.where(strand_id: gcp_vpc.id, name: "destroy").count).to eq(1)
     end
 
+    it "does not add another destroy semaphore when one is already pending (last subnet out)" do
+      gcp_vpc.incr_destroy
+      expect { nx.finish_destroy }.to exit({"msg" => "subnet destroyed"})
+      expect(Semaphore.where(strand_id: gcp_vpc.id, name: "destroy").count).to eq(1)
+    end
+
     it "loads the gcp_vpc with a FOR NO KEY UPDATE lock so concurrent teardowns serialize" do
       captured = nil
       allow(nx.private_subnet).to receive(:gcp_vpc).and_wrap_original do |original, &block|
@@ -825,6 +871,14 @@ RSpec.describe Prog::Vnet::Gcp::SubnetNexus do
         expect(DB[:private_subnet_gcp_vpc].where(private_subnet_id: ps.id).count).to eq(0)
         expect(ps.exists?).to be true
         expect(gcp_vpc.exists?).to be true
+      end
+
+      it "does not stack another destroy semaphore on re-entry while one is pending" do
+        ps
+        expect { nx.finish_destroy }.to nap(5)
+        expect { nx.finish_destroy }.to nap(5)
+
+        expect(Semaphore.where(strand_id: gcp_vpc.id, name: "destroy").count).to eq(1)
       end
 
       it "still finds the dedicated VPC via dedicated_for_subnet_id when the join row is already gone" do

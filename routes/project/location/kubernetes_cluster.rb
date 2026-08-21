@@ -47,9 +47,15 @@ class Clover
         end
       end
 
+      r.get "metrics", r.accepts_json? do
+        authorize("KubernetesCluster:view", kc)
+
+        metrics_response(Metrics::KUBERNETES_METRICS, kc.ubid, VictoriaMetricsResource.client_for_project(Config.kubernetes_service_project_id))
+      end
+
       r.rename kc, perm: "KubernetesCluster:edit", serializer: Serializers::KubernetesCluster, template_prefix: "kubernetes-cluster"
 
-      r.show_object(kc, actions: %w[overview nodepools networking settings].freeze, perm: "KubernetesCluster:view", template: "kubernetes-cluster/show")
+      r.show_object(kc, actions: %w[overview nodepools charts networking settings].freeze, perm: "KubernetesCluster:view", template: "kubernetes-cluster/show")
 
       r.post web?, "connect-postgres", :ubid_uuid, :ubid_uuid do |pg_id, fw_id|
         authorize("KubernetesCluster:view", kc)

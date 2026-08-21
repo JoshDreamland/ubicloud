@@ -3,7 +3,9 @@
 class Prog::Vm::Metal::MoveVm < Prog::Base
   subject_is :vm
 
-  frame_reader :remote_storage_server_id
+  semaphore :cancel_move
+
+  frame_reader :remote_storage_server_id, :old_vm_id, :unset_prevent_destroy
 
   def self.assemble(vm, vm_host, parent_id: nil)
     fail "Vm is not ready to move" unless vm.strand.label == "stopped_by_admin" && vm.prepare_to_move_set?
@@ -20,6 +22,7 @@ class Prog::Vm::Metal::MoveVm < Prog::Base
 
       old_name = vm.name
       vm.update(name: "moving-with-#{remote_storage_server.ubid}")
+      unset_prevent_destroy = !vm.prevent_destroy_set?
 
       new_vm = Prog::Vm::Nexus.assemble(
         vm.public_key,
@@ -39,12 +42,18 @@ class Prog::Vm::Metal::MoveVm < Prog::Base
       if vm.sshable
         Sshable.create_with_id(new_vm, unix_user: vm.sshable.unix_user, host: "temp_#{vm.id}", raw_private_key_1: vm.sshable.raw_private_key_1)
       end
+      Vm.incr_prevent_destroy([vm.id, new_vm.id])
 
       Strand.create(
         parent_id:,
         prog: "Vm::Metal::MoveVm",
         label: "start",
-        stack: [{"subject_id" => new_vm.id, "remote_storage_server_id" => remote_storage_server.id}],
+        stack: [{
+          "subject_id" => new_vm.id,
+          "remote_storage_server_id" => remote_storage_server.id,
+          "old_vm_id" => vm.id,
+          "unset_prevent_destroy" => unset_prevent_destroy,
+        }],
       )
     end
   end
@@ -58,11 +67,13 @@ class Prog::Vm::Metal::MoveVm < Prog::Base
   end
 
   label def start
-    register_deadline("wait", 60 * 60)
+    register_deadline(nil, 60 * 60)
     hop_wait
   end
 
   label def wait
+    when_cancel_move_set? { hop_destroy }
+
     nap 30 unless vm.strand.label == "wait"
     nap 30 if vm.vm_storage_volumes.first.remote_storage_server_id
     hop_destroy
@@ -70,6 +81,10 @@ class Prog::Vm::Metal::MoveVm < Prog::Base
 
   label def destroy
     RemoteStorageServer.incr_destroy(remote_storage_server_id)
+    ids = [@subject_id]
+    ids << old_vm_id if unset_prevent_destroy
+    Semaphore.where(strand_id: ids, name: "prevent_destroy").delete
+    when_cancel_move_set? { Vm.incr_destroy(@subject_id) }
     pop "vm moved"
   end
 end

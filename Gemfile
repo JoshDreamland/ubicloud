@@ -57,7 +57,7 @@ gem "rack-unreloader", ">= 1.8"
 gem "rake"
 gem "refrigerator", ">= 1"
 gem "roda", ">= 3.105"
-gem "rodauth", github: "jeremyevans/rodauth", ref: "90162469714152312a1f0e606aca8157a801ae82"
+gem "rodauth", ">= 2.46"
 gem "rodauth-omniauth", ">= 0.6.2"
 gem "rodish", ">= 2.0.1"
 gem "rotp"
@@ -73,6 +73,10 @@ gem "webauthn"
 
 group :aws_kms do
   gem "aws-sdk-kms"
+end
+
+group :gcp_kms do
+  gem "google-apis-cloudkms_v1"
 end
 
 group :aws_rds_iam do

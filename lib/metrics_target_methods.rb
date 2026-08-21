@@ -3,6 +3,7 @@
 module MetricsTargetMethods
   MAX_SCRAPE_FETCH_COUNT = 4
   FILENAME_FORMAT = "%Y-%m-%dT%H-%M-%S-%N"
+  METRICS_BACKLOG_THRESHOLD_SECONDS = 300
 
   def metrics_config
     {
@@ -47,6 +48,30 @@ module MetricsTargetMethods
 
     mark_pending_scrapes_as_done(session, scrape_results[-1].time)
     scrape_results.count
+  end
+
+  def observe_metrics_backlog(session)
+    tag = metrics_backlog_page_tag
+    metrics_done_dir = "#{metrics_dir}/done"
+    config_path = "#{metrics_dir}/config.json"
+    fields = session[:ssh_session].exec!("echo $(date +%s) $(stat -c %Y :config_path) $(test -d :metrics_done_dir && stat -c %Y :metrics_done_dir || echo 0) $(test -d :metrics_done_dir && ls :metrics_done_dir | wc -l || echo 0)", config_path:, metrics_done_dir:).split
+    now, configured_at, collected_at, metrics_backlog = fields.map { Integer(it, 10) }
+
+    if now - [configured_at, collected_at].max > METRICS_BACKLOG_THRESHOLD_SECONDS
+      Prog::PageNexus.assemble("#{ubid} is not collecting metrics",
+        [tag, id], ubid, severity: "warning")
+      return
+    end
+
+    metrics_interval = metrics_config[:interval].to_i
+
+    if metrics_backlog * metrics_interval > METRICS_BACKLOG_THRESHOLD_SECONDS
+      Prog::PageNexus.assemble("#{ubid} metrics backlog high",
+        [tag, id], ubid,
+        severity: "warning", extra_data: {metrics_backlog:})
+    elsif metrics_backlog * metrics_interval < METRICS_BACKLOG_THRESHOLD_SECONDS * 0.8
+      Page.from_tag_parts(tag, id)&.incr_resolve
+    end
   end
 
   def scrape_endpoints(session)
