@@ -861,8 +861,6 @@ class PostgresServer < Sequel::Model
     Clog.emit("Failed to observe replica lag", Util.exception_to_hash(ex, into: {postgres_server_id: id}))
   end
 
-<<<<<<< HEAD
-=======
   private def resolve_replica_lag(session)
     session[:replica_lag_breach_count] = 0
     session.delete(:replica_lag_previous_replay_lsn)
@@ -871,7 +869,6 @@ class PostgresServer < Sequel::Model
     Page.from_tag_parts("PGReplicaLagHigh", id)&.incr_resolve
   end
 
->>>>>>> cd21914ab5e48039cd2bdc376b65ab552825ab0b
   REPLICA_LAG_SOFT_THRESHOLD_BYTES = 1024 * 1024 * 1024
   REPLICA_LAG_HARD_THRESHOLD_BYTES = 10 * 1024 * 1024 * 1024
   REPLICA_LAG_THRESHOLD_SECONDS = 15 * 60

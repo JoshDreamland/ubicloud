@@ -428,16 +428,7 @@ RSpec.describe KubernetesCluster do
     it "creates a strand for each control plane node to update the contents of rhizome folder" do
       node = Prog::Kubernetes::KubernetesNodeNexus.assemble(Config.kubernetes_service_project_id, sshable_unix_user: "ubi", name: "test-node", location_id: Location::HETZNER_FSN1_ID, size: "standard-2", storage_volumes: [{encrypted: true, size_gib: 40}], boot_image: "kubernetes-#{kc.version.tr(".", "_")}", enable_ip4: true, kubernetes_cluster_id: kc.id).subject
 
-<<<<<<< HEAD
-      result = kc.install_rhizome
-      expect(result.count).to eq(1)
-      strand = result.first
-
-      expect(strand.prog).to eq "InstallRhizome"
-      expect(strand.stack.first["subject_id"]).to eq node.vm.sshable.id
-=======
       expect(kc.install_rhizome.map { [it.prog, it.stack.first["subject_id"]] }).to eq [["InstallRhizome", node.vm.sshable.id]]
->>>>>>> cd21914ab5e48039cd2bdc376b65ab552825ab0b
     end
   end
 

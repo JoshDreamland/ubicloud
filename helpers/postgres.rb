@@ -108,15 +108,12 @@ class Clover
     end
   end
 
-<<<<<<< HEAD
   # Postgres Locations API
   PostgresLocation = Struct.new(:location, :available_postgres_versions, :available_vm_families)
   def vm_families_for_project(project)
     PostgresResource.vm_families_for_project(@project)
   end
 
-=======
->>>>>>> cd21914ab5e48039cd2bdc376b65ab552825ab0b
   # Middle step of the resize and upgrade timelines. It names the maintenance
   # window if there is one, and offers to set one if there is not. subject is
   # what waits for the window, such as "Failover" or "The upgrade".
@@ -129,10 +126,7 @@ class Clover
     end
   end
 
-<<<<<<< HEAD
   # Capabilities API
-=======
->>>>>>> cd21914ab5e48039cd2bdc376b65ab552825ab0b
   def postgres_option_metadata(option_tree)
     valid = OptionTreeGenerator.collect_valid_values(option_tree)
     {
