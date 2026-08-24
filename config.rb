@@ -214,7 +214,6 @@ module Config
   optional :postgres_lantern_notification_email, string
   optional :postgres_notification_email, string
   override :aws_postgres_iam_access, false, bool
-  override :gcp_postgres_iam_access, false, bool
   override :aws_vm_attach_ssm_permissions, false, bool
   optional :aws_s3_custom_builds_bucket_names, array(string)
   override :postgres_otel_otlp_export_enabled, false, bool

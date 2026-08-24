@@ -27,9 +27,5 @@ class PostgresServer < Sequel::Model
     def metal_detach_s3_policy(detached_timeline)
       # nothing
     end
-
-    def metal_detach_s3_policy(detached_timeline)
-      # nothing
-    end
   end
 end
