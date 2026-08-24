@@ -313,8 +313,11 @@ class Project < Sequel::Model
     :postgres_walg_optimized_config_disabled,
     :postgres_walg_direct_io_disabled,
     :cache_proxy_download_url,
+<<<<<<< HEAD
     :postgres_aws_ssh_ipv6,
     :chc_postgres_deactivate_lockout,
+=======
+>>>>>>> cd21914ab5e48039cd2bdc376b65ab552825ab0b
     :ipsec_esn,
   )
 end

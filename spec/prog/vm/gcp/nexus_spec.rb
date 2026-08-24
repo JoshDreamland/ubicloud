@@ -347,8 +347,11 @@ RSpec.describe Prog::Vm::Gcp::Nexus do
 
       op = instance_double(Gapic::GenericLRO::Operation, name: "op-lssd-1")
       expect(compute_client).to receive(:insert) do |args|
+<<<<<<< HEAD
         # non-boot volumes select the lssd machine type; GCE attaches the
         # bundled local SSDs itself rather than us declaring SCRATCH disks.
+=======
+>>>>>>> cd21914ab5e48039cd2bdc376b65ab552825ab0b
         expect(args[:instance_resource].machine_type).to end_with("machineTypes/c4a-standard-8-lssd")
         disks = args[:instance_resource].disks
         expect(disks.length).to eq(1)

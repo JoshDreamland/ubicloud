@@ -61,6 +61,7 @@ module Option
     "#{family}.#{suffix}"
   end
 
+<<<<<<< HEAD
   # Neither half of the machine type name is derivable from our family name,
   # so both come from the family config. lssd: false drops the suffix for
   # boot-disk-only VMs, which cannot launch on an lssd machine type.
@@ -70,6 +71,10 @@ module Option
   def self.gcp_instance_type_name(family, vcpu_count, lssd: true)
     config = GCP_FAMILY_VM_CONFIG.fetch(family)
     "#{config[:gce_prefix]}-#{vcpu_count}#{"-#{config[:gce_suffix]}" if lssd}"
+=======
+  def self.gcp_instance_type_name(family, vcpu_count, lssd: true)
+    "#{family}-#{vcpu_count}#{"-lssd" if lssd}"
+>>>>>>> cd21914ab5e48039cd2bdc376b65ab552825ab0b
   end
 
   def self.vring_workers(vcpus)
