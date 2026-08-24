@@ -1999,6 +1999,12 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       expect(postgres_server.exists?).to be false
     end
 
+    it "detaches the blob storage policy for the current timeline before destroying the server" do
+      expect(server).to receive(:detach_s3_policy).with(server.timeline)
+
+      expect { nx.destroy_vm_and_pg }.to exit({"msg" => "postgres server is deleted"})
+    end
+
     it "increments configure on the representative server when it is a different server" do
       postgres_server.update(is_representative: false)
       representative_server = create_postgres_server(resource: postgres_resource, timeline: postgres_timeline, is_representative: true)

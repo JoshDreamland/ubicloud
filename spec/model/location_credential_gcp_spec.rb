@@ -152,11 +152,11 @@ RSpec.describe LocationCredentialGcp do
 
   it "memoizes a single service account credentials object across clients" do
     crm = instance_double(Google::Apis::CloudresourcemanagerV3::CloudResourceManagerService)
-    allow(Google::Apis::CloudresourcemanagerV3::CloudResourceManagerService).to receive(:new).and_return(crm)
-    allow(crm).to receive(:authorization=).with(sa_creds)
+    expect(Google::Apis::CloudresourcemanagerV3::CloudResourceManagerService).to receive(:new).and_return(crm)
+    expect(crm).to receive(:authorization=).with(sa_creds)
     iam = instance_double(Google::Apis::IamV1::IamService)
-    allow(Google::Apis::IamV1::IamService).to receive(:new).and_return(iam)
-    allow(iam).to receive(:authorization=).with(sa_creds)
+    expect(Google::Apis::IamV1::IamService).to receive(:new).and_return(iam)
+    expect(iam).to receive(:authorization=).with(sa_creds)
     location_credential_gcp.crm_client
     location_credential_gcp.iam_client
     expect(Google::Auth::ServiceAccountCredentials).to have_received(:make_creds).once
@@ -175,9 +175,6 @@ RSpec.describe LocationCredentialGcp do
 
     before do
       allow(Google::Auth).to receive(:get_application_default).with("https://www.googleapis.com/auth/cloud-platform").and_return(adc)
-      # source_credentials (not base_credentials): base_credentials makes the gem
-      # re-scope the ADC to IAM_SCOPE, which yields no token under GKE Workload
-      # Identity and fails generateAccessToken with 401 CREDENTIALS_MISSING.
       allow(Google::Auth::ImpersonatedServiceAccountCredentials).to receive(:make_creds).with(
         source_credentials: adc,
         impersonation_url: "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/test@test-gcp-project.iam.gserviceaccount.com:generateAccessToken",
@@ -196,10 +193,10 @@ RSpec.describe LocationCredentialGcp do
     it "memoizes a single impersonated credentials object across clients" do
       client = instance_double(Google::Cloud::Compute::V1::Instances::Rest::Client)
       config = double
-      allow(config).to receive(:credentials=).with(impersonated_creds)
-      allow(Google::Cloud::Compute::V1::Instances::Rest::Client).to receive(:new).and_yield(config).and_return(client)
+      expect(config).to receive(:credentials=).with(impersonated_creds)
+      expect(Google::Cloud::Compute::V1::Instances::Rest::Client).to receive(:new).and_yield(config).and_return(client)
       storage = instance_double(Google::Cloud::Storage::Project)
-      allow(Google::Cloud::Storage).to receive(:new).with(project_id: "test-gcp-project", credentials: impersonated_creds).and_return(storage)
+      expect(Google::Cloud::Storage).to receive(:new).with(project_id: "test-gcp-project", credentials: impersonated_creds).and_return(storage)
       expect(location_credential_gcp.compute_client).to be(client)
       expect(location_credential_gcp.storage_client).to be(storage)
       expect(Google::Auth::ImpersonatedServiceAccountCredentials).to have_received(:make_creds).once
