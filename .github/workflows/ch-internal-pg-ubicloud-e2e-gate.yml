@@ -31,7 +31,7 @@ jobs:
     steps:
       - name: Generate GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.WORKFLOW_AUTH_APP_ID }}
           private-key: ${{ secrets.WORKFLOW_AUTH_PRIVATE_KEY }}
@@ -40,7 +40,7 @@ jobs:
 
       - name: Resolve PR + label
         id: resolve
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
@@ -68,7 +68,7 @@ jobs:
 
       - name: Auto-pass non-sync PRs
         if: steps.resolve.outputs.pr_number && steps.resolve.outputs.is_sync_pr == 'false'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
@@ -82,14 +82,14 @@ jobs:
 
       - name: Checkout PR head (for marker scan)
         if: steps.resolve.outputs.is_sync_pr == 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ steps.resolve.outputs.head_sha }}
           fetch-depth: 1
 
       - name: Evaluate gate, dispatch E2E if ready, update sticky comment
         if: steps.resolve.outputs.is_sync_pr == 'true'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
           HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}

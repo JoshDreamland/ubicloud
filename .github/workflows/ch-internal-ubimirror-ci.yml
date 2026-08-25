@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Check out code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set up Clover
         uses: ./.github/actions/setup-clover
         with:
@@ -26,7 +26,7 @@ jobs:
       - name: Run erb-formatter
         run: bundle exec rake linter:erb_formatter
       - name: Cache rubocop
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: /home/runner/.cache/rubocop_cache
           key: ${{ matrix.runs-on }}-rubocop-cache-${{ hashFiles('Gemfile.lock', '.rubocop.yml') }}
