@@ -470,6 +470,19 @@ module Option
   # WAL partition sizes when carved from instance NVMe (nvme wal_drive_type)
   POSTGRES_WAL_DRIVE_SIZE_OPTIONS = [32, 64, 128, 256, 512, 1024].freeze
 
+  # Per-volume provider limits. Ratio limits further constrain IOPS by volume
+  # size, and throughput by IOPS. io2 derives throughput from IOPS.
+  # gp3: 80,000 IOPS and 2,000 MiB/s, at 500 IOPS/GiB and 0.25 MiB/s per IOPS.
+  # io2: 256,000 IOPS at 1,000 IOPS/GiB.
+  # hyperdisk-balanced: 160,000 IOPS at 500 IOPS/GiB, throughput bounded on both
+  # sides by IOPS, MAX(140, P/256) to MIN(2400, P/4).
+  NetworkVolumeLimits = Data.define(:iops, :throughput_mibps, :max_iops_per_gib, :max_mibps_per_iops, :min_mibps_per_iops, :default_iops, :default_throughput_mibps)
+  NETWORK_VOLUME_LIMITS = {
+    PostgresResource::NetworkVolumeType::GP3 => NetworkVolumeLimits.new(3000..80_000, 125..2000, 500, 0.25, nil, 3000, 125),
+    PostgresResource::NetworkVolumeType::IO2 => NetworkVolumeLimits.new(100..256_000, nil, 1000, nil, nil, 3000, nil),
+    PostgresResource::NetworkVolumeType::HYPERDISK_BALANCED => NetworkVolumeLimits.new(3000..160_000, 140..2400, 500, 0.25, 1.0 / 256, 3000, 140),
+  }.freeze
+
   POSTGRES_LOG_STREAM_OPTIONS = %w[postgres pgbouncer upgrade].freeze
   POSTGRES_LOG_SERVER_ROLE_OPTIONS = %w[primary standby].freeze
   POSTGRES_LOG_LEVEL_OPTIONS = %w[DEBUG INFO WARN ERROR FATAL].freeze

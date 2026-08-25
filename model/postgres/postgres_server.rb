@@ -302,9 +302,14 @@ class PostgresServer < Sequel::Model
     resource.read_replica?
   end
 
-  def storage_size_gib
+  # Data volumes exclude the boot and WAL volumes and follow attachment order.
+  def data_volumes
     wal = wal_volume
-    vm.vm_storage_volumes.reject { it.boot || it == wal }.sum(&:size_gib)
+    vm.vm_storage_volumes.reject { it.boot || it == wal }.sort_by(&:disk_index)
+  end
+
+  def storage_size_gib
+    data_volumes.sum(&:size_gib)
   end
 
   def fallback_active?
@@ -806,10 +811,12 @@ class PostgresServer < Sequel::Model
     Clog.emit("Failed to observe wal disk usage", Util.exception_to_hash(ex, into: {postgres_server_id: id}))
   end
 
-  # network_cache storage carries pg_wal on a dedicated network volume, created
-  # by the provider VM nexus as the third volume after boot and data
+  # A network WAL volume follows all data volumes. An NVMe WAL drive uses
+  # instance storage and has no volume row.
   def wal_volume
-    vm.vm_storage_volumes.find { it.disk_index == 2 && it.provider_volume_id }
+    return if resource.wal_drive_type == PostgresResource::WalDriveType::NVME
+
+    vm.vm_storage_volumes.select { it.volume_type }.max_by(&:disk_index)
   end
 
   def observe_root_disk_usage(session)

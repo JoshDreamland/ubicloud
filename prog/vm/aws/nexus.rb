@@ -2,7 +2,7 @@
 
 class Prog::Vm::Aws::Nexus < Prog::Base
   subject_is :vm, :aws_instance
-  frame_reader :alternative_families, :private_subnet_id, :storage_volumes
+  frame_reader :alternative_families, :private_subnet_id
   frame_accessor :unsupported_azs, :exclude_availability_zones, :use_separate_management_nic, :network_volume_az
 
   def before_destroy
@@ -350,19 +350,23 @@ class Prog::Vm::Aws::Nexus < Prog::Base
   end
 
   label def create_network_volumes
-    network_volume_records.each do |record, spec|
+    network_volume_records.each do |record|
       next if record.provider_volume_id
 
+      # Use each type's baseline for unset configuration. io2 derives throughput from IOPS.
+      limits = Option::NETWORK_VOLUME_LIMITS.fetch(record.volume_type)
       params = {
         availability_zone: network_volume_az,
-        size: spec["size_gib"],
+        size: record.size_gib,
         encrypted: true,
         client_token: record.ubid.to_s,
         tag_specifications: Util.aws_tag_specifications("volume", vm.name),
-        volume_type: spec["network_volume_type"],
-        iops: 3000,
+        volume_type: record.volume_type,
+        iops: record.provisioned_iops || limits.default_iops,
       }
-      params[:throughput] = 125 if spec["network_volume_type"] == "gp3"
+      if limits.throughput_mibps
+        params[:throughput] = record.provisioned_throughput_mibps || limits.default_throughput_mibps
+      end
 
       record.update(provider_volume_id: client.create_volume(params).volume_id)
     end
@@ -372,7 +376,7 @@ class Prog::Vm::Aws::Nexus < Prog::Base
 
   label def attach_network_volumes
     in_use = 0
-    network_volume_records.each_with_index do |(record, _), index|
+    network_volume_records.each_with_index do |record, index|
       volume = client.describe_volumes(volume_ids: [record.provider_volume_id]).volumes.first
       case volume.state
       when "in-use"
@@ -476,12 +480,12 @@ class Prog::Vm::Aws::Nexus < Prog::Base
       pop "vm destroyed"
     end
 
-    hop_delete_network_volumes if network_volume_records.any? { it[0].provider_volume_id }
+    hop_delete_network_volumes if network_volume_records.any?(&:provider_volume_id)
     hop_cleanup_roles
   end
 
   label def delete_network_volumes
-    network_volume_records.each do |record, _|
+    network_volume_records.each do |record|
       next unless record.provider_volume_id
 
       begin
@@ -553,12 +557,9 @@ class Prog::Vm::Aws::Nexus < Prog::Base
     @user_nic ||= vm.user_nic
   end
 
-  # network_volume_type marks a volume spec for creation as a persistent EBS
-  # volume of that type (gp3, io2)
+  # Provider-managed volumes in attachment order.
   def network_volume_records
-    @network_volume_records ||= storage_volumes.each_with_index.filter_map do |spec, disk_index|
-      [vm.vm_storage_volumes_dataset.first(disk_index:), spec] if spec["network_volume_type"]
-    end
+    @network_volume_records ||= vm.vm_storage_volumes_dataset.exclude(volume_type: nil).order(:disk_index).all
   end
 
   def client

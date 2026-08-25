@@ -162,6 +162,7 @@ class Prog::Vm::Nexus < Prog::Base
               boot: volume[:boot],
               use_bdev_ubi: false,
               disk_index:,
+              **network_volume_attrs(volume),
             )
           end
         end
@@ -186,6 +187,7 @@ class Prog::Vm::Nexus < Prog::Base
                 boot:,
                 use_bdev_ubi: false,
                 disk_index:,
+                **network_volume_attrs(volume),
               )
               disk_index += 1
             end
@@ -225,6 +227,17 @@ class Prog::Vm::Nexus < Prog::Base
         }],
       ) { it.id = vm.id }
     end
+  end
+
+  # Persist provider-managed volume settings on the volume row.
+  def self.network_volume_attrs(volume)
+    return {} unless (volume_type = volume[:network_volume_type])
+
+    {
+      volume_type:,
+      provisioned_iops: volume[:provisioned_iops],
+      provisioned_throughput_mibps: volume[:provisioned_throughput_mibps],
+    }
   end
 
   def self.assemble_with_sshable(*, sshable_unix_user: "rhizome", **kwargs)

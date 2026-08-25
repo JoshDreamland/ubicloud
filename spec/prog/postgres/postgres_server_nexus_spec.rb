@@ -406,7 +406,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       server.vm.location.update(provider: "aws")
       postgres_resource.update(storage_type: "network_cache", network_volume_type: "gp3", wal_drive_type: "gp3")
       server.vm.vm_storage_volumes_dataset.exclude(:boot).update(provider_volume_id: "vol-0abc123")
-      VmStorageVolume.create(vm_id: server.vm.id, size_gib: 32, boot: false, disk_index: 2, provider_volume_id: "vol-0wal456")
+      VmStorageVolume.create(vm_id: server.vm.id, size_gib: 32, boot: false, disk_index: 2, volume_type: "gp3", provider_volume_id: "vol-0wal456")
     end
 
     it "runs setup-bcache with the data and wal device paths when not started" do
@@ -454,9 +454,12 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
   end
 
   describe "#resize_wal_volume" do
-    let(:wal_volume) { VmStorageVolume.create(vm_id: server.vm.id, size_gib: 32, boot: false, disk_index: 2, provider_volume_id: "vol-0wal456") }
+    let(:wal_volume) { VmStorageVolume.create(vm_id: server.vm.id, size_gib: 32, boot: false, disk_index: 2, volume_type: "gp3", provider_volume_id: "vol-0wal456") }
 
-    before { wal_volume }
+    before do
+      postgres_resource.update(storage_type: "network_cache", network_volume_type: "gp3", wal_drive_type: "gp3")
+      wal_volume
+    end
 
     it "doubles the volume and waits for the resize" do
       expect(server).to receive(:grow_wal_volume).with(64).and_return(true)
@@ -476,7 +479,8 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
 
     before do
       server.vm.location.update(provider: "aws")
-      VmStorageVolume.create(vm_id: server.vm.id, size_gib: 64, boot: false, disk_index: 2, provider_volume_id: "vol-0wal456")
+      postgres_resource.update(storage_type: "network_cache", network_volume_type: "gp3", wal_drive_type: "gp3")
+      VmStorageVolume.create(vm_id: server.vm.id, size_gib: 64, boot: false, disk_index: 2, volume_type: "gp3", provider_volume_id: "vol-0wal456")
     end
 
     it "naps until the device reflects the new size" do

@@ -453,6 +453,21 @@ RSpec.describe Prog::Vm::Gcp::Nexus do
         expect(vm.vm_storage_volumes_dataset.order(:disk_index).select_map(:provider_volume_id)).to eq([nil, "testvm-net-1", "testvm-net-2"])
       end
 
+      it "provisions the requested configuration instead of the hyperdisk baseline" do
+        vm.vm_storage_volumes_dataset.where(disk_index: 1).update(provisioned_iops: 20000, provisioned_throughput_mibps: 800)
+        op = instance_double(Gapic::GenericLRO::Operation, name: "op-net-config")
+        expect(compute_client).to receive(:insert) do |args|
+          data, wal = args[:instance_resource].disks[1..2]
+          expect(data.initialize_params.provisioned_iops).to eq(20000)
+          expect(data.initialize_params.provisioned_throughput).to eq(800)
+          expect(wal.initialize_params.provisioned_iops).to eq(3000)
+          expect(wal.initialize_params.provisioned_throughput).to eq(140)
+          op
+        end
+
+        expect { nx.start }.to hop("wait_create_op")
+      end
+
       it "keeps an already-recorded provider_volume_id on insert retry" do
         vm.vm_storage_volumes_dataset.where(disk_index: 2).update(provider_volume_id: "testvm-net-2")
         op = instance_double(Gapic::GenericLRO::Operation, name: "op-net-retry")

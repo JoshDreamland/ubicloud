@@ -1818,11 +1818,29 @@ RSpec.describe PostgresServer do
     end
   end
 
+  describe "#wal_volume" do
+    it "is nil when WAL lives on the instance store" do
+      resource.update(wal_drive_type: "nvme")
+      VmStorageVolume.create(vm_id: vm.id, size_gib: 256, boot: false, disk_index: 1, volume_type: "gp3", provider_volume_id: "vol-data")
+      expect(postgres_server.wal_volume).to be_nil
+    end
+
+    it "is the last provider-managed volume, so more than one data volume still resolves" do
+      resource.update(wal_drive_type: "gp3")
+      VmStorageVolume.create(vm_id: vm.id, size_gib: 256, boot: false, disk_index: 1, volume_type: "gp3", provider_volume_id: "vol-data-a")
+      VmStorageVolume.create(vm_id: vm.id, size_gib: 256, boot: false, disk_index: 2, volume_type: "gp3", provider_volume_id: "vol-data-b")
+      wal = VmStorageVolume.create(vm_id: vm.id, size_gib: 32, boot: false, disk_index: 3, volume_type: "gp3", provider_volume_id: "vol-wal")
+
+      expect(postgres_server.wal_volume).to eq(wal)
+      expect(postgres_server.storage_size_gib).to eq(512)
+    end
+  end
+
   describe "#observe_wal_disk_usage" do
     let(:session) {
       {ssh_session: Net::SSH::Connection::Session.allocate}
     }
-    let(:wal_volume) { VmStorageVolume.create(vm_id: vm.id, size_gib: 32, boot: false, disk_index: 2, provider_volume_id: "vol-0wal456") }
+    let(:wal_volume) { VmStorageVolume.create(vm_id: vm.id, size_gib: 32, boot: false, disk_index: 2, volume_type: resource.wal_drive_type, provider_volume_id: "vol-0wal456") }
 
     before do
       location.update(provider: "aws")
@@ -1914,7 +1932,8 @@ RSpec.describe PostgresServer do
         LocationCredentialAws.create(access_key: "access-key-id", secret_key: "secret-access-key") { it.id = location.id }
         expect(Aws::EC2::Client).to receive(:new).and_return(ec2_client)
         ec2_client.stub_responses(:describe_volumes, volumes: [{size: 32}])
-        VmStorageVolume.create(vm_id: vm.id, size_gib: 32, boot: false, disk_index: 2, provider_volume_id: "vol-0wal456")
+        resource.update(wal_drive_type: "gp3")
+        VmStorageVolume.create(vm_id: vm.id, size_gib: 32, boot: false, disk_index: 2, volume_type: "gp3", provider_volume_id: "vol-0wal456")
       end
 
       it "modifies the volume to the requested size" do
@@ -1943,7 +1962,8 @@ RSpec.describe PostgresServer do
 
       before do
         # create vm before renaming location, billing rates only exist for the original name
-        VmStorageVolume.create(vm_id: vm.id, size_gib: 32, boot: false, disk_index: 2, provider_volume_id: "wal-disk")
+        resource.update(wal_drive_type: "hyperdisk-balanced")
+        VmStorageVolume.create(vm_id: vm.id, size_gib: 32, boot: false, disk_index: 2, volume_type: "hyperdisk-balanced", provider_volume_id: "wal-disk")
         location.update(provider: "gcp", name: "gcp-us-central1")
         LocationCredentialGcp.create_with_id(location,
           project_id: "test-gcp-project",

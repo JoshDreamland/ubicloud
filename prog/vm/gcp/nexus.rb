@@ -4,7 +4,7 @@ class Prog::Vm::Gcp::Nexus < Prog::Base
   include GcpLro
 
   subject_is :vm
-  frame_reader :unsupported_azs, :storage_volumes
+  frame_reader :unsupported_azs
   frame_accessor :retry_zone_delay, :gcp_zone_suffix, :exclude_zones
 
   def before_destroy
@@ -56,24 +56,25 @@ class Prog::Vm::Gcp::Nexus < Prog::Base
             disk_size_gb: vol.size_gib,
           ),
         )
-      elsif (spec = network_volume_specs[vol.disk_index])
+      elsif vol.volume_type
         # Persistent disk created inline with the instance: auto_delete rides
         # instance delete, and GCE attaches an already-existing disk of the
         # same name instead of failing, making insert retries idempotent.
         # disk_name is recorded before insert so wal_volume/device_path
         # resolve from first observation; explicit device_name surfaces the
         # disk at /dev/disk/by-id/google-persistent-disk-N via google_nvme_id
-        # udev. 3000 IOPS / 140 MiB/s is the free hyperdisk-balanced baseline.
+        # udev. Unset configuration uses the 3000 IOPS / 140 MiB/s baseline.
+        limits = Option::NETWORK_VOLUME_LIMITS.fetch(vol.volume_type)
         vol.update(provider_volume_id: "#{vm.name}-#{vol.disk_index}") unless vol.provider_volume_id
         Google::Cloud::Compute::V1::AttachedDisk.new(
           auto_delete: true,
           device_name: "persistent-disk-#{vol.disk_index}",
           initialize_params: Google::Cloud::Compute::V1::AttachedDiskInitializeParams.new(
             disk_name: vol.provider_volume_id,
-            disk_type: "zones/#{gcp_zone}/diskTypes/#{spec["network_volume_type"]}",
+            disk_type: "zones/#{gcp_zone}/diskTypes/#{vol.volume_type}",
             disk_size_gb: vol.size_gib,
-            provisioned_iops: 3000,
-            provisioned_throughput: 140,
+            provisioned_iops: vol.provisioned_iops || limits.default_iops,
+            provisioned_throughput: vol.provisioned_throughput_mibps || limits.default_throughput_mibps,
           ),
         )
       else
@@ -86,7 +87,7 @@ class Prog::Vm::Gcp::Nexus < Prog::Base
     # synthesize the remaining local SSDs (bcache cache devices, matched by
     # instance_store_device_glob) without VmStorageVolume rows, mirroring
     # AWS instance-store NVMe
-    if network_volume_specs.any?
+    if vm.vm_storage_volumes_dataset.exclude(volume_type: nil).any?
       (local_ssd_count - disks.count { it.type == "SCRATCH" }).times { disks << local_ssd_disk }
     end
 
@@ -344,21 +345,6 @@ class Prog::Vm::Gcp::Nexus < Prog::Base
   def gce_machine_type
     # -lssd is needed only when there are non-boot (data) volumes
     @gce_machine_type ||= Option.gcp_instance_type_name(vm.family, vm.vcpus, lssd: !vm.vm_storage_volumes_dataset.where(boot: false).empty?)
-  end
-
-  # network_volume_type marks a volume spec for creation as a persistent disk
-  # of that type (hyperdisk-balanced); keyed by disk_index, replaying the
-  # split arithmetic of Prog::Vm::Nexus.assemble
-  def network_volume_specs
-    @network_volume_specs ||= begin
-      specs = {}
-      disk_index = 0
-      storage_volumes.each do |volume|
-        specs[disk_index] = volume if volume["network_volume_type"]
-        disk_index += (volume["boot"] || volume["network_volume_type"]) ? 1 : (volume["size_gib"]/375r).ceil
-      end
-      specs
-    end
   end
 
   # Local NVMe SSD. GCE 3rd-gen `-lssd` machine types require local SSDs to

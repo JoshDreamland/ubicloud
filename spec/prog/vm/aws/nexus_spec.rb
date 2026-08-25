@@ -1113,6 +1113,23 @@ usermod -L ubuntu
         expect { nx.create_network_volumes }.to hop("attach_network_volumes")
       end
 
+      context "with explicit configuration" do
+        let(:storage_volumes) {
+          [{encrypted: true, size_gib: 30},
+            {encrypted: true, size_gib: 256, network_volume_type: "gp3", provisioned_iops: 16000, provisioned_throughput_mibps: 500},
+            {encrypted: true, size_gib: 32, network_volume_type: "io2", provisioned_iops: 8000}]
+        }
+
+        it "provisions the requested configuration instead of the type baseline" do
+          client.stub_responses(:create_volume, [{volume_id: "vol-fast"}, {volume_id: "vol-wal"}])
+          expect { nx.create_network_volumes }.to hop("attach_network_volumes")
+          data_params, wal_params = client.api_requests.select { it[:operation_name] == :create_volume }.map { it[:params] }
+          expect(data_params).to include(volume_type: "gp3", iops: 16000, throughput: 500)
+          expect(wal_params).to include(volume_type: "io2", iops: 8000)
+          expect(wal_params).not_to include(:throughput)
+        end
+      end
+
       context "with io2" do
         let(:storage_volumes) {
           [{encrypted: true, size_gib: 30},
