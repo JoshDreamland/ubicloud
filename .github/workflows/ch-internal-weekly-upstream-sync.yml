@@ -26,14 +26,14 @@ jobs:
     runs-on: k8s-medium
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: clickhouse
           fetch-depth: 0
 
       - name: Generate Token
         id: generate-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.WORKFLOW_AUTH_APP_ID }}
           private-key: ${{ secrets.WORKFLOW_AUTH_PRIVATE_KEY }}
@@ -167,7 +167,7 @@ jobs:
           echo "File size: $(wc -c < commit-analysis.md) bytes"
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.22'
 

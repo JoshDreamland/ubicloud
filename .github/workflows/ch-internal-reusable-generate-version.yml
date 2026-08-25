@@ -19,7 +19,7 @@ jobs:
       VERSION_TAG: ${{ steps.image-version-tag.outputs.VERSION_TAG }}
       BUILD_DATE: ${{ steps.image-version-tag.outputs.BUILD_DATE}}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Set outputs
         id: sha_short
         run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
