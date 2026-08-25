@@ -176,6 +176,14 @@ RSpec.describe PostgresServer::PrependMethods do # rubocop:disable RSpec/SpecFil
       postgres_server.check_pulse(session:, previous_pulse: {})
       expect(pulse_row).to be_nil
     end
+
+    it "returns the pulse and logs when the metric write fails" do
+      POSTGRES_MONITOR_DB.rename_table(:postgres_int_metric_monitor, :postgres_int_metric_monitor_gone)
+      expect(Clog).to receive(:emit).with("postgres cp metric write failed", hash_including(ubid: postgres_server.ubid)).and_call_original
+      expect(postgres_server.check_pulse(session:, previous_pulse: {})[:reading]).to eq("up")
+    ensure
+      POSTGRES_MONITOR_DB.rename_table(:postgres_int_metric_monitor_gone, :postgres_int_metric_monitor)
+    end
   end
 
   describe "#init_health_monitor_session" do
@@ -190,6 +198,16 @@ RSpec.describe PostgresServer::PrependMethods do # rubocop:disable RSpec/SpecFil
       expect(postgres_server.vm.sshable).to receive(:start_fresh_session).and_raise(Errno::ECONNREFUSED)
       expect { postgres_server.init_health_monitor_session }.to raise_error(Errno::ECONNREFUSED)
       expect(pulse_row).to include(value: 0)
+    end
+
+    it "re-raises the SSH error, not the write error, when the metric write also fails" do
+      allow(Config).to receive(:postgres_cp_metrics_export_enabled).and_return(true)
+      expect(postgres_server.vm.sshable).to receive(:start_fresh_session).and_raise(Errno::ECONNREFUSED)
+      POSTGRES_MONITOR_DB.rename_table(:postgres_int_metric_monitor, :postgres_int_metric_monitor_gone)
+      expect(Clog).to receive(:emit).with("postgres cp metric write failed", anything).and_call_original
+      expect { postgres_server.init_health_monitor_session }.to raise_error(Errno::ECONNREFUSED)
+    ensure
+      POSTGRES_MONITOR_DB.rename_table(:postgres_int_metric_monitor_gone, :postgres_int_metric_monitor)
     end
 
     it "does not write when the session opens" do

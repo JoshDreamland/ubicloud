@@ -92,11 +92,16 @@ class PostgresServer
 
     private
 
+    # The metric write must never break the pulse check it rides on, nor
+    # replace the SSH error the monitor classifies; a failed write only
+    # costs the metric, and the next reading retries anyway.
     def record_cp_pulse(value)
       return unless Config.postgres_cp_metrics_export_enabled
       POSTGRES_MONITOR_DB[:postgres_int_metric_monitor]
         .insert_conflict(target: [:postgres_server_id, :metric_name], update: {value: Sequel[:excluded][:value], observed_at: Sequel[:excluded][:observed_at]})
         .insert(postgres_server_id: id, metric_name: "pg_cp_up", value:, observed_at: Sequel.function(:now))
+    rescue Sequel::Error => ex
+      Clog.emit("postgres cp metric write failed", Util.exception_to_hash(ex, into: {ubid:}))
     end
   end
 end
