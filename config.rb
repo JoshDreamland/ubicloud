@@ -214,7 +214,6 @@ module Config
   optional :postgres_lantern_notification_email, string
   optional :postgres_notification_email, string
   override :aws_postgres_iam_access, false, bool
-  override :gcp_postgres_iam_access, false, bool
   override :aws_vm_attach_ssm_permissions, false, bool
   optional :aws_s3_custom_builds_bucket_names, array(string)
   override :postgres_otel_otlp_export_enabled, false, bool
@@ -223,6 +222,7 @@ module Config
   override :postgres_walg_optimized_config, false, bool
   override :postgres_walg_direct_io_enabled, false, bool
   override :aws_postgres_blob_storage_iam_sweep, true, bool
+  override :gcp_postgres_iam_access, false, bool
   override :postgres_internal_firewall_cidrs, "", array(string)
   optional :postgres_timeseries_match_name_export_regex, string
 
