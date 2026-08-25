@@ -1433,6 +1433,18 @@ paths:
                 wal_drive_size_gib:
                   description: Size in GiB of the WAL partition carved from local NVMe; only valid with wal_drive_type nvme on network_cache storage
                   type: integer
+                network_volume_iops:
+                  description: Provisioned IOPS for the network data volume; defaults to the volume type's baseline. Requires network_cache storage
+                  type: integer
+                network_volume_throughput_mibps:
+                  description: Provisioned throughput in MiB/s for the network data volume; not configurable for io2, which derives it from IOPS. Requires network_cache storage
+                  type: integer
+                wal_drive_iops:
+                  description: Provisioned IOPS for the dedicated WAL volume; requires a network wal_drive_type
+                  type: integer
+                wal_drive_throughput_mibps:
+                  description: Provisioned throughput in MiB/s for the dedicated WAL volume; not configurable for io2. Requires a network wal_drive_type
+                  type: integer
                 version:
                   description: PostgreSQL version
                   type: string
@@ -3844,6 +3856,22 @@ components:
             - hyperdisk-balanced
         wal_drive_size_gib:
           description: WAL drive size in GiB, set only when WAL is carved from local NVMe
+          type: integer
+          nullable: true
+        network_volume_iops:
+          description: Provisioned IOPS for the network data volume, null when the volume type's baseline applies
+          type: integer
+          nullable: true
+        network_volume_throughput_mibps:
+          description: Provisioned throughput in MiB/s for the network data volume, null when the volume type's baseline applies
+          type: integer
+          nullable: true
+        wal_drive_iops:
+          description: Provisioned IOPS for the dedicated WAL volume, null when the volume type's baseline applies
+          type: integer
+          nullable: true
+        wal_drive_throughput_mibps:
+          description: Provisioned throughput in MiB/s for the dedicated WAL volume, null when the volume type's baseline applies
           type: integer
           nullable: true
         target_storage_size_gib:
