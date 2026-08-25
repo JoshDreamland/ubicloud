@@ -239,15 +239,33 @@ RSpec.describe "UbicloudSetup" do
     it "upserts a pg_gce_image row, updating pg_versions in place on re-run" do
       PgGceImage.dataset.destroy
       name = "postgres-ubuntu-2404-x64-20260218"
-      UbicloudSetup.update_pg_gce_image(UbicloudSetup::PgGceImageConfig.new(gce_image_name: name, arch: "x64", pg_versions: ["16", "17"]))
+      UbicloudSetup.update_pg_gce_images([UbicloudSetup::PgGceImageConfig.new(gce_image_name: name, arch: "x64", pg_versions: ["16", "17"])])
       img = PgGceImage.where(arch: "x64", gce_image_name: name)
       expect(img.count).to eq 1
       expect(img.first.pg_versions).to eq(["16", "17"])
 
       # same (arch, gce_image_name) key -> update in place, no duplicate row
-      UbicloudSetup.update_pg_gce_image(UbicloudSetup::PgGceImageConfig.new(gce_image_name: name, arch: "x64", pg_versions: ["16", "17", "18"]))
+      UbicloudSetup.update_pg_gce_images([UbicloudSetup::PgGceImageConfig.new(gce_image_name: name, arch: "x64", pg_versions: ["16", "17", "18"])])
       expect(img.count).to eq 1
       expect(img.first.pg_versions).to eq(["16", "17", "18"])
+    end
+
+    it "deletes stale pg_gce_image rows for arches present in the config, leaving other arches alone" do
+      PgGceImage.dataset.destroy
+      PgGceImage.create(gce_image_name: "postgres-ubuntu-2204-x64-old", arch: "x64", pg_versions: ["16", "17"])
+      PgGceImage.create(gce_image_name: "postgres-ubuntu-2204-arm64-old", arch: "arm64", pg_versions: ["16", "17"])
+
+      UbicloudSetup.update_pg_gce_images([UbicloudSetup::PgGceImageConfig.new(gce_image_name: "postgres-ubuntu-2204-x64-new", arch: "x64", pg_versions: ["16", "17", "18"])])
+
+      expect(PgGceImage.where(arch: "x64").select_map(:gce_image_name)).to eq ["postgres-ubuntu-2204-x64-new"]
+      expect(PgGceImage.where(arch: "arm64").select_map(:gce_image_name)).to eq ["postgres-ubuntu-2204-arm64-old"]
+    end
+
+    it "does nothing when no pg_gce_images are configured" do
+      PgGceImage.dataset.destroy
+      PgGceImage.create(gce_image_name: "postgres-ubuntu-2204-x64-old", arch: "x64", pg_versions: ["16"])
+      UbicloudSetup.update_pg_gce_images([])
+      expect(PgGceImage.count).to eq 1
     end
 
     it "add_location" do

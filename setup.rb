@@ -234,21 +234,32 @@ module UbicloudSetup
     end
   end
 
-  # Upsert a GCE image (the GCP analogue of pg_aws_ami) used to provision Postgres
-  # VMs on GCP. Keyed by (arch, gce_image_name); re-running updates pg_versions in
-  # place. id is omitted so the pg_gce_image gen_random_ubid_uuid default applies.
-  def self.update_pg_gce_image(image)
-    pg_versions = Sequel.pg_array(Array(image.pg_versions).map(&:to_s), :text)
+  # Reconcile GCE images (the GCP analogue of pg_aws_ami) used to provision Postgres
+  # VMs on GCP. The setup config is authoritative per arch: configured images are
+  # upserted and any other row for an arch present in the config is deleted, so stale
+  # images can't shadow the intended one. Arches absent from the config are untouched.
+  def self.update_pg_gce_images(images)
+    return if images.empty?
     DB.transaction do
       DB.run "SET LOCAL clickgres.bypass_dml_blocker__pg_gce_image = 'true'"
-      DB[:pg_gce_image].insert_conflict(
-        target: [:arch, :gce_image_name],
-        update: {pg_versions:},
-      ).insert(
-        gce_image_name: image.gce_image_name,
-        arch: image.arch,
-        pg_versions:,
-      )
+      images.each do |image|
+        pg_versions = Sequel.pg_array(Array(image.pg_versions).map(&:to_s), :text)
+        DB[:pg_gce_image].insert_conflict(
+          target: [:arch, :gce_image_name],
+          update: {pg_versions:},
+        ).insert(
+          gce_image_name: image.gce_image_name,
+          arch: image.arch,
+          pg_versions:,
+        )
+      end
+      images.group_by(&:arch).each do |arch, arch_images|
+        stale = DB[:pg_gce_image].where(arch:).exclude(gce_image_name: arch_images.map(&:gce_image_name))
+        stale.select_map(:gce_image_name).each do |name|
+          Clog.emit "Deleting stale pg_gce_image #{name} (#{arch})"
+        end
+        stale.delete
+      end
     end
   end
 
@@ -508,8 +519,8 @@ module UbicloudSetup
 
     setup_config.pg_gce_images.each do |image|
       Clog.emit "Updating pg_gce_image #{image.gce_image_name} (#{image.arch}) for pg_versions #{image.pg_versions}"
-      update_pg_gce_image(image)
     end
+    update_pg_gce_images(setup_config.pg_gce_images)
 
     aws_family_options = %w[c6gd m6id m6gd i8ge i7i i7ie r8gd r6gd r6id m7gd r7gd r8id m8id]
 
