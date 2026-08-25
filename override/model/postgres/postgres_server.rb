@@ -2,6 +2,40 @@
 
 class PostgresServer
   module PrependMethods
+    # The pulse result never leaves the monitor process otherwise; persist the
+    # latest reading so the respirate exporter can publish it as pg_cp_up, a
+    # witness for the instance-down alarm independent of the database VM.
+    # reading_rpt resets to 1 on a transition and 1 % 6 == 1, so transitions
+    # write immediately and unchanged readings heartbeat every ~30s, keeping
+    # at least one point in every one-minute alarm window.
+    def check_pulse(session:, previous_pulse:)
+      super.tap do |pulse|
+        if pulse[:reading_rpt] % 6 == 1
+          record_cp_pulse((pulse[:reading] == "up") ? 1 : 0)
+        end
+      end
+    end
+
+    # A VM that is unreachable over SSH never gets a pulse at all: the monitor
+    # re-raises here before check_pulse can run. This is the only signal for a
+    # fully dead VM, the exact case pg_cp_up exists to detect. The failure
+    # recurs every cycle, so the row keeps refreshing while the VM is dead.
+    def init_health_monitor_session
+      super
+    rescue *Sshable::SSH_CONNECTION_ERRORS
+      record_cp_pulse(0)
+      raise
+    end
+
+    def cp_metric_monitor_ds
+      POSTGRES_MONITOR_DB[:postgres_int_metric_monitor].where(postgres_server_id: id)
+    end
+
+    def before_destroy
+      super
+      cp_metric_monitor_ds.delete
+    end
+
     def configure_hash
       result = super
       extra_configs = {
@@ -54,6 +88,15 @@ class PostgresServer
       when 5..8 then 256
       else 512
       end
+    end
+
+    private
+
+    def record_cp_pulse(value)
+      return unless Config.postgres_cp_metrics_export_enabled
+      POSTGRES_MONITOR_DB[:postgres_int_metric_monitor]
+        .insert_conflict(target: [:postgres_server_id, :metric_name], update: {value: Sequel[:excluded][:value], observed_at: Sequel[:excluded][:observed_at]})
+        .insert(postgres_server_id: id, metric_name: "pg_cp_up", value:, observed_at: Sequel.function(:now))
     end
   end
 end
