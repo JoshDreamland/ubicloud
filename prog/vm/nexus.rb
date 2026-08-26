@@ -150,34 +150,47 @@ class Prog::Vm::Nexus < Prog::Base
         # instance-store NVMes per the instance type, not per record. Device
         # discovery for mdadm is done at provisioning time via lsblk (see
         # PostgresServer::Aws#aws_storage_device_paths), so record count doesn't
-        # drive disk count.
-        storage_volumes.each_with_index do |volume, disk_index|
-          VmStorageVolume.create(
-            vm_id: vm.id,
-            size_gib: volume[:size_gib],
-            boot: volume[:boot],
-            use_bdev_ubi: false,
-            disk_index:,
-          )
+        # drive disk count. For volumes marked network_volume_type Vm::Aws::Nexus
+        # creates persistent EBS volumes and records their ids.
+        # each volume runs the same disk_index uniqueness check; ignore as in
+        # Vm::Metal#create_storage_volumes
+        DB.ignore_duplicate_queries do
+          storage_volumes.each_with_index do |volume, disk_index|
+            VmStorageVolume.create(
+              vm_id: vm.id,
+              size_gib: volume[:size_gib],
+              boot: volume[:boot],
+              use_bdev_ubi: false,
+              disk_index:,
+              **network_volume_attrs(volume),
+            )
+          end
         end
         "Vm::Aws::Nexus"
       elsif location.gcp?
         disk_index = 0
-        storage_volumes.each do |volume|
-          # GCP local NVMe SSDs come in 375GB increments; split into
-          # multiple VmStorageVolume records so each maps to one physical disk.
-          boot = volume[:boot]
-          disk_count = boot ? 1 : (volume[:size_gib]/375r).ceil
+        # each volume runs the same disk_index uniqueness check; ignore as in
+        # Vm::Metal#create_storage_volumes
+        DB.ignore_duplicate_queries do
+          storage_volumes.each do |volume|
+            # GCP local NVMe SSDs come in 375GB increments; split into
+            # multiple VmStorageVolume records so each maps to one physical disk.
+            # Network volumes map 1:1 to a persistent disk, keeping postgres
+            # network_cache rows at boot=0/data=1/wal=2.
+            boot = volume[:boot]
+            disk_count = (boot || volume[:network_volume_type]) ? 1 : (volume[:size_gib]/375r).ceil
 
-          disk_count.times do
-            VmStorageVolume.create(
-              vm_id: vm.id,
-              size_gib: volume[:size_gib] / disk_count,
-              boot:,
-              use_bdev_ubi: false,
-              disk_index:,
-            )
-            disk_index += 1
+            disk_count.times do
+              VmStorageVolume.create(
+                vm_id: vm.id,
+                size_gib: volume[:size_gib] / disk_count,
+                boot:,
+                use_bdev_ubi: false,
+                disk_index:,
+                **network_volume_attrs(volume),
+              )
+              disk_index += 1
+            end
           end
         end
         "Vm::Gcp::Nexus"
@@ -214,6 +227,17 @@ class Prog::Vm::Nexus < Prog::Base
         }],
       ) { it.id = vm.id }
     end
+  end
+
+  # Persist provider-managed volume settings on the volume row.
+  def self.network_volume_attrs(volume)
+    return {} unless (volume_type = volume[:network_volume_type])
+
+    {
+      volume_type:,
+      provisioned_iops: volume[:provisioned_iops],
+      provisioned_throughput_mibps: volume[:provisioned_throughput_mibps],
+    }
   end
 
   def self.assemble_with_sshable(*, sshable_unix_user: "rhizome", **kwargs)

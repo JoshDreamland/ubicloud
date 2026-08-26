@@ -56,22 +56,39 @@ class Prog::Vm::Gcp::Nexus < Prog::Base
             disk_size_gb: vol.size_gib,
           ),
         )
-      else
-        # Local NVMe SSD. GCE 3rd-gen `-lssd` machine types require local
-        # SSDs to be declared explicitly at instance create; each row is one
-        # 375 GiB LSSD (see size split in Prog::Vm::Nexus.assemble). Guest
-        # paths resolve via /dev/disk/by-id/google-local-nvme-ssd-N based on
-        # NVMe attach order, matching VmStorageVolume::Gcp#gcp_device_path.
+      elsif vol.volume_type
+        # Persistent disk created inline with the instance: auto_delete rides
+        # instance delete, and GCE attaches an already-existing disk of the
+        # same name instead of failing, making insert retries idempotent.
+        # disk_name is recorded before insert so wal_volume/device_path
+        # resolve from first observation; explicit device_name surfaces the
+        # disk at /dev/disk/by-id/google-persistent-disk-N via google_nvme_id
+        # udev. Unset configuration uses the 3000 IOPS / 140 MiB/s baseline.
+        limits = VmStorageVolume::NETWORK_VOLUME_LIMITS.fetch(vol.volume_type)
+        vol.update(provider_volume_id: "#{vm.name}-#{vol.disk_index}") unless vol.provider_volume_id
         Google::Cloud::Compute::V1::AttachedDisk.new(
-          type: "SCRATCH",
           auto_delete: true,
-          interface: "NVME",
+          device_name: "persistent-disk-#{vol.disk_index}",
           initialize_params: Google::Cloud::Compute::V1::AttachedDiskInitializeParams.new(
-            disk_type: "zones/#{gcp_zone}/diskTypes/local-ssd",
+            disk_name: vol.provider_volume_id,
+            disk_type: "zones/#{gcp_zone}/diskTypes/#{vol.volume_type}",
             disk_size_gb: vol.size_gib,
+            provisioned_iops: vol.provisioned_iops || limits.default_iops,
+            provisioned_throughput: vol.provisioned_throughput_mibps || limits.default_throughput_mibps,
           ),
         )
+      else
+        local_ssd_disk
       end
+    end
+
+    # -lssd machine types demand their full local SSD complement declared at
+    # insert. With network volumes the rows map to persistent disks, so
+    # synthesize the remaining local SSDs (bcache cache devices, matched by
+    # instance_store_device_glob) without VmStorageVolume rows, mirroring
+    # AWS instance-store NVMe
+    if vm.vm_storage_volumes_dataset.exclude(volume_type: nil).any?
+      (local_ssd_count - disks.count { it.type == "SCRATCH" }).times { disks << local_ssd_disk }
     end
 
     gcp_res = user_nic.nic_gcp_resource
@@ -328,6 +345,26 @@ class Prog::Vm::Gcp::Nexus < Prog::Base
   def gce_machine_type
     # -lssd is needed only when there are non-boot (data) volumes
     @gce_machine_type ||= Option.gcp_instance_type_name(vm.family, vm.vcpus, lssd: !vm.vm_storage_volumes_dataset.where(boot: false).empty?)
+  end
+
+  # Local NVMe SSD. GCE 3rd-gen `-lssd` machine types require local SSDs to
+  # be declared explicitly at instance create, one 375 GiB LSSD each. Guest
+  # paths resolve via /dev/disk/by-id/google-local-nvme-ssd-N based on NVMe
+  # attach order, matching VmStorageVolume::Gcp#gcp_device_path
+  def local_ssd_disk
+    Google::Cloud::Compute::V1::AttachedDisk.new(
+      type: "SCRATCH",
+      auto_delete: true,
+      interface: "NVME",
+      initialize_params: Google::Cloud::Compute::V1::AttachedDiskInitializeParams.new(
+        disk_type: "zones/#{gcp_zone}/diskTypes/local-ssd",
+        disk_size_gb: 375,
+      ),
+    )
+  end
+
+  def local_ssd_count
+    Option::GCP_STORAGE_SIZE_OPTIONS[vm.family][vm.vcpus].max / 375
   end
 
   GCE_BOOT_IMAGE_FAMILIES = {

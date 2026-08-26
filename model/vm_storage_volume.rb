@@ -4,6 +4,32 @@ require_relative "../model"
 require "json"
 
 class VmStorageVolume < Sequel::Model
+  # Provider-managed network volume types, matching the volume_type check
+  # constraint. Local disks leave volume_type NULL.
+  module VolumeType
+    GP3 = "gp3"
+    IO2 = "io2"
+    HYPERDISK_BALANCED = "hyperdisk-balanced"
+  end
+
+  # Per-volume provider limits. Ratio limits further constrain IOPS by volume
+  # size, and throughput by IOPS. io2 derives throughput from IOPS.
+  # gp3: 80,000 IOPS and 2,000 MiB/s, at 500 IOPS/GiB and 0.25 MiB/s per IOPS.
+  # io2: 256,000 IOPS at 1,000 IOPS/GiB.
+  # hyperdisk-balanced: 160,000 IOPS at 500 IOPS/GiB, throughput bounded on both
+  # sides by IOPS, MAX(140, P/256) to MIN(2400, P/4).
+  # throughput_mibps is nil when the provider derives throughput from IOPS and
+  # rejects an explicit value. nil in the ratio fields means only that the
+  # provider imposes no such constraint.
+  NetworkVolumeLimits = Data.define(:iops, :throughput_mibps, :max_iops_per_gib, :max_mibps_per_iops, :min_mibps_per_iops, :default_iops, :default_throughput_mibps) do
+    def configurable_throughput? = !throughput_mibps.nil?
+  end
+  NETWORK_VOLUME_LIMITS = {
+    VolumeType::GP3 => NetworkVolumeLimits.new(3000..80_000, 125..2000, 500, 0.25, nil, 3000, 125),
+    VolumeType::IO2 => NetworkVolumeLimits.new(100..256_000, nil, 1000, nil, nil, 3000, nil),
+    VolumeType::HYPERDISK_BALANCED => NetworkVolumeLimits.new(3000..160_000, 140..2400, 500, 0.25, 1.0 / 256, 3000, 140),
+  }.freeze
+
   many_to_one :vm
   many_to_one :spdk_installation, read_only: true
   many_to_one :vhost_block_backend, read_only: true
