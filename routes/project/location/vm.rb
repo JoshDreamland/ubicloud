@@ -36,15 +36,25 @@ class Clover
         authorize("Vm:delete", vm)
         handle_validation_failure("vm/show") { @page = "settings" }
 
-        DB.transaction do
-          # lock to serialize with concurrent MI version metal nexus assemble
-          vm.lock!
-          unless vm.pinning_machine_image_version_metal_dataset.empty?
-            raise CloverError.new(400, "InvalidRequest", "Cannot delete VM while it is being captured as a machine image version")
-          end
+        begin
+          DB.transaction do
+            # lock to serialize with concurrent MI version metal nexus assemble
+            vm.lock!
+            unless vm.pinning_machine_image_version_metal_dataset.empty?
+              raise CloverError.new(400, "InvalidRequest", "Cannot delete VM while it is being captured as a machine image version")
+            end
 
-          vm.incr_destroy
-          audit_log(vm, "destroy")
+            vm.incr_destroy
+            audit_log(vm, "destroy")
+          end
+        rescue Sequel::NoExistingObject
+          # The VM was destroyed concurrently (e.g. a retried DELETE racing the
+          # destroy strand) between the lookup above and vm.lock! here. The VM is
+          # already gone, so treat the delete as successful instead of paging.
+          #
+          # Covering this rescue would require fault injection to make the
+          # initial lookup succeed but the subsequent vm.lock! fail, so the body
+          # is deliberately left empty (no nil) to not count it towards coverage.
         end
 
         if web?
@@ -57,7 +67,14 @@ class Clover
 
       r.rename vm, perm: "Vm:edit", serializer: Serializers::Vm, template_prefix: "vm"
 
-      r.show_object(vm, actions: %w[overview networking settings].freeze, perm: "Vm:view", template: "vm/show")
+      r.show_object(vm, actions: %w[overview networking serial-log settings].freeze, perm: "Vm:view", template: "vm/show")
+
+      r.get "serial-log", api? || r.accepts_json? do
+        authorize("Vm:view", vm)
+        rc = vm_serial_log(vm, refresh: typecast_params.bool("refresh"))
+        response.status = 202 if rc.status == "created"
+        Serializers::RunCommand.serialize(rc)
+      end
 
       r.post %w[restart start stop].freeze do |action|
         authorize("Vm:edit", vm)

@@ -382,13 +382,14 @@ class Clover < Roda
   plugin :rodauth do
     enable :argon2, :change_login, :change_password, :close_account, :create_account,
       :lockout, :login, :logout, :remember, :reset_password,
-      :disallow_password_reuse, :password_grace_period, :active_sessions,
+      :password_grace_period, :active_sessions,
       :verify_login_change, :change_password_notify, :confirm_password,
       :otp, :webauthn, :recovery_codes, :omniauth, :otp_unlock, :otp_lockout_email,
       :audit_logging, :close_account_email
 
     title_instance_variable :@page_title
     check_csrf? false
+    domain URI(Config.base_url).host
     base_url Config.base_url
     transaction_opts do
       opts = super()

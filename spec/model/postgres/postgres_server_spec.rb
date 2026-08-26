@@ -2080,6 +2080,7 @@ RSpec.describe PostgresServer do
   end
 
   describe "#metrics_config" do
+<<<<<<< HEAD
     def match_selector(server)
       query = URI(server.metrics_config[:endpoints].first).query
       URI.decode_www_form(query).to_h.fetch("match[]")
@@ -2114,6 +2115,17 @@ RSpec.describe PostgresServer do
       expect(labels).to include("pg_tags_label_chc_region_id" => "us-west-2")
       expect(labels.keys).not_to include("pg_tags_label_owner")
       expect(labels.keys).not_to include(include("-"))
+=======
+    it "labels the exported metrics with the location and tags" do
+      resource.update(tags: [{"key" => "env", "value" => "prod"}])
+
+      expect(postgres_server.metrics_config[:additional_labels]).to eq({"pg_tags_label_env" => "prod"}.merge(
+        location_id: location.ubid,
+        location_name: "us-west-2",
+        location_provider: "ubicloud",
+        location_display_name: "us-west-2",
+      ))
+>>>>>>> cbc3fef84e1360d4702072bd7a3c9fedcfaa1992
     end
   end
 
