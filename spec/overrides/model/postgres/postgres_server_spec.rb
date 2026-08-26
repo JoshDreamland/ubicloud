@@ -132,4 +132,103 @@ RSpec.describe PostgresServer::PrependMethods do # rubocop:disable RSpec/SpecFil
       end
     end
   end
+
+  describe "#check_pulse" do
+    let(:session) { {ssh_session: Net::SSH::Connection::Session.allocate, db_connection: DB} }
+
+    def pulse_row
+      POSTGRES_MONITOR_DB[:postgres_int_metric_monitor].where(postgres_server_id: postgres_server.id).first
+    end
+
+    before { allow(Config).to receive(:postgres_cp_metrics_export_enabled).and_return(true) }
+
+    # POSTGRES_MONITOR_DB is a separate Sequel connection not covered by the
+    # suite's rollback transaction, so rows must be cleaned explicitly;
+    # reruns otherwise hit unique-constraint violations.
+    after { POSTGRES_MONITOR_DB[:postgres_int_metric_monitor].delete }
+
+    it "records an up reading on the first pulse" do
+      expect(postgres_server.check_pulse(session:, previous_pulse: {})[:reading]).to eq("up")
+      expect(pulse_row).to include(value: 1)
+    end
+
+    it "records a down transition immediately" do
+      allow(DB).to receive(:get).and_raise(Sequel::DatabaseConnectionError)
+      previous_pulse = {reading: "up", reading_rpt: 7, reading_chg: Time.now - 35}
+      expect(postgres_server.check_pulse(session:, previous_pulse:)[:reading]).to eq("down")
+      expect(pulse_row).to include(value: 0)
+    end
+
+    it "does not write between heartbeats" do
+      previous_pulse = {reading: "up", reading_rpt: 5, reading_chg: Time.now - 25}
+      postgres_server.check_pulse(session:, previous_pulse:)
+      expect(pulse_row).to be_nil
+    end
+
+    it "writes a heartbeat on every sixth reading" do
+      previous_pulse = {reading: "up", reading_rpt: 6, reading_chg: Time.now - 30}
+      postgres_server.check_pulse(session:, previous_pulse:)
+      expect(pulse_row).to include(value: 1)
+    end
+
+    it "does not write while the kill switch is off" do
+      allow(Config).to receive(:postgres_cp_metrics_export_enabled).and_return(false)
+      postgres_server.check_pulse(session:, previous_pulse: {})
+      expect(pulse_row).to be_nil
+    end
+
+    it "returns the pulse and logs when the metric write fails" do
+      POSTGRES_MONITOR_DB.rename_table(:postgres_int_metric_monitor, :postgres_int_metric_monitor_gone)
+      expect(Clog).to receive(:emit).with("postgres cp metric write failed", hash_including(ubid: postgres_server.ubid)).and_call_original
+      expect(postgres_server.check_pulse(session:, previous_pulse: {})[:reading]).to eq("up")
+    ensure
+      POSTGRES_MONITOR_DB.rename_table(:postgres_int_metric_monitor_gone, :postgres_int_metric_monitor)
+    end
+  end
+
+  describe "#init_health_monitor_session" do
+    def pulse_row
+      POSTGRES_MONITOR_DB[:postgres_int_metric_monitor].where(postgres_server_id: postgres_server.id).first
+    end
+
+    after { POSTGRES_MONITOR_DB[:postgres_int_metric_monitor].delete }
+
+    it "records a down reading and re-raises when the SSH session cannot be opened" do
+      allow(Config).to receive(:postgres_cp_metrics_export_enabled).and_return(true)
+      expect(postgres_server.vm.sshable).to receive(:start_fresh_session).and_raise(Errno::ECONNREFUSED)
+      expect { postgres_server.init_health_monitor_session }.to raise_error(Errno::ECONNREFUSED)
+      expect(pulse_row).to include(value: 0)
+    end
+
+    it "re-raises the SSH error, not the write error, when the metric write also fails" do
+      allow(Config).to receive(:postgres_cp_metrics_export_enabled).and_return(true)
+      expect(postgres_server.vm.sshable).to receive(:start_fresh_session).and_raise(Errno::ECONNREFUSED)
+      POSTGRES_MONITOR_DB.rename_table(:postgres_int_metric_monitor, :postgres_int_metric_monitor_gone)
+      expect(Clog).to receive(:emit).with("postgres cp metric write failed", anything).and_call_original
+      expect { postgres_server.init_health_monitor_session }.to raise_error(Errno::ECONNREFUSED)
+    ensure
+      POSTGRES_MONITOR_DB.rename_table(:postgres_int_metric_monitor_gone, :postgres_int_metric_monitor)
+    end
+
+    it "does not write when the session opens" do
+      allow(Config).to receive(:postgres_cp_metrics_export_enabled).and_return(true)
+      ssh_session = Net::SSH::Connection::Session.allocate
+      forward = instance_double(Net::SSH::Service::Forward)
+      expect(forward).to receive(:local_socket)
+      expect(ssh_session).to receive(:forward).and_return(forward)
+      expect(postgres_server.vm.sshable).to receive(:start_fresh_session).and_return(ssh_session)
+      expect(postgres_server.init_health_monitor_session[:ssh_session]).to eq(ssh_session)
+      expect(pulse_row).to be_nil
+    end
+  end
+
+  describe "#before_destroy" do
+    after { POSTGRES_MONITOR_DB[:postgres_int_metric_monitor].delete }
+
+    it "removes the server's pulse monitor row" do
+      POSTGRES_MONITOR_DB[:postgres_int_metric_monitor].insert(postgres_server_id: postgres_server.id, metric_name: "pg_cp_up", value: 1, observed_at: Time.now)
+      postgres_server.destroy
+      expect(POSTGRES_MONITOR_DB[:postgres_int_metric_monitor].where(postgres_server_id: postgres_server.id).first).to be_nil
+    end
+  end
 end

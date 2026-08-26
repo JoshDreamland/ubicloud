@@ -386,13 +386,7 @@ EXPORTER
         raise "Configured postgres_otel_otlp_export_jwt_oidc_provider_id=#{Config.postgres_otel_otlp_export_jwt_oidc_provider_id} does not correspond to an existing OidcProvider"
       end
 
-      token_url = URI.join(oidc_provider.url, oidc_provider.token_endpoint).to_s
-      auth_string = Base64.strict_encode64([CGI.escape(oidc_provider.client_id), CGI.escape(oidc_provider.client_secret)].join(":"))
-
-      audience = postgres_server.resource.otel_otlp_destination&.auth_audience
-      body_params = {grant_type: "client_credentials"}
-      body_params[:audience] = audience if audience
-
+      additional_body_params = {}
       if Config.postgres_otel_otlp_export_additional_metadata_field
         metadata = {
           postgres_server_id: postgres_server.ubid,
@@ -400,26 +394,13 @@ EXPORTER
           postgres_resource_uuid: postgres_server.resource.id,
           postgres_server_role: (postgres_server.id == postgres_server.resource.representative_server.id) ? "primary" : "standby",
         }
-        body_params[Config.postgres_otel_otlp_export_additional_metadata_field.to_sym] = JSON.generate(metadata)
+        additional_body_params[Config.postgres_otel_otlp_export_additional_metadata_field.to_sym] = JSON.generate(metadata)
       end
 
-      response = Excon.post(
-        token_url,
-        headers: {
-          "Content-Type" => "application/x-www-form-urlencoded",
-          "Accept" => "application/json",
-          "Authorization" => "Basic #{auth_string}",
-        },
-        body: URI.encode_www_form(body_params),
-        expects: [200, 201],
+      access_token = oidc_provider.client_credentials_token(
+        audience: postgres_server.resource.otel_otlp_destination&.auth_audience,
+        additional_body_params:,
       )
-
-      token_data = JSON.parse(response.body)
-      access_token = token_data["access_token"]
-
-      unless access_token
-        raise "OAuth token response missing access_token: #{response.body}"
-      end
 
       vm.sshable.write_file(otel_token_path, access_token, user: "otelcol")
       vm.sshable.cmd("sudo systemctl reload otelcol-contrib || sudo systemctl restart otelcol-contrib")
