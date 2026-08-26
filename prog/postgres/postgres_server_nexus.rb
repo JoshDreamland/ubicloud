@@ -957,8 +957,11 @@ SQL
     begin
       dmesg = vm.sshable.cmd("sudo dmesg --time-format iso | tail -200", timeout: 10, log: false)
       Clog.emit("dmesg before destroy", {dmesg_capture: {server: postgres_server.ubid, output: dmesg}})
-    rescue *Sshable::SSH_CONNECTION_ERRORS, Sshable::SshError
-      nil
+    rescue => ex
+      # Anything raised here, including reading the sshable itself, must not
+      # stop the destroy. A narrower rescue let an undecryptable private key
+      # escape and retry the label forever, leaving the VM running.
+      Clog.emit("dmesg capture before destroy failed", Util.exception_to_hash(ex, into: {postgres_server_id: postgres_server.id}))
     end
 
     vm.incr_destroy

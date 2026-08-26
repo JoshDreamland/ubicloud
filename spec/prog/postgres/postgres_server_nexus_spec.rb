@@ -1885,6 +1885,19 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
     end
   end
 
+  describe "#destroy_vm_and_pg when the dmesg capture fails" do
+    it "still destroys the server" do
+      expect(sshable).to receive(:_cmd).and_raise(OpenSSL::Cipher::AuthTagError)
+      expect(Clog).to receive(:emit).with("dmesg capture before destroy failed", anything).and_call_original
+      vm = postgres_server.vm
+
+      expect { nx.destroy_vm_and_pg }.to exit({"msg" => "postgres server is deleted"})
+
+      expect(Semaphore.where(strand_id: vm.id, name: "destroy").count).to eq(1)
+      expect(postgres_server.exists?).to be false
+    end
+  end
+
   describe "#destroy_vm_and_pg rescue" do # split out from #destroy_vm_and_pg to opt-out of before
     it "proceeds when dmesg raises an SSH error" do
       expect(sshable).to receive(:_cmd).with("sudo dmesg --time-format iso | tail -200", hash_including(log: false)).and_raise(Sshable::SshError.new("cmd", "", "", 1, nil))
