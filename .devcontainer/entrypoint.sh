@@ -28,13 +28,14 @@ fi
 if [ ! -f ".env.rb" ]; then
   echo "=== Generating .env.rb ==="
   rake overwrite_envrb
-  if [ -f ".devcontainer/env-overrides.rb" ]; then
-    cat .devcontainer/env-overrides.rb >> .env.rb
-    echo "Appended env-overrides.rb to .env.rb"
-  fi
 else
   echo "=== .env.rb already exists, preserving encryption keys ==="
 fi
+
+# Every start, not just the first: rewrites the marked block so overrides added
+# to env-overrides.rb after this container was created still reach .env.rb.
+echo "=== Syncing env-overrides.rb into .env.rb ==="
+.devcontainer/scripts/sync-env-overrides.sh
 
 # Run once on first start (equivalent to postCreateCommand)
 if [ ! -f "$MARKER_FILE" ]; then

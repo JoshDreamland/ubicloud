@@ -1,9 +1,10 @@
 ENV["POSTGRES_SERVICE_PROJECT_ID"] = "3fa904f0-e4dc-86d2-a919-f8b0a326206f"
 ENV["ENABLE_FAILURE_INJECTION"] = "true"
 ENV["ALLOW_WEB_SSH"] = "true"
-# TODO(andrey.chudnovskiy): Enable when the first override is added
 if ENV["RACK_ENV"] != "test"
   ENV["AWS_PROFILE"] = "pg-dev-postgresqladmindev"
   ENV["AWS_POSTGRES_IAM_ACCESS"] = "true"
   ENV["CLOVER_ADMIN_DEVELOPMENT_NO_WEBAUTHN"] = "true"
+  ENV["GCP_POSTGRES_IAM_ACCESS"] = "true"
+  ENV["POSTGRES_GCE_IMAGE_GCP_PROJECT_ID"] = "dataplane-deployment"
 end

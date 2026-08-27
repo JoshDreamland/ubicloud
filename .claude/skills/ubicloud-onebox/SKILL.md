@@ -96,6 +96,11 @@ Returns a deduplicated list of resources with billing activity in the time range
 {"items": [{"project_id": "...", "resource_id": "...", "resource_name": "...", "resource_tags": {...}}]}
 ```
 
+## GCP Location
+- GCP Location: `gcp-us-east4-cell-0`.
+- GCP Sizes: `c4a-standard-4`, `c4a-highmem-4`, `c4-standard-4`, `c4-highmem-4`, `c4d-standard-4`, `c4d-highmem-4`
+- Disk Size: 375 GB for the 4-vCPU shapes.
+
 ## Behavior guidelines
 
 - Always prefer AWS instance type sizes (e.g. `m8gd.large`, `m8gd.xlarge`). The default size is `m8gd.large`. Non-AWS sizes like `standard-2` should not be used.

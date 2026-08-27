@@ -18,7 +18,7 @@
       "onAutoForward": "notify"
     }
   },
-  "initializeCommand": "echo WORKSPACE_FOLDER_NAME=${localWorkspaceFolderBasename} > .devcontainer/.env",
+  "initializeCommand": "mkdir -p ~/.config/gcloud && echo WORKSPACE_FOLDER_NAME=${localWorkspaceFolderBasename} > .devcontainer/.env",
   "postCreateCommand": "",
   "postStartCommand": "",
   "customizations": {

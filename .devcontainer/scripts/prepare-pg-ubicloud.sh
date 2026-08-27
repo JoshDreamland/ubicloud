@@ -2,13 +2,17 @@
 # Prepares the Ubicloud environment for PostgreSQL development.
 # Authenticates with GitHub, fetches latest AMIs, and updates the database.
 #
-# Usage: .devcontainer/prepare-pg-ubicloud.sh [--region us-west-2] [--region us-east-1]
-#   --region: AWS region(s) to update (default: us-west-2). Can be specified multiple times.
+# Usage: .devcontainer/prepare-pg-ubicloud.sh [--region us-west-2] [--gcp-region us-east4]
+#   --region:     AWS region(s) to update (default: us-west-2). Can be specified multiple times.
+#   --gcp-region: GCP region(s) to register. Repeatable, defaults to us-east4.
+#                 Registering GCP needs ADC, so this script now always runs the
+#                 gcloud login check; pass --gcp-region to add regions.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REGIONS=()
+GCP_REGIONS=()
 
 : "${AWS_ASSUME_ROLE:?AWS_ASSUME_ROLE is not set. Ensure it is defined in docker-compose.yml or exported in your shell.}"
 
@@ -19,9 +23,13 @@ while [[ $# -gt 0 ]]; do
       REGIONS+=("$2")
       shift 2
       ;;
+    --gcp-region)
+      GCP_REGIONS+=("$2")
+      shift 2
+      ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "Usage: $0 [--region us-west-2] [--region us-east-1]" >&2
+      echo "Usage: $0 [--region us-west-2] [--gcp-region us-east4]" >&2
       exit 1
       ;;
   esac
@@ -30,6 +38,11 @@ done
 # Default to us-west-2 if no regions specified
 if [ ${#REGIONS[@]} -eq 0 ]; then
   REGIONS=("us-west-2")
+fi
+
+# Default GCP to us-east4 if no regions specified
+if [ ${#GCP_REGIONS[@]} -eq 0 ]; then
+  GCP_REGIONS=("us-east4")
 fi
 
 # 0. Sync mise-managed tools (ruby/nodejs/golang/victoria-metrics) from
@@ -44,6 +57,13 @@ MISE_BIN="${MISE:-/home/vscode/.local/bin/mise}"
 if [ -x "$MISE_BIN" ]; then
   eval "$("$MISE_BIN" env -s bash)"
 fi
+
+# 0b. Refresh the env-overrides block in .env.rb. entrypoint.sh does this on
+#     every container start, but a long-running container that just pulled new
+#     overrides needs it here too, before any step loads config.rb.
+echo ""
+echo "=== Syncing env-overrides.rb into .env.rb ==="
+"$SCRIPT_DIR/sync-env-overrides.sh"
 
 # 1. Run database migrations to latest version
 echo ""
@@ -148,6 +168,23 @@ for REGION in "${REGIONS[@]}"; do
 done
 
 "$SCRIPT_DIR/aws-sso-login.sh"
+
+# 6. Register GCP regions. GCP_REGIONS defaults to us-east4, so this runs on
+# every invocation and an ADC login is now part of the standard setup.
+# The image refresh here tolerates an unreachable GitHub the same way the AWS
+# region loop above does.
+if [ ${#GCP_REGIONS[@]} -gt 0 ]; then
+  "$SCRIPT_DIR/gcp-adc-login.sh"
+  for GCP_REGION in "${GCP_REGIONS[@]}"; do
+    GCP_RC=0
+    "$SCRIPT_DIR/register-pg-gcp-region.sh" "$GCP_REGION" || GCP_RC=$?
+    if [ "$GCP_RC" -eq "$GH_REGION_UNAVAILABLE" ]; then
+      echo "WARNING: gcp-${GCP_REGION} image refresh skipped — GitHub unreachable" >&2
+    elif [ "$GCP_RC" -ne 0 ]; then
+      exit "$GCP_RC"
+    fi
+  done
+fi
 
 # Start foreman last so respirate boots with the fully prepared AWS profile,
 # downloaded ~/.aws/config, registered locations, and a valid SSO session.
