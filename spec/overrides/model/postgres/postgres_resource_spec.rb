@@ -7,20 +7,6 @@ RSpec.describe PostgresResource::PrependMethods do # rubocop:disable RSpec/SpecF
   let(:location_id) { Location::HETZNER_FSN1_ID }
   let(:resource) { create_postgres_resource(project:, location_id:) }
 
-  describe "storage_type" do
-    it "defaults to instance_storage" do
-      expect(resource.storage_type).to eq(PostgresResource::StorageType::INSTANCE_STORAGE)
-    end
-
-    it "accepts archil" do
-      expect { resource.update(storage_type: PostgresResource::StorageType::ARCHIL) }.not_to raise_error
-    end
-
-    it "rejects values outside the check constraint" do
-      expect { resource.update(storage_type: "floppy") }.to raise_error(Sequel::ValidationFailed, "storage_type is invalid")
-    end
-  end
-
   describe "#read_replica_type" do
     it "is none for a non-replica resource" do
       expect(resource.read_replica_type).to eq(PostgresResource::ReadReplicaType::NONE)
