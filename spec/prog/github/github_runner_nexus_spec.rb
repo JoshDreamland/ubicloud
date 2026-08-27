@@ -421,6 +421,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
 
       it "waits if utilization is high, spill over enabled, and waited enough but spill vcpus limit exceeded" do
         expect(project).to receive(:quota_available?).with("GithubRunnerVCpu", 0).and_return(false)
+        expect(project).to receive(:quota_available?).with("GithubRunnerVCpuAws", 0).and_return(true)
         project.set_ff_spill_to_alien_runners(true)
         runner.update(created_at: now - 40)
         expect(Config).to receive(:github_runner_aws_spill_vcpu_capacity).and_return(10)
@@ -430,8 +431,19 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
         expect(runner.spill_over_set?).to be(false)
       end
 
+      it "waits if utilization is high, spill over enabled, and waited enough but customer's own alien quota is exceeded" do
+        expect(project).to receive(:quota_available?).with("GithubRunnerVCpu", 0).and_return(false)
+        expect(project).to receive(:quota_available?).with("GithubRunnerVCpuAws", 0).and_return(false)
+        project.set_ff_spill_to_alien_runners(true)
+        runner.update(created_at: now - 40)
+
+        expect { nx.wait_concurrency_limit }.to nap
+        expect(runner.spill_over_set?).to be(false)
+      end
+
       it "allocates if utilization is high but spill over enabled and waited enough" do
         expect(project).to receive(:quota_available?).with("GithubRunnerVCpu", 0).and_return(false)
+        expect(project).to receive(:quota_available?).with("GithubRunnerVCpuAws", 0).and_return(true)
         project.set_ff_spill_to_alien_runners(true)
         runner.update(created_at: now - 40)
 
@@ -442,6 +454,19 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
       it "allocates if standard utilization is low" do
         expect(project).to receive(:quota_available?).with("GithubRunnerVCpu", 0).and_return(false)
         VmHost[arch: "x64", family: "standard"].update(used_cores: 8)
+        expect { nx.wait_concurrency_limit }.to hop("allocate_vm")
+      end
+
+      it "waits if hugepage utilization is high although core utilization is low" do
+        expect(project).to receive(:quota_available?).with("GithubRunnerVCpu", 0).and_return(false)
+        VmHost.where(arch: "x64", family: "standard").update(used_cores: 8, used_hugepages_1g: 350)
+        expect { nx.wait_concurrency_limit }.to nap
+      end
+
+      it "ignores hosts that don't report their cores or hugepages yet" do
+        expect(project).to receive(:quota_available?).with("GithubRunnerVCpu", 0).and_return(false)
+        VmHost.where(arch: "x64", family: "standard").update(used_cores: 8)
+        create_vm_host(location_id: Location::GITHUB_RUNNERS_ID, arch: "x64", family: "standard", total_cores: 0, used_cores: 0, total_hugepages_1g: 0, used_hugepages_1g: 0)
         expect { nx.wait_concurrency_limit }.to hop("allocate_vm")
       end
 
@@ -481,6 +506,16 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
         runner.update(label: "ubicloud-standard-4-arm")
         VmHost[arch: "arm64"].update(used_cores: 8)
         expect { nx.wait_concurrency_limit }.to hop("allocate_vm")
+      end
+
+      it "checks the arm alien quota when spilling over an arm64 runner" do
+        expect(project).to receive(:quota_available?).with("GithubRunnerVCpuArm", 0).and_return(false)
+        expect(project).to receive(:quota_available?).with("GithubRunnerVCpuArmAws", 0).and_return(true)
+        runner.update(label: "ubicloud-standard-16-arm", created_at: now - 40)
+        project.set_ff_spill_to_alien_runners(true)
+
+        expect { nx.wait_concurrency_limit }.to hop("allocate_vm")
+        expect(runner.spill_over_set?).to be(true)
       end
     end
 
@@ -737,7 +772,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
       expect(client).to receive(:paginate)
         .and_yield({runners: [{name: runner.ubid.to_s, id: 123}]}, instance_double(Sawyer::Response, data: {runners: []}))
         .and_return({runners: [{name: runner.ubid.to_s, id: 123}]})
-      expect(vm.sshable).to receive(:_cmd).with("systemctl show -p SubState --value runner-script").and_return("dead")
+      expect(vm.sshable).to receive(:_cmd).with("sudo systemctl show -p SubState --value runner-script").and_return("dead")
       expect(client).to receive(:delete).with("/repos/#{runner.repository_name}/actions/runners/123")
       expect(Clog).to receive(:emit).with("Deregistering runner because it already exists", instance_of(Array)).and_call_original
       expect { nx.register_runner }.to nap(5)
@@ -750,7 +785,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
       expect(client).to receive(:paginate)
         .and_yield({runners: [{name: runner.ubid.to_s, id: 123}]}, instance_double(Sawyer::Response, data: {runners: []}))
         .and_return({runners: [{name: runner.ubid.to_s, id: 123}]})
-      expect(vm.sshable).to receive(:_cmd).with("systemctl show -p SubState --value runner-script").and_return("running")
+      expect(vm.sshable).to receive(:_cmd).with("sudo systemctl show -p SubState --value runner-script").and_return("running")
       expect { nx.register_runner }.to hop("wait")
       expect(runner.runner_id).to eq(123)
       expect(runner.ready_at).to eq(now)
@@ -941,7 +976,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
     it "does not destroy runner if it does not pick a job in five minutes, and busy" do
       runner.update(ready_at: now - 6 * 60, workflow_job: nil)
       expect(client).to receive(:get).and_return({busy: true})
-      expect(vm.sshable).to receive(:_cmd).with("systemctl show -p SubState --value runner-script").and_return("running")
+      expect(vm.sshable).to receive(:_cmd).with("sudo systemctl show -p SubState --value runner-script").and_return("running")
       expect(nx).not_to receive(:register_deadline).with(nil, 7200)
 
       expect { nx.wait }.to nap(60)
@@ -951,7 +986,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
     it "destroys runner if it does not pick a job in five minutes and not busy" do
       runner.update(ready_at: now - 6 * 60, workflow_job: nil)
       expect(client).to receive(:get).and_return({busy: false})
-      expect(vm.sshable).to receive(:_cmd).with("systemctl show -p SubState --value runner-script").and_return("running")
+      expect(vm.sshable).to receive(:_cmd).with("sudo systemctl show -p SubState --value runner-script").and_return("running")
       expect(nx).to receive(:register_deadline).twice
       expect(Clog).to receive(:emit).with("The runner did not pick a job", instance_of(GithubRunner)).and_call_original
 
@@ -962,7 +997,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
     it "destroys runner if it does not pick a job in five minutes and already deleted" do
       runner.update(ready_at: now - 6 * 60, workflow_job: nil)
       expect(client).to receive(:get).and_raise(Octokit::NotFound)
-      expect(vm.sshable).to receive(:_cmd).with("systemctl show -p SubState --value runner-script").and_return("running")
+      expect(vm.sshable).to receive(:_cmd).with("sudo systemctl show -p SubState --value runner-script").and_return("running")
       expect(nx).to receive(:register_deadline).twice
       expect(Clog).to receive(:emit).with("The runner did not pick a job", instance_of(GithubRunner)).and_call_original
 
@@ -972,21 +1007,21 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
 
     it "does not destroy runner if it doesn not pick a job but two minutes not pass yet" do
       runner.update(ready_at: now - 60, workflow_job: nil)
-      expect(vm.sshable).to receive(:_cmd).with("systemctl show -p SubState --value runner-script").and_return("running")
+      expect(vm.sshable).to receive(:_cmd).with("sudo systemctl show -p SubState --value runner-script").and_return("running")
 
       expect { nx.wait }.to nap(60)
       expect(runner.destroy_set?).to be(false)
     end
 
     it "destroys the runner if the runner-script is succeeded" do
-      expect(vm.sshable).to receive(:_cmd).with("systemctl show -p SubState --value runner-script").and_return("exited")
+      expect(vm.sshable).to receive(:_cmd).with("sudo systemctl show -p SubState --value runner-script").and_return("exited")
 
       expect { nx.wait }.to nap(15)
       expect(runner.destroy_set?).to be(true)
     end
 
     it "provisions a spare runner and destroys the current one if the runner-script is failed" do
-      expect(vm.sshable).to receive(:_cmd).with("systemctl show -p SubState --value runner-script").and_return("failed")
+      expect(vm.sshable).to receive(:_cmd).with("sudo systemctl show -p SubState --value runner-script").and_return("failed")
       expect(runner).to receive(:provision_spare_runner)
 
       expect { nx.wait }.to nap(0)
@@ -994,7 +1029,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
     end
 
     it "naps if the runner-script is running" do
-      expect(vm.sshable).to receive(:_cmd).with("systemctl show -p SubState --value runner-script").and_return("running")
+      expect(vm.sshable).to receive(:_cmd).with("sudo systemctl show -p SubState --value runner-script").and_return("running")
 
       expect { nx.wait }.to nap(60)
     end

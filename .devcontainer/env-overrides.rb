@@ -1,4 +1,4 @@
-ENV["POSTGRES_SERVICE_PROJECT_ID"] = "6cd8de39-9beb-86d2-b7d2-580f446ce00a"
+ENV["POSTGRES_SERVICE_PROJECT_ID"] = "3fa904f0-e4dc-86d2-a919-f8b0a326206f"
 ENV["ENABLE_FAILURE_INJECTION"] = "true"
 ENV["ALLOW_WEB_SSH"] = "true"
 # TODO(andrey.chudnovskiy): Enable when the first override is added

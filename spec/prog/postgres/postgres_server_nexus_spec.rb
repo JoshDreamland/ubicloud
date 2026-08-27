@@ -724,7 +724,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       )
       expect(sshable).to receive(:_cmd).with("sudo tee /etc/systemd/system/pg-collect-metrics.timer > /dev/null", stdin: anything)
       expect(sshable).to receive(:_cmd).with("sudo systemctl daemon-reload")
-      expect(sshable).to receive(:_cmd).with("sudo rm -f /tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock /var/lib/node_exporter/pg_metrics.prom.tmp")
+      expect(sshable).to receive(:_cmd).with("sudo rm -f /tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock /var/lib/node_exporter/pg_metrics.prom.tmp.lock /var/lib/node_exporter/pg_metrics.prom.tmp")
 
       expect(sshable).to receive(:_cmd).with("sudo systemctl enable --now postgres_exporter")
       expect(sshable).to receive(:_cmd).with("sudo systemctl enable --now node_exporter")
@@ -758,7 +758,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       expect(sshable).to receive(:_cmd).with("sudo tee /etc/systemd/system/pg-collect-metrics.service > /dev/null", stdin: anything)
       expect(sshable).to receive(:_cmd).with("sudo tee /etc/systemd/system/pg-collect-metrics.timer > /dev/null", stdin: anything)
       expect(sshable).to receive(:_cmd).with("sudo systemctl daemon-reload")
-      expect(sshable).to receive(:_cmd).with("sudo rm -f /tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock /var/lib/node_exporter/pg_metrics.prom.tmp")
+      expect(sshable).to receive(:_cmd).with("sudo rm -f /tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock /var/lib/node_exporter/pg_metrics.prom.tmp.lock /var/lib/node_exporter/pg_metrics.prom.tmp")
 
       expect(sshable).to receive(:_cmd).with("sudo systemctl enable --now postgres_exporter")
       expect(sshable).to receive(:_cmd).with("sudo systemctl enable --now node_exporter")
@@ -802,7 +802,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       expect(sshable).to receive(:_cmd).with("sudo tee /etc/systemd/system/pg-collect-metrics.service > /dev/null", stdin: anything)
       expect(sshable).to receive(:_cmd).with("sudo tee /etc/systemd/system/pg-collect-metrics.timer > /dev/null", stdin: anything)
       expect(sshable).to receive(:_cmd).with("sudo systemctl daemon-reload")
-      expect(sshable).to receive(:_cmd).with("sudo rm -f /tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock /var/lib/node_exporter/pg_metrics.prom.tmp")
+      expect(sshable).to receive(:_cmd).with("sudo rm -f /tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock /var/lib/node_exporter/pg_metrics.prom.tmp.lock /var/lib/node_exporter/pg_metrics.prom.tmp")
 
       expect(sshable).to receive(:_cmd).with("sudo systemctl enable --now postgres_exporter")
       expect(sshable).to receive(:_cmd).with("sudo systemctl enable --now node_exporter")
@@ -843,7 +843,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       expect(standby_sshable).to receive(:_cmd).with("sudo tee /etc/systemd/system/pg-collect-metrics.service > /dev/null", stdin: anything)
       expect(standby_sshable).to receive(:_cmd).with("sudo tee /etc/systemd/system/pg-collect-metrics.timer > /dev/null", stdin: anything)
       expect(standby_sshable).to receive(:_cmd).with("sudo systemctl daemon-reload")
-      expect(standby_sshable).to receive(:_cmd).with("sudo rm -f /tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock /var/lib/node_exporter/pg_metrics.prom.tmp")
+      expect(standby_sshable).to receive(:_cmd).with("sudo rm -f /tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock /var/lib/node_exporter/pg_metrics.prom.tmp.lock /var/lib/node_exporter/pg_metrics.prom.tmp")
 
       expect(standby_sshable).to receive(:_cmd).with("sudo systemctl reload postgres_exporter || sudo systemctl restart postgres_exporter")
       expect(standby_sshable).to receive(:_cmd).with("sudo systemctl reload node_exporter || sudo systemctl restart node_exporter")
@@ -876,7 +876,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       expect(standby_sshable).to receive(:_cmd).with("sudo tee /etc/systemd/system/pg-collect-metrics.service > /dev/null", stdin: anything)
       expect(standby_sshable).to receive(:_cmd).with("sudo tee /etc/systemd/system/pg-collect-metrics.timer > /dev/null", stdin: anything)
       expect(standby_sshable).to receive(:_cmd).with("sudo systemctl daemon-reload")
-      expect(standby_sshable).to receive(:_cmd).with("sudo rm -f /tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock /var/lib/node_exporter/pg_metrics.prom.tmp")
+      expect(standby_sshable).to receive(:_cmd).with("sudo rm -f /tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock /var/lib/node_exporter/pg_metrics.prom.tmp.lock /var/lib/node_exporter/pg_metrics.prom.tmp")
 
       expect(standby_sshable).to receive(:_cmd).with("sudo systemctl reload postgres_exporter || sudo systemctl restart postgres_exporter")
       expect(standby_sshable).to receive(:_cmd).with("sudo systemctl reload node_exporter || sudo systemctl restart node_exporter")
@@ -915,7 +915,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       expect(standby_sshable).to receive(:_cmd).with("sudo tee /etc/systemd/system/pg-collect-metrics.service > /dev/null", stdin: anything)
       expect(standby_sshable).to receive(:_cmd).with("sudo tee /etc/systemd/system/pg-collect-metrics.timer > /dev/null", stdin: anything)
       expect(standby_sshable).to receive(:_cmd).with("sudo systemctl daemon-reload")
-      expect(standby_sshable).to receive(:_cmd).with("sudo rm -f /tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock /var/lib/node_exporter/pg_metrics.prom.tmp")
+      expect(standby_sshable).to receive(:_cmd).with("sudo rm -f /tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock /var/lib/node_exporter/pg_metrics.prom.tmp.lock /var/lib/node_exporter/pg_metrics.prom.tmp")
 
       expect(standby_sshable).to receive(:_cmd).with("sudo systemctl reload postgres_exporter || sudo systemctl restart postgres_exporter")
       expect(standby_sshable).to receive(:_cmd).with("sudo systemctl reload node_exporter || sudo systemctl restart node_exporter")
@@ -925,7 +925,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       expect { standby_nx.configure_metrics }.to hop("wait")
     end
 
-    it "includes remote_write config when metric_destinations exist" do
+    it "labels the metrics with the resource and includes remote_write config when metric_destinations exist" do
       server
       PostgresMetricDestination.create(
         postgres_resource:,
@@ -970,7 +970,7 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
       expect(standby_sshable).to receive(:_cmd).with("sudo tee /etc/systemd/system/pg-collect-metrics.service > /dev/null", stdin: anything)
       expect(standby_sshable).to receive(:_cmd).with("sudo tee /etc/systemd/system/pg-collect-metrics.timer > /dev/null", stdin: anything)
       expect(standby_sshable).to receive(:_cmd).with("sudo systemctl daemon-reload")
-      expect(standby_sshable).to receive(:_cmd).with("sudo rm -f /tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock /var/lib/node_exporter/pg_metrics.prom.tmp")
+      expect(standby_sshable).to receive(:_cmd).with("sudo rm -f /tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock /var/lib/node_exporter/pg_metrics.prom.tmp.lock /var/lib/node_exporter/pg_metrics.prom.tmp")
 
       expect(standby_sshable).to receive(:_cmd).with("sudo systemctl reload postgres_exporter || sudo systemctl restart postgres_exporter")
       expect(standby_sshable).to receive(:_cmd).with("sudo systemctl reload node_exporter || sudo systemctl restart node_exporter")
@@ -979,7 +979,13 @@ RSpec.describe Prog::Postgres::PostgresServerNexus do
 
       expect { standby_nx.configure_metrics }.to hop("wait")
 
-      expect(YAML.safe_load(prometheus_config)["remote_write"].sort_by { it["url"] }).to eq([
+      config = YAML.safe_load(prometheus_config)
+      expect(config["global"]["external_labels"]).to eq(
+        "ubicloud_resource_id" => postgres_resource.ubid,
+        "ubicloud_resource_name" => postgres_resource.name,
+        "ubicloud_resource_role" => "standby",
+      )
+      expect(config["remote_write"].sort_by { it["url"] }).to eq([
         {"url" => "https://basic.example.com/write", "basic_auth" => {"username" => "metrics_user", "password" => "metrics_pass"}},
         {"url" => "https://bearer.example.com/write", "authorization" => {"type" => "Bearer", "credentials" => "my_token"}},
         {"url" => "https://headers.example.com/write", "headers" => {"X-Scope-OrgID" => "tenant1"}},

@@ -2115,6 +2115,19 @@ RSpec.describe PostgresServer do
       expect(labels.keys).not_to include("pg_tags_label_owner")
       expect(labels.keys).not_to include(include("-"))
     end
+
+    it "labels the exported metrics with the location and tags" do
+      resource.update(tags: [{"key" => "chc_env", "value" => "prod"}])
+
+      expect(postgres_server.metrics_config[:additional_labels]).to eq({"pg_tags_label_chc_env" => "prod"}.merge(
+        location_id: location.ubid,
+        location_name: "us-west-2",
+        location_provider: "ubicloud",
+        location_display_name: "us-west-2",
+        vm_size: "standard-2",
+        target_standby_count: 0,
+      ))
+    end
   end
 
   describe "#logs_config" do
