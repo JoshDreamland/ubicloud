@@ -189,6 +189,14 @@ class PostgresResource < Sequel::Model
     )
   end
 
+  def self.storage_billing_family(flavor, storage_type, network_volume_type)
+    (storage_type == StorageType::NETWORK_CACHE) ? "#{flavor}-network-cache-#{network_volume_type}" : flavor
+  end
+
+  def storage_billing_family
+    self.class.storage_billing_family(flavor, storage_type, network_volume_type)
+  end
+
   def target_standby_count
     Option::POSTGRES_HA_OPTIONS[ha_type].standby_count
   end
@@ -709,6 +717,20 @@ class PostgresResource < Sequel::Model
     options.serialize
   end
 
+  # WAL partition sizes an nvme wal_drive_type can carve from the shape's
+  # local NVMe, keeping at least half for the cache
+  def self.wal_drive_size_options(location, size)
+    size_option = Option::POSTGRES_SIZE_OPTIONS.fetch(size)
+    nvme_gib = storage_sizes(location, size_option.family, size_option.vcpu_count).max
+    Option::POSTGRES_WAL_DRIVE_SIZE_OPTIONS.select { it * 2 <= nvme_gib }
+  end
+
+  # Sized to WAL demand but capped by shape's local NVMe so derived defaults
+  # stay provisionable; nil when no option fits
+  def self.default_wal_drive_size_gib(location, size, target_storage_size_gib)
+    wal_drive_size_options(location, size).select { it <= [target_storage_size_gib / 8, 32].max }.max
+  end
+
   def setup_log_aggregation
     # Setup only needs to happen if there's a Parseable resource present in the
     # PG service project.
@@ -737,6 +759,47 @@ class PostgresResource < Sequel::Model
 
   def self.ha_type_none
     HaType::NONE
+  end
+
+  module StorageType
+    INSTANCE_STORAGE = "instance_storage"
+    NETWORK_CACHE = "network_cache"
+  end
+
+  def self.default_storage_type
+    StorageType::INSTANCE_STORAGE
+  end
+
+  def self.storage_type_network_cache
+    StorageType::NETWORK_CACHE
+  end
+
+  # values double as provider disk type identifiers (EBS volume_type, GCE
+  # diskTypes name)
+  # The volume types themselves belong to the storage layer; this module only
+  # adds the option-tree placeholder for instance_storage.
+  module NetworkVolumeType
+    GP3 = VmStorageVolume::VolumeType::GP3
+    IO2 = VmStorageVolume::VolumeType::IO2
+    HYPERDISK_BALANCED = VmStorageVolume::VolumeType::HYPERDISK_BALANCED
+    # option-tree/params placeholder for instance_storage, never persisted
+    # (column check allows NULL)
+    NONE = "none"
+  end
+
+  def self.network_volume_type_none
+    NetworkVolumeType::NONE
+  end
+
+  module WalDriveType
+    NVME = "nvme"
+    GP3 = "gp3"
+    IO2 = "io2"
+    HYPERDISK_BALANCED = "hyperdisk-balanced"
+  end
+
+  def self.wal_drive_type_nvme
+    WalDriveType::NVME
   end
 
   module Flavor
