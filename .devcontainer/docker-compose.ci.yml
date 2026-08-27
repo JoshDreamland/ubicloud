@@ -1,10 +1,16 @@
 # CI override for docker-compose.yml.
 # Uses pre-built image (from Depot cache) and passes AWS OIDC credentials
 # and GitHub token from the runner environment into the app container.
+#
+# GCP is off here: the runner has no Application Default Credentials, and GCP
+# provisioning is not stable enough yet to gate an E2E run on. The E2E workflow
+# also passes --no-gcp to prepare-pg-ubicloud.sh; this covers anything else that
+# reads the environment, including the GCP entries in env-overrides.rb.
 services:
   app:
     image: ${DEVCONTAINER_IMAGE:-ubicloud-devcontainer:latest}
     environment:
+      - ENABLE_GCP=false
       - AWS_ACCESS_KEY_ID
       - AWS_SECRET_ACCESS_KEY
       - AWS_SESSION_TOKEN

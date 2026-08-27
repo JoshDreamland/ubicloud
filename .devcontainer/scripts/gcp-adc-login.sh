@@ -20,6 +20,14 @@ echo "=== GCP Application Default Credentials ==="
 # what the googleauth gem reads.
 if gcloud auth application-default print-access-token > /dev/null 2>&1; then
   echo "ADC already present"
+elif [ ! -t 0 ]; then
+  # --no-launch-browser waits on a pasted verification code, which nothing will
+  # ever type here, so a non-interactive caller would block until its job times
+  # out. Say what to do instead of hanging.
+  echo "ERROR: no Application Default Credentials and no terminal to log in from." >&2
+  echo "Run '$0' from an interactive shell, or skip GCP entirely with" >&2
+  echo "'prepare-pg-ubicloud.sh --no-gcp' (or ENABLE_GCP=false)." >&2
+  exit 1
 else
   # No browser in the container, so this prints a URL to paste.
   gcloud auth application-default login --no-launch-browser

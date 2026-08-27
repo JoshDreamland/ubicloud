@@ -2,17 +2,26 @@
 # Prepares the Ubicloud environment for PostgreSQL development.
 # Authenticates with GitHub, fetches latest AMIs, and updates the database.
 #
-# Usage: .devcontainer/prepare-pg-ubicloud.sh [--region us-west-2] [--gcp-region us-east4]
+# Usage: .devcontainer/prepare-pg-ubicloud.sh [--region us-west-2]
+#                                             [--gcp-region us-east4] [--gcp | --no-gcp]
 #   --region:     AWS region(s) to update (default: us-west-2). Can be specified multiple times.
-#   --gcp-region: GCP region(s) to register. Repeatable, defaults to us-east4.
-#                 Registering GCP needs ADC, so this script now always runs the
-#                 gcloud login check; pass --gcp-region to add regions.
+#   --gcp-region: GCP region(s) to register. Repeatable, implies --gcp, defaults to us-east4.
+#   --gcp:        register GCP even if ENABLE_GCP says otherwise.
+#   --no-gcp:     skip GCP entirely — no ADC login, no GCP location, no GCE images.
+#
+# GCP is on by default and can be turned off with --no-gcp or by setting
+# ENABLE_GCP=false in the environment. CI uses both: the ADC login below is
+# interactive on a machine without credentials, and GCP provisioning is not yet
+# stable enough to gate an E2E run on. The last of --gcp/--no-gcp/--gcp-region
+# on the command line wins.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REGIONS=()
 GCP_REGIONS=()
+GCP_DEFAULT_REGION="us-east4"
+GCP_ENABLED_ARG=""
 
 : "${AWS_ASSUME_ROLE:?AWS_ASSUME_ROLE is not set. Ensure it is defined in docker-compose.yml or exported in your shell.}"
 
@@ -25,11 +34,20 @@ while [[ $# -gt 0 ]]; do
       ;;
     --gcp-region)
       GCP_REGIONS+=("$2")
+      GCP_ENABLED_ARG=1
       shift 2
+      ;;
+    --gcp)
+      GCP_ENABLED_ARG=1
+      shift
+      ;;
+    --no-gcp)
+      GCP_ENABLED_ARG=0
+      shift
       ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "Usage: $0 [--region us-west-2] [--gcp-region us-east4]" >&2
+      echo "Usage: $0 [--region us-west-2] [--gcp-region us-east4] [--gcp | --no-gcp]" >&2
       exit 1
       ;;
   esac
@@ -40,9 +58,19 @@ if [ ${#REGIONS[@]} -eq 0 ]; then
   REGIONS=("us-west-2")
 fi
 
-# Default GCP to us-east4 if no regions specified
-if [ ${#GCP_REGIONS[@]} -eq 0 ]; then
-  GCP_REGIONS=("us-east4")
+# An explicit --gcp/--no-gcp beats ENABLE_GCP, which beats the on-by-default.
+if [ -n "$GCP_ENABLED_ARG" ]; then
+  GCP_ENABLED="$GCP_ENABLED_ARG"
+else
+  case "$(printf '%s' "${ENABLE_GCP:-true}" | tr '[:upper:]' '[:lower:]')" in
+    0 | false | no | off) GCP_ENABLED=0 ;;
+    *) GCP_ENABLED=1 ;;
+  esac
+fi
+
+# Default GCP to us-east4 if enabled and no regions specified
+if [ "$GCP_ENABLED" -eq 1 ] && [ ${#GCP_REGIONS[@]} -eq 0 ]; then
+  GCP_REGIONS=("$GCP_DEFAULT_REGION")
 fi
 
 # 0. Sync mise-managed tools (ruby/nodejs/golang/victoria-metrics) from
@@ -169,11 +197,15 @@ done
 
 "$SCRIPT_DIR/aws-sso-login.sh"
 
-# 6. Register GCP regions. GCP_REGIONS defaults to us-east4, so this runs on
-# every invocation and an ADC login is now part of the standard setup.
+# 6. Register GCP regions, unless disabled with --no-gcp / ENABLE_GCP=false.
+# GCP_REGIONS defaults to us-east4 when enabled, so an ADC login is part of the
+# standard local setup but never runs in an environment that opted out.
 # The image refresh here tolerates an unreachable GitHub the same way the AWS
 # region loop above does.
-if [ ${#GCP_REGIONS[@]} -gt 0 ]; then
+if [ "$GCP_ENABLED" -eq 0 ]; then
+  echo ""
+  echo "=== Skipping GCP (disabled via --no-gcp or ENABLE_GCP=${ENABLE_GCP:-}) ==="
+elif [ ${#GCP_REGIONS[@]} -gt 0 ]; then
   "$SCRIPT_DIR/gcp-adc-login.sh"
   for GCP_REGION in "${GCP_REGIONS[@]}"; do
     GCP_RC=0

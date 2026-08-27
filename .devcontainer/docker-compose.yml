@@ -15,6 +15,10 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - AWS_ASSUME_ROLE=arn:aws:iam::248825820370:role/clickgres-pg-test-local-access-via-pg-dev-admin
+      # Set ENABLE_GCP=false on the host to bring the container up without GCP:
+      # prepare-pg-ubicloud.sh then registers no GCP location and skips the ADC
+      # login, and env-overrides.rb leaves the GCP settings at their defaults.
+      - ENABLE_GCP=${ENABLE_GCP:-true}
       - GCP_PROJECT_ID=ch-pg-test
       - GCP_CELL_SERVICE_ACCOUNT=clickgres-cell-management@ch-pg-test.iam.gserviceaccount.com
       - PORT=3100

@@ -87,6 +87,9 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           mkdir -p ~/.aws/sso
+          # Bind-mounted by docker-compose.yml; pre-create it so Docker does not
+          # root-own it on the runner. It stays empty — GCP is disabled below.
+          mkdir -p ~/.config/gcloud
           docker compose \
             -f .devcontainer/docker-compose.yml \
             -f .devcontainer/docker-compose.ci.yml \
@@ -104,7 +107,7 @@ jobs:
             -f .devcontainer/docker-compose.yml \
             -f .devcontainer/docker-compose.ci.yml \
             exec -T app \
-            .devcontainer/scripts/prepare-pg-ubicloud.sh --region us-west-2 2>&1)
+            .devcontainer/scripts/prepare-pg-ubicloud.sh --region us-west-2 --no-gcp 2>&1)
           RC=$?
           set -e
           echo "$OUTPUT"
