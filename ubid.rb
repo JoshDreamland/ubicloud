@@ -116,6 +116,10 @@ class UBID
   TYPE_MACHINE_IMAGE_VERSION = "mv"
   TYPE_MACHINE_IMAGE_STORE = "m0"
   TYPE_POSTGRES_LOG_DESTINATION = "1d"
+  TYPE_POSTGRES_ARCHIL_DISK = "pk"
+  # Not "pd" (taken) or "pi"/"p1" ("i" is non-canonical base32 aliasing "1",
+  # and TYPE_PARSEABLE_RESOURCE holds "p1").
+  TYPE_POSTGRES_BRANCH_DISK = "dk"
   TYPE_RUN_COMMAND = "rc"
 
   # Common entropy-based type for everything else
