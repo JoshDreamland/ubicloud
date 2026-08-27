@@ -5,15 +5,18 @@
 #   wait_for_postgres_state.sh <name> <state> [timeout_seconds]
 #   wait_for_postgres_state.sh e2e-test running
 #   wait_for_postgres_state.sh e2e-test running 600
+#   PG_LOCATION=gcp-us-east4-cell-0 wait_for_postgres_state.sh gcp-first running 1800
 #
 # Exits 0 when the state is reached, 1 on timeout.
-# Uses "default" project and us-west-2-cell-0 location.
+# Uses the "default" project, and the us-west-2-cell-0 location unless
+# PG_LOCATION overrides it (GCP locations are named gcp-<region>-cell-0).
 
 set -e
 
 NAME="${1:?Usage: wait_for_postgres_state.sh <name> <state> [timeout_seconds]}"
 TARGET_STATE="${2:?Usage: wait_for_postgres_state.sh <name> <state> [timeout_seconds]}"
 TIMEOUT="${3:-600}"
+LOCATION="${PG_LOCATION:-us-west-2-cell-0}"
 INTERVAL=15
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -23,13 +26,13 @@ while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
   # For "deleted" state, check for 404
   if [ "$TARGET_STATE" = "deleted" ]; then
     HTTP_CODE=$("$SCRIPT_DIR/invoke_ubicloud_api_curl.sh" GET \
-      "/project/default/location/us-west-2-cell-0/postgres/$NAME" \
+      "/project/default/location/$LOCATION/postgres/$NAME" \
       -o /dev/null -w "%{http_code}")
     STATE="$HTTP_CODE"
     [ "$HTTP_CODE" = "404" ] && TARGET_STATE_LABEL="deleted (404)" && STATE="deleted"
   else
     STATE=$("$SCRIPT_DIR/invoke_ubicloud_api_curl.sh" GET \
-      "/project/default/location/us-west-2-cell-0/postgres/$NAME" | jq -r '.state')
+      "/project/default/location/$LOCATION/postgres/$NAME" | jq -r '.state')
   fi
 
   echo "$(date +%H:%M:%S) $NAME state=$STATE"

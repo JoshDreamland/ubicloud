@@ -11,6 +11,19 @@
 
     The script will login against GitHub and AWS.    
 
+    It also registers the GCP location `gcp-us-east4-cell-0`, which needs an
+    interactive `gcloud auth application-default login` the first time. To set up
+    an AWS-only onebox, skip GCP:
+
+    ```bash
+        .devcontainer/scripts/prepare-pg-ubicloud.sh --no-gcp
+    ```
+
+    `ENABLE_GCP=false` in the container environment does the same thing without a
+    flag, and additionally drops the GCP entries from `env-overrides.rb`. The E2E
+    CI workflow sets both, because GCP provisioning is not stable enough yet to
+    gate a run on.
+
 1. Follow foreman logs
 
     Foreman is started automatically by the prepare script.
