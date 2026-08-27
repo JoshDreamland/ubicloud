@@ -7,6 +7,9 @@ RSpec.describe Prog::RolloutRhizome do
 
   let(:st) {
     vm_hosts
+    [fsn1_host, wdc2_host].each_with_index do |h, i|
+      Address.create(cidr: "1.#{i + 1}.1.0/30", routed_to_host_id: h.id).populate_ipv4_addresses
+    end
     described_class.assemble(vm_project_id: project_id)
   }
   let(:project_id) { Project.create(name: "RolloutRhizomeTest").id }
@@ -41,6 +44,8 @@ RSpec.describe Prog::RolloutRhizome do
       expect(frame["vm_project_id"]).to eq(project_id)
       expect(frame["initial_host_ids"]).to eq([fsn1_host.id, wdc2_host.id])
       expect(frame["completed"]).to eq([])
+      expect(frame["auto_exit"]).to be false
+      expect(frame["started_by"]).to be_nil
 
       remaining_host_ids = frame["remaining_host_ids"]
       expect(remaining_host_ids).to include(hel1_host.id)
@@ -50,9 +55,39 @@ RSpec.describe Prog::RolloutRhizome do
       expect(ghr_hosts.map(&:id).sort!).to eq((frame["initial_github_runner_host_ids"] << remaining_host_ids.first).sort!)
     end
 
-    it "respects Config.rollouts_project_id" do
+    it "skips an initial location whose host has no available IPv4 address" do
+      fsn1_host
+      Address.create(cidr: "1.1.1.0/30", routed_to_host_id: wdc2_host.id).populate_ipv4_addresses
+      st = described_class.assemble(vm_project_id: project_id)
+
+      expect(st.stack.first["initial_host_ids"]).to eq([wdc2_host.id])
+    end
+
+    it "skips an initial host whose IPv4 pool is fully assigned" do
+      vm = create_vm
+      fsn1_address = Address.create(cidr: "1.1.1.0/30", routed_to_host_id: fsn1_host.id)
+      fsn1_address.populate_ipv4_addresses
+      fsn1_address.cidr.len.times do |i|
+        AssignedVmAddress.create(dst_vm_id: vm.id, ip: fsn1_address.cidr.nth(i).to_s, address_id: fsn1_address.id)
+      end
+      Address.create(cidr: "2.1.1.0/30", routed_to_host_id: wdc2_host.id).populate_ipv4_addresses
+      st = described_class.assemble(vm_project_id: project_id)
+
+      expect(st.stack.first["initial_host_ids"]).to eq([wdc2_host.id])
+    end
+
+    it "skips an initial host without enough free hugepages for the rollout VM" do
+      fsn1_host.update(total_hugepages_1g: 8, used_hugepages_1g: 8)
+      Address.create(cidr: "1.1.1.0/30", routed_to_host_id: fsn1_host.id).populate_ipv4_addresses
+      Address.create(cidr: "2.1.1.0/30", routed_to_host_id: wdc2_host.id).populate_ipv4_addresses
+      st = described_class.assemble(vm_project_id: project_id)
+
+      expect(st.stack.first["initial_host_ids"]).to eq([wdc2_host.id])
+    end
+
+    it "respects Config.rollouts_project_id and auto_exit and started_by argument" do
       expect(Config).to receive(:rollouts_project_id).and_return(project_id)
-      st = described_class.assemble
+      st = described_class.assemble(auto_exit: true, started_by: "admin")
       expect(st.label).to eq("start")
       expect(st.prog).to eq("RolloutRhizome")
 
@@ -62,6 +97,8 @@ RSpec.describe Prog::RolloutRhizome do
       expect(frame["initial_github_runner_host_ids"]).to eq([])
       expect(frame["remaining_host_ids"]).to eq([])
       expect(frame["completed"]).to eq([])
+      expect(frame["auto_exit"]).to be true
+      expect(frame["started_by"]).to eq "admin"
     end
   end
 
@@ -252,6 +289,11 @@ RSpec.describe Prog::RolloutRhizome do
   describe "#destroy" do
     it "exits if destroy semaphore is set" do
       nx.incr_destroy
+      expect { nx.destroy }.to exit("msg" => "rollout completed")
+    end
+
+    it "exits if auto_exit is set" do
+      refresh_frame(nx, new_values: {"auto_exit" => true})
       expect { nx.destroy }.to exit("msg" => "rollout completed")
     end
 

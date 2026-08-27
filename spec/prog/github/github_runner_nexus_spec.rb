@@ -15,7 +15,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
     installation_id = GithubInstallation.create(installation_id: 123, project_id: customer_project.id, name: "ubicloud", type: "Organization", created_at: now - 8 * 24 * 60 * 60).id
     vm_id = create_vm(location_id: Location::GITHUB_RUNNERS_ID, project_id: runner_project.id, boot_image: "github-ubuntu-2204").id
     Sshable.create_with_id(vm_id)
-    runner = GithubRunner.create(installation_id:, vm_id:, repository_name: "test-repo", label: "ubicloud-standard-4", actual_label: "ubicloud-standard-4", created_at: now, allocated_at: now + 10, ready_at: now + 20, runner_id: 123, workflow_job: {"id" => 123})
+    runner = GithubRunner.create(installation_id:, vm_id:, location_id: Location::GITHUB_RUNNERS_ID, repository_name: "test-repo", label: "ubicloud-standard-4", actual_label: "ubicloud-standard-4", created_at: now, allocated_at: now + 10, ready_at: now + 20, runner_id: 123, workflow_job: {"id" => 123})
     Strand.create_with_id(runner, prog: "Github::GithubRunnerNexus", label: "start")
     runner
   end
@@ -111,6 +111,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
       expect(vm.id).not_to eq(picked_vm.id)
       expect(picked_vm.pool_id).to be_nil
       expect(picked_vm.vm_storage_volumes.first.track_written).to be(false)
+      expect(picked_vm.strand.stack.first["waiting_strand_id"]).to eq(runner.id)
     end
 
     it "uses alien vms by given ratio" do
@@ -595,20 +596,16 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
       expect(Clog).to receive(:emit).with("runner_allocated", instance_of(Hash)).and_call_original
       expect { nx.allocate_vm }.to hop("wait_vm")
       expect(runner.vm_id).to eq(picked_vm.id)
+      expect(runner.location_id).to eq(picked_vm.location_id)
       expect(runner.allocated_at).to eq(now)
       expect(picked_vm.name).to eq(runner.ubid)
     end
   end
 
   describe "#wait_vm" do
-    it "naps 10 seconds if vm is not allocated yet" do
-      vm.update(allocated_at: nil)
+    it "naps until the vm prog schedules it if the vm is not provisioned yet" do
+      vm.update(provisioned_at: nil)
       expect { nx.wait_vm }.to nap(10)
-    end
-
-    it "naps a second if vm is allocated but not provisioned yet" do
-      vm.update(allocated_at: now)
-      expect { nx.wait_vm }.to nap(1)
     end
 
     it "hops if vm is ready" do
@@ -1296,7 +1293,7 @@ RSpec.describe Prog::Github::GithubRunnerNexus do
     end
 
     it "does not destroy vm if it's already destroyed" do
-      runner.update(vm_id: nil)
+      runner.update(vm_id: nil, location_id: nil)
       expect(nx).to receive(:vm).and_return(nil).at_least(:once)
       expect(nx).to receive(:decr_destroy)
       expect(client).to receive(:get).and_raise(Octokit::NotFound)

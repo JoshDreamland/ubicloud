@@ -178,6 +178,7 @@ RSpec.describe Prog::Kubernetes::KubernetesClusterNexus do
       expect(nx.sync_worker_mesh_set?).to be true
       expect(nx.sync_internal_dns_config_set?).to be true
       expect(nx.install_csi_set?).to be true
+      expect(nx.sync_csi_config_set?).to be true
       expect(nx.sync_kubeconfig_set?).to be true
       expect(KubernetesEtcdBackup.first.kubernetes_cluster_id).to eq(kubernetes_cluster.id)
     end
@@ -507,6 +508,11 @@ RSpec.describe Prog::Kubernetes::KubernetesClusterNexus do
       expect { nx.wait }.to hop("install_csi")
     end
 
+    it "hops to sync_csi_config when its semaphore is set" do
+      nx.incr_sync_csi_config
+      expect { nx.wait }.to hop("sync_csi_config")
+    end
+
     it "hops to sync_internal_dns_config when its semaphore is set" do
       nx.incr_sync_internal_dns_config
       expect { nx.wait }.to hop("sync_internal_dns_config")
@@ -768,6 +774,96 @@ RSpec.describe Prog::Kubernetes::KubernetesClusterNexus do
     end
   end
 
+  describe "#sync_csi_config" do
+    let(:client) { Kubernetes::Client.new(kubernetes_cluster, session) }
+    let(:rendered_config_map) {
+      <<~YAML
+        ---
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ubicsi-config
+          namespace: ubicsi
+        data:
+          EXTERNAL_ENDPOINTS: ipv4.google.com:443
+          DISK_LIMIT_GB: '50'
+          RESERVE_PERCENT: '20'
+      YAML
+    }
+
+    before do
+      kubernetes_cluster.update(csi_config: {"DISK_LIMIT_GB" => "50"})
+      expect(kubernetes_cluster).to receive(:client).and_return(client)
+    end
+
+    def stub_live_config_map(output)
+      response = Net::SSH::Connection::Session::StringWithExitstatus.new(output, 0)
+      expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s -n ubicsi get cm ubicsi-config -ojson --ignore-not-found").and_return(response)
+    end
+
+    def expect_config_map_applied
+      response = Net::SSH::Connection::Session::StringWithExitstatus.new("configmap/ubicsi-config configured", 0)
+      expect(session).to receive(:_exec!).with("printf '%s' #{rendered_config_map.shellescape} | sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s apply -f -").and_return(response)
+    end
+
+    it "creates the config map when the cluster does not have one" do
+      stub_live_config_map("")
+      expect_config_map_applied
+
+      expect { nx.sync_csi_config }.to hop("restart_csi_workloads")
+      expect(nx.changed_csi_config_keys).to eq ["EXTERNAL_ENDPOINTS", "DISK_LIMIT_GB", "RESERVE_PERCENT"]
+      expect(kubernetes_cluster.sync_csi_config_set?).to be false
+    end
+
+    it "records only the keys whose value changed" do
+      stub_live_config_map(JSON.generate({"data" => {"EXTERNAL_ENDPOINTS" => "ipv4.google.com:443", "DISK_LIMIT_GB" => "10", "RESERVE_PERCENT" => "20"}}))
+      expect_config_map_applied
+
+      expect { nx.sync_csi_config }.to hop("restart_csi_workloads")
+      expect(nx.changed_csi_config_keys).to eq ["DISK_LIMIT_GB"]
+    end
+
+    it "leaves the config map alone when it already matches" do
+      stub_live_config_map(JSON.generate({"data" => kubernetes_cluster.rendered_csi_config}))
+
+      expect { nx.sync_csi_config }.to hop("wait")
+    end
+  end
+
+  describe "#restart_csi_workloads" do
+    let(:client) { Kubernetes::Client.new(kubernetes_cluster, session) }
+
+    before { expect(kubernetes_cluster).to receive(:client).and_return(client) }
+
+    def expect_rollout_restart(resource)
+      response = Net::SSH::Connection::Session::StringWithExitstatus.new("#{resource} restarted", 0)
+      expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s -n ubicsi rollout restart #{resource}").and_return(response)
+    end
+
+    it "restarts both workloads when keys for both changed" do
+      nx.changed_csi_config_keys = ["EXTERNAL_ENDPOINTS", "DISK_LIMIT_GB"]
+      expect_rollout_restart("daemonset/ubicsi-nodeplugin")
+      expect_rollout_restart("deployment/ubicsi-provisioner")
+
+      expect { nx.restart_csi_workloads }.to hop("wait")
+      expect(nx.changed_csi_config_keys).to be_nil
+    end
+
+    it "restarts only the provisioner when a provisioner key changed" do
+      nx.changed_csi_config_keys = ["RESERVE_PERCENT"]
+      expect_rollout_restart("deployment/ubicsi-provisioner")
+
+      expect { nx.restart_csi_workloads }.to hop("wait")
+    end
+
+    it "restarts only the nodeplugin when a nodeplugin key changed" do
+      nx.changed_csi_config_keys = ["EXTERNAL_ENDPOINTS"]
+      expect_rollout_restart("daemonset/ubicsi-nodeplugin")
+
+      expect { nx.restart_csi_workloads }.to hop("wait")
+    end
+  end
+
   describe "#sync_kubeconfig" do
     it "generates the kubeconfig and stores it base64-encoded" do
       sshable = kubernetes_cluster.cp_vms.first.sshable
@@ -895,7 +991,8 @@ RSpec.describe Prog::Kubernetes::KubernetesClusterNexus do
 
       response = Net::SSH::Connection::Session::StringWithExitstatus.new(get_cm, 0)
       expect(session).to receive(:_exec!).with("sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s -n kube-system get cm coredns -oyaml").and_return(response)
-      expect(sshable).to receive(:_cmd).with("sudo kubectl --kubeconfig /etc/kubernetes/admin.conf replace -f -", stdin: replace_cm)
+      replace_response = Net::SSH::Connection::Session::StringWithExitstatus.new("configmap/coredns replaced", 0)
+      expect(session).to receive(:_exec!).with("printf '%s' #{replace_cm.shellescape} | sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=30s replace -f -").and_return(replace_response)
       expect { nx.sync_internal_dns_config }.to hop("wait")
     end
 

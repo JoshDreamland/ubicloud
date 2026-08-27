@@ -4,6 +4,7 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
   subject_is :kubernetes_cluster
 
   frame_reader :machine_image_version_id
+  frame_accessor :changed_csi_config_keys
 
   def self.assemble(name:, project_id:, location_id:, version: Option.selectable_kubernetes_versions.first, cp_node_count: 3, target_node_size: "standard-2", target_node_storage_size_gib: nil, machine_image_version_id: nil)
     DB.transaction do
@@ -71,6 +72,7 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
     incr_install_prometheus_rbac
     incr_sync_worker_mesh
     incr_install_csi
+    incr_sync_csi_config
     incr_sync_internal_dns_config
     incr_sync_kubeconfig
     hop_create_load_balancers
@@ -223,6 +225,10 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
       hop_install_csi
     end
 
+    when_sync_csi_config_set? do
+      hop_sync_csi_config
+    end
+
     when_install_prometheus_rbac_set? do
       hop_install_prometheus_rbac
     end
@@ -348,6 +354,43 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
     hop_wait
   end
 
+  label def sync_csi_config
+    decr_sync_csi_config
+
+    client = kubernetes_cluster.client
+    desired = kubernetes_cluster.rendered_csi_config
+    live = client.kubectl("-n ubicsi get cm ubicsi-config -ojson --ignore-not-found")
+    live_data = live.empty? ? {}.freeze : JSON.parse(live).fetch("data", {}.freeze)
+    hop_wait if live_data == desired
+
+    config_map = {
+      "apiVersion" => "v1",
+      "kind" => "ConfigMap",
+      "metadata" => {"name" => "ubicsi-config", "namespace" => "ubicsi"},
+      "data" => desired,
+    }
+    client.kubectl("apply -f -", stdin: YAML.dump(config_map))
+
+    self.changed_csi_config_keys = desired.keys.reject { live_data[it] == desired[it] }
+    hop_restart_csi_workloads
+  end
+
+  label def restart_csi_workloads
+    client = kubernetes_cluster.client
+    workloads = changed_csi_config_keys.map { Validation::CsiConfigValidator.workload(it) }
+
+    if workloads.include?(:nodeplugin)
+      client.kubectl("-n ubicsi rollout restart daemonset/ubicsi-nodeplugin")
+    end
+
+    if workloads.include?(:provisioner)
+      client.kubectl("-n ubicsi rollout restart deployment/ubicsi-provisioner")
+    end
+
+    self.changed_csi_config_keys = nil
+    hop_wait
+  end
+
   label def sync_kubeconfig
     decr_sync_kubeconfig
     kubernetes_cluster.update(kubeconfig: kubernetes_cluster.generate_kubeconfig)
@@ -361,7 +404,8 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
 
     dns_records = kubernetes_cluster.all_functional_nodes.flat_map { |n| ["#{n.vm.ip4} #{n.name}", "#{n.vm.ip6} #{n.name}"] }
 
-    coredns_configmap = YAML.load(kubernetes_cluster.client.kubectl("-n kube-system get cm coredns -oyaml"))
+    client = kubernetes_cluster.client
+    coredns_configmap = YAML.load(client.kubectl("-n kube-system get cm coredns -oyaml"))
     unless (corefile = coredns_configmap.dig("data", "Corefile"))
       # Customers may have deleted this entry or have custom tunings.
       # We will ignore such cases and return early.
@@ -401,7 +445,7 @@ class Prog::Kubernetes::KubernetesClusterNexus < Prog::Base
     new_lines = lines[0...kubernetes_block_end + 1] + hosts_lines.split("\n") + lines[kubernetes_block_end + 1..]
     new_corefile = new_lines.join("\n")
     coredns_configmap["data"]["Corefile"] = new_corefile
-    kubernetes_cluster.sshable.cmd("sudo kubectl --kubeconfig /etc/kubernetes/admin.conf replace -f -", stdin: YAML.dump(coredns_configmap))
+    client.kubectl("replace -f -", stdin: YAML.dump(coredns_configmap))
 
     hop_wait
   end

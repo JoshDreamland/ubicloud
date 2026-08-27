@@ -2,19 +2,32 @@
 
 class Prog::RolloutRhizome < Prog::Base
   semaphore :pause, :github_runners_work, :destroy
-  frame_reader :vm_project_id, :initial_host_ids, :initial_github_runner_host_ids
+  frame_reader :vm_project_id, :initial_host_ids, :initial_github_runner_host_ids, :auto_exit
   frame_accessor :next_runner_time, :remaining_host_ids, :completed, :monitor_github_runners_until,
     :initial_vm_ids, :initial_vms_keypair
 
-  def self.assemble(vm_project_id: Config.rollouts_project_id)
+  def self.assemble(vm_project_id: Config.rollouts_project_id, auto_exit: false, started_by: nil)
     vm_host_ds = VmHost
       .order(Sequel.function(:random))
       .where(allocation_state: "accepting")
       .where { total_cores >= used_cores + 4 }
 
+    vm_memory_gib = Option::VmSizes.find { it.name == Prog::Vm::Nexus::DEFAULT_SIZE && it.arch == "x64" }.memory_gib
+
+    initial_vm_host_ds = vm_host_ds
+      .where { total_hugepages_1g >= used_hugepages_1g + vm_memory_gib }
+      .where(
+        DB[:ipv4_address]
+          .left_join(:assigned_vm_address, [:ip])
+          .join(:address, [:cidr])
+          .where(Sequel[:assigned_vm_address][:ip] => nil)
+          .where(Sequel[:address][:routed_to_host_id] => Sequel[:vm_host][:id])
+          .exists,
+      )
+
     initial_host_ids = [
-      vm_host_ds.where(location_id: Location::HETZNER_FSN1_ID).get(:id),
-      vm_host_ds.where(location_id: Location::LEASEWEB_WDC02_ID).get(:id),
+      initial_vm_host_ds.where(location_id: Location::HETZNER_FSN1_ID).get(:id),
+      initial_vm_host_ds.where(location_id: Location::LEASEWEB_WDC02_ID).get(:id),
     ]
     initial_host_ids.compact!
 
@@ -52,6 +65,8 @@ class Prog::RolloutRhizome < Prog::Base
         "initial_github_runner_host_ids" => initial_github_runner_host_ids,
         "remaining_host_ids" => remaining_host_ids,
         "completed" => [],
+        "auto_exit" => auto_exit,
+        "started_by" => started_by,
       }],
     )
   end
@@ -165,9 +180,7 @@ class Prog::RolloutRhizome < Prog::Base
   end
 
   label def destroy
-    when_destroy_set? do
-      pop("rollout completed")
-    end
+    pop("rollout completed") if auto_exit || destroy_set?
 
     nap(60 * 60 * 24 * 365)
   end
