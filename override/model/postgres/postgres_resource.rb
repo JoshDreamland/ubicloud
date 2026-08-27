@@ -6,6 +6,17 @@ class PostgresResource
     REGIONAL = "regional"
   end
 
+  # How this resource's data volume is backed. instance_storage is the
+  # instance-local default every provider supports; archil marks a fork
+  # whose data directory is a CoW branch of its parent's mirror disk,
+  # mounted over FUSE. The storage_type column's check constraint is the
+  # authoritative value list; these constants exist so fork-side code
+  # never spells the strings inline.
+  module StorageType
+    INSTANCE_STORAGE = "instance_storage"
+    ARCHIL = "archil"
+  end
+
   module PrependMethods
     def read_replica_type
       read_replica? ? ReadReplicaType::REGIONAL : ReadReplicaType::NONE
