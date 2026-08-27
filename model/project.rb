@@ -314,6 +314,7 @@ class Project < Sequel::Model
     :postgres_instance_type_fallback,
     :postgres_walg_optimized_config_disabled,
     :postgres_walg_direct_io_disabled,
+    :postgres_network_cache_storage,
     :cache_proxy_download_url,
     :postgres_aws_ssh_ipv6,
     :chc_postgres_deactivate_lockout,
