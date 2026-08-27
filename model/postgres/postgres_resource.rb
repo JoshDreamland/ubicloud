@@ -17,8 +17,10 @@ class PostgresResource < Sequel::Model
   one_to_many :read_replicas, class: :PostgresResource, key: :parent_id, conditions: {restore_target: nil}, read_only: true
   one_to_one :init_script, class: :PostgresInitScript, key: :id, read_only: true
   one_to_one :postgres_wal_shadow, read_only: true
+  one_to_many :postgres_branch_disks, read_only: true
+  one_to_one :postgres_branch_disk_attached, class: :PostgresBranchDisk, key: :attached_to_id, read_only: true
 
-  plugin :association_dependencies, metric_destinations: :destroy, log_destinations: :destroy, init_script: :destroy
+  plugin :association_dependencies, metric_destinations: :destroy, log_destinations: :destroy, init_script: :destroy, postgres_branch_disks: :destroy
   dataset_module Pagination
 
   plugin ResourceMethods, redacted_columns: [:root_cert_1, :root_cert_2, :server_cert, :trusted_ca_certs, :client_root_cert_1, :client_root_cert_2, :client_cert],
@@ -912,6 +914,8 @@ end
 #  postgres_resource_location_id_fkey       | (location_id) REFERENCES location(id)
 #  postgres_resource_private_subnet_id_fkey | (private_subnet_id) REFERENCES private_subnet(id)
 # Referenced By:
+#  postgres_branch_disk        | postgres_branch_disk_attached_to_id_fkey              | (attached_to_id) REFERENCES postgres_resource(id) ON DELETE SET NULL
+#  postgres_branch_disk        | postgres_branch_disk_postgres_resource_id_fkey        | (postgres_resource_id) REFERENCES postgres_resource(id)
 #  postgres_init_script        | postgres_init_script_id_fkey                          | (id) REFERENCES postgres_resource(id)
 #  postgres_log_destination    | postgres_log_destination_postgres_resource_id_fkey    | (postgres_resource_id) REFERENCES postgres_resource(id)
 #  postgres_metric_destination | postgres_metric_destination_postgres_resource_id_fkey | (postgres_resource_id) REFERENCES postgres_resource(id)
