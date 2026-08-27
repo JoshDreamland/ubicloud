@@ -64,6 +64,25 @@ class Prog::Vm::Gcp::Nexus < Prog::Base
       ),
     ]
 
+    # Network volumes are declared as persistent disks beside the boot disk.
+    # Record the deterministic disk name before insertion: GCE reuses that disk
+    # on retry, and device_name gives the guest a stable path.
+    vm.vm_storage_volumes_dataset.exclude(volume_type: nil).order(:disk_index).each do |vol|
+      limits = VmStorageVolume::NETWORK_VOLUME_LIMITS.fetch(vol.volume_type)
+      vol.update(provider_volume_id: "#{vm.name}-#{vol.disk_index}") unless vol.provider_volume_id
+      disks << Google::Cloud::Compute::V1::AttachedDisk.new(
+        auto_delete: true,
+        device_name: "persistent-disk-#{vol.disk_index}",
+        initialize_params: Google::Cloud::Compute::V1::AttachedDiskInitializeParams.new(
+          disk_name: vol.provider_volume_id,
+          disk_type: "zones/#{gcp_zone}/diskTypes/#{vol.volume_type}",
+          disk_size_gb: vol.size_gib,
+          provisioned_iops: vol.provisioned_iops || limits.default_iops,
+          provisioned_throughput: vol.provisioned_throughput_mibps || limits.default_throughput_mibps,
+        ),
+      )
+    end
+
     gcp_res = user_nic.nic_gcp_resource
     instance_resource = Google::Cloud::Compute::V1::Instance.new(
       name: vm.name,

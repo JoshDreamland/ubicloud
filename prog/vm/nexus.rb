@@ -146,35 +146,40 @@ class Prog::Vm::Nexus < Prog::Base
       end
 
       prog = if location.aws?
-        # On AWS, one VmStorageVolume per requested storage_volume — AWS attaches
-        # instance-store NVMes per the instance type, not per record. Device
-        # discovery for mdadm is done at provisioning time via lsblk (see
-        # PostgresServer::Aws#aws_storage_device_paths), so record count doesn't
-        # drive disk count.
-        storage_volumes.each_with_index do |volume, disk_index|
-          VmStorageVolume.create(
-            vm_id: vm.id,
-            size_gib: volume[:size_gib],
-            boot: volume[:boot],
-            use_bdev_ubi: false,
-            disk_index:,
-          )
+        # AWS attaches instance-store NVMe by instance type, so row count does
+        # not determine disk count.
+        DB.ignore_duplicate_queries do
+          storage_volumes.each_with_index do |volume, disk_index|
+            VmStorageVolume.create(
+              vm_id: vm.id,
+              size_gib: volume[:size_gib],
+              boot: volume[:boot],
+              use_bdev_ubi: false,
+              disk_index:,
+              **network_volume_attrs(volume),
+            )
+          end
         end
         "Vm::Aws::Nexus"
       elsif location.gcp?
         # As above, but GCE attaches the disks bundled with the -lssd machine type.
         disk_index = 0
-        storage_volumes.each do |volume|
-          next unless volume[:boot] || volume[:size_gib] > 0
+        # Each volume repeats the same disk_index uniqueness check, as in
+        # Vm::Metal#create_storage_volumes.
+        DB.ignore_duplicate_queries do
+          storage_volumes.each do |volume|
+            next unless volume[:boot] || volume[:size_gib] > 0
 
-          VmStorageVolume.create(
-            vm_id: vm.id,
-            size_gib: volume[:size_gib],
-            boot: volume[:boot],
-            use_bdev_ubi: false,
-            disk_index:,
-          )
-          disk_index += 1
+            VmStorageVolume.create(
+              vm_id: vm.id,
+              size_gib: volume[:size_gib],
+              boot: volume[:boot],
+              use_bdev_ubi: false,
+              disk_index:,
+              **network_volume_attrs(volume),
+            )
+            disk_index += 1
+          end
         end
         "Vm::Gcp::Nexus"
       else
@@ -210,6 +215,16 @@ class Prog::Vm::Nexus < Prog::Base
         }],
       ) { it.id = vm.id }
     end
+  end
+
+  def self.network_volume_attrs(volume)
+    return {} unless (volume_type = volume[:network_volume_type])
+
+    {
+      volume_type:,
+      provisioned_iops: volume[:provisioned_iops],
+      provisioned_throughput_mibps: volume[:provisioned_throughput_mibps],
+    }
   end
 
   def self.assemble_with_sshable(*, sshable_unix_user: "rhizome", **kwargs)
