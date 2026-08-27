@@ -2,7 +2,33 @@
 
 require_relative "../../model"
 
+# A point-in-time copy-on-write image of a parent postgres database, backed
+# by a vendor branch (named by this record's ubid) of the parent mirror's
+# Archil disk. At most one branch instance mounts a disk at a time.
 class PostgresBranchDisk < Sequel::Model
+  many_to_one :postgres_resource
+  many_to_one :archil_disk, class: :PostgresArchilDisk
+  many_to_one :attached_to, class: :PostgresResource
+
+  plugin ResourceMethods
+
+  module State
+    CREATING = "creating"
+    READY = "ready"
+    ATTACHED = "attached"
+    DELETING = "deleting"
+    FAILED = "failed"
+  end
+
+  def creating? = state == State::CREATING
+
+  def ready? = state == State::READY
+
+  def attached? = state == State::ATTACHED
+
+  def deleting? = state == State::DELETING
+
+  def failed? = state == State::FAILED
 end
 
 # Table: postgres_branch_disk

@@ -472,6 +472,16 @@ module AdminModelSpecHelper
       PgAwsAmi.create(aws_ami_id: "ami-#{SecureRandom.hex(4)}", aws_location_name: "us-east-#{SecureRandom.hex(2)}", pg_version: "16", arch: "x64")
     end
 
+    def create_postgres_archil_disk
+      PostgresArchilDisk.create(disk_id: "disk-test123", token: "test-mount-token", region: "aws-us-east-1")
+    end
+
+    def create_postgres_branch_disk
+      project = Project.create(name: "test-project")
+      pg = create_postgres_resource(project:, location_id: Location::HETZNER_FSN1_ID)
+      PostgresBranchDisk.create(postgres_resource: pg, archil_disk: create_postgres_archil_disk)
+    end
+
     def create_postgres_metric_destination
       project = Project.create(name: "test-project")
       ps = PrivateSubnet.create(name: "test-ps", project_id: project.id, location_id: Location::HETZNER_FSN1_ID, net4: "10.0.0.0/26", net6: "fdfa::/64")

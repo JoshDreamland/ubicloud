@@ -2,7 +2,13 @@
 
 require_relative "../../model"
 
+# An Archil disk backing postgres data. The row is created as an intent
+# record before the vendor call, so disk_id is NULL until the disk exists;
+# a NULL disk_id past its creation window marks an orphan to reconcile.
 class PostgresArchilDisk < Sequel::Model
+  one_to_many :postgres_branch_disks, key: :archil_disk_id, read_only: true
+
+  plugin ResourceMethods, encrypted_columns: [:token]
 end
 
 # Table: postgres_archil_disk
