@@ -73,8 +73,8 @@ class Prog::MachineImage::VersionMetalNexus < Prog::Base
   end
 
   label def archive
-    # 4 minutes per 10 GiB for VM sources, fixed 1 hour for URL sources.
-    register_deadline("wait", source_vm_id ? Vm[source_vm_id].storage_size_gib * 24 : 3600)
+    # 12 minutes per 10 GiB for VM sources, fixed 1 hour for URL sources.
+    register_deadline("wait", source_vm_id ? Vm[source_vm_id].storage_size_gib * 72 : 3600)
 
     state = sshable.d_check(archive_unit)
     case state
@@ -84,6 +84,11 @@ class Prog::MachineImage::VersionMetalNexus < Prog::Base
       hop_finish_archive
     when "Failed"
       self.archive_failures = (archive_failures || 0) + 1
+      Clog.emit("Machine image archive failed", {
+        machine_image_version_metal: machine_image_version_metal.ubid,
+        archive_failures:,
+        logs: sshable.d_logs(archive_unit, lines: 50),
+      })
       if archive_failures >= MAX_ARCHIVE_FAILURES
         machine_image_version_metal.update(status: "failed", pinned_source_vm_id: nil)
         hop_destroy_objects

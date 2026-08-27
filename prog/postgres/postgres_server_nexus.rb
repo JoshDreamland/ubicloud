@@ -297,6 +297,7 @@ global:
   scrape_interval: 10s
   external_labels:
     ubicloud_resource_id: #{resource.ubid}
+    ubicloud_resource_name: #{resource.name}
     ubicloud_resource_role: #{(postgres_server.id == resource.representative_server.id) ? "primary" : "standby"}
 
 scrape_configs:
@@ -393,8 +394,10 @@ TIMER
     vm.sshable.cmd("sudo systemctl daemon-reload")
     # The old User=ubi unit leaves its safe_write_to_file lock and possibly
     # a stale tmp file owned ubi:ubi 0644, which the new user cannot write.
-    vm.sshable.cmd("sudo rm -f :lock_path :tmp_path",
-      lock_path: "/tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock",
+    # The lock used to live in /tmp under a digest name, so drop both paths.
+    vm.sshable.cmd("sudo rm -f :old_lock_path :lock_path :tmp_path",
+      old_lock_path: "/tmp/#{OpenSSL::Digest::SHA256.hexdigest("/var/lib/node_exporter/pg_metrics.prom.tmp")}.lock",
+      lock_path: "/var/lib/node_exporter/pg_metrics.prom.tmp.lock",
       tmp_path: "/var/lib/node_exporter/pg_metrics.prom.tmp")
 
     when_initial_provisioning_set? do

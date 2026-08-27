@@ -16,6 +16,7 @@ class Vm < Sequel::Model
   one_to_many :active_billing_records, class: :BillingRecord, key: :resource_id, read_only: true, &:active
   one_to_one :pinning_machine_image_version_metal, class: :MachineImageVersionMetal, key: :pinned_source_vm_id, read_only: true
   one_to_many :pci_devices, read_only: true
+  one_to_many :run_commands, order: Sequel.desc(:created_at), read_only: true
   one_to_one :gpu_partition, read_only: true
   one_through_one :load_balancer, read_only: true
   one_to_one :load_balancer_vm, read_only: true
@@ -128,6 +129,10 @@ class Vm < Sequel::Model
 
   def runtime_token
     JWT.encode({sub: ubid, iat: Time.now.to_i}, Config.clover_runtime_token_secret, "HS256")
+  end
+
+  def most_recent_serial_log
+    run_commands_dataset.first(command: "fetch_serial_log")
   end
 
   def display_state
@@ -304,6 +309,7 @@ end
 #  pci_device                  | pci_device_vm_id_fkey                                | (vm_id) REFERENCES vm(id)
 #  postgres_server             | postgres_server_vm_id_fkey                           | (vm_id) REFERENCES vm(id)
 #  postgres_wal_shadow         | postgres_wal_shadow_vm_id_fkey                       | (vm_id) REFERENCES vm(id) ON DELETE SET NULL
+#  run_command                 | run_command_vm_id_fkey                               | (vm_id) REFERENCES vm(id) ON DELETE CASCADE
 #  victoria_metrics_server     | victoria_metrics_server_vm_id_fkey                   | (vm_id) REFERENCES vm(id)
 #  vm_gcp_resource             | vm_gcp_resource_id_fkey                              | (id) REFERENCES vm(id) ON DELETE CASCADE
 #  vm_init_script              | vm_init_script_id_fkey                               | (id) REFERENCES vm(id)

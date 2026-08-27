@@ -347,6 +347,11 @@ class Prog::Github::GithubRunnerNexus < Prog::Base
     project.quota_available?(resource_type, 0)
   end
 
+  def aws_quota_available?
+    resource_type = x64? ? "GithubRunnerVCpuAws" : "GithubRunnerVCpuArmAws"
+    project.quota_available?(resource_type, 0)
+  end
+
   label def wait_concurrency_limit
     if quota_available?
       hop_apply_custom_label_quota if github_runner.custom_label
@@ -358,10 +363,17 @@ class Prog::Github::GithubRunnerNexus < Prog::Base
       nap rand(5..15)
     end
 
-    # check utilization, if it's high, wait for it to go down
+    # check utilization, if it's high, wait for it to go down. Some hosts run
+    # out of hugepages before cores, so use the more utilized resource.
     family_utilization = VmHost.where(allocation_state: "accepting", location_id: [Location::GITHUB_RUNNERS_ID, Location::HETZNER_FSN1_ID, Location::HETZNER_HEL1_ID], arch:)
+      .where { (total_cores > 0) & (total_hugepages_1g > 0) }
       .select_group(:family)
-      .select_append { round(sum(:used_cores) * 100.0 / sum(:total_cores), 2).cast(:float).as(:utilization) }
+      .select_append {
+        round(greatest(
+          sum(:used_cores) * 100.0 / sum(:total_cores),
+          sum(:used_hugepages_1g) * 100.0 / sum(:total_hugepages_1g),
+        ), 2).cast(:float).as(:utilization)
+      }
       .to_hash(:family, :utilization)
 
     std_util = family_utilization.fetch("standard", 100)
@@ -376,7 +388,8 @@ class Prog::Github::GithubRunnerNexus < Prog::Base
     if is_high_util
       should_spill_over = support_alien? &&
         project.get_ff_spill_to_alien_runners &&
-        Time.now - github_runner.created_at > Config.github_runner_aws_spill_threshold_seconds
+        Time.now - github_runner.created_at > Config.github_runner_aws_spill_threshold_seconds &&
+        aws_quota_available?
 
       if should_spill_over
         spilled_vcpus = Vm.where(boot_image: AWS_AMI_VERSIONS).sum(:vcpus) || 0
@@ -550,7 +563,7 @@ class Prog::Github::GithubRunnerNexus < Prog::Base
     runner_id = runner.fetch(:id)
     # If the runner script is not started yet, we can delete the runner and
     # register it again.
-    if vm.sshable.cmd("systemctl show -p SubState --value runner-script").chomp == "dead"
+    if vm.sshable.cmd("sudo systemctl show -p SubState --value runner-script").chomp == "dead"
       Clog.emit("Deregistering runner because it already exists", [github_runner, {existing_runner: {runner_id:}}])
       client.delete(runners_path(runner_id))
       nap 5
@@ -566,7 +579,7 @@ class Prog::Github::GithubRunnerNexus < Prog::Base
   label def wait
     register_deadline(nil, 5 * 24 * 60 * 60)
     substate = begin
-      vm.sshable.cmd("systemctl show -p SubState --value runner-script").chomp
+      vm.sshable.cmd("sudo systemctl show -p SubState --value runner-script").chomp
     rescue *Sshable::SSH_CONNECTION_ERRORS
       if vm.location.aws? && vm.aws_instance
         instance_id = vm.aws_instance.instance_id
