@@ -900,6 +900,7 @@ end
 #  client_cert_key                 | text                     |
 #  parseable_password              | text                     |
 #  maintenance_window_days_bitmask | smallint                 | NOT NULL DEFAULT 0
+#  ephemeral                       | boolean                  | NOT NULL DEFAULT false
 #  storage_type                    | text                     | NOT NULL DEFAULT 'instance_storage'::text
 # Indexes:
 #  postgres_server_pkey                               | PRIMARY KEY btree (id)
