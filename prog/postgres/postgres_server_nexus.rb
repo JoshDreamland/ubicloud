@@ -12,7 +12,7 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
 
   def_delegators :postgres_server, :vm, :resource
 
-  def self.assemble(resource_id:, timeline_id:, timeline_access:, is_representative: false, exclude_host_ids: [], exclude_availability_zones: [], availability_zone: nil, exclude_data_centers: [])
+  def self.assemble(resource_id:, timeline_id:, timeline_access:, is_representative: false, exclude_host_ids: [], exclude_availability_zones: [], availability_zone: nil, exclude_data_centers: [], storage_config: nil)
     DB.transaction do
       ubid = PostgresServer.generate_ubid
 
@@ -33,8 +33,10 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
       storage_volumes = [{encrypted: true, size_gib: Config.postgres_boot_disk_size_gib, vring_workers: 1, track_written: false}, data_volume]
       if postgres_resource.storage_type == PostgresResource::StorageType::NETWORK_CACHE
         # data on a persistent network volume fronted by local NVMe bcache
+        # The first server uses requested configuration; later servers copy it.
+        storage_config ||= {network_volume: postgres_resource.network_volume_config, wal_drive: postgres_resource.wal_drive_config}
         data_volume[:network_volume_type] = postgres_resource.network_volume_type
-
+        data_volume.merge!(storage_config[:network_volume].to_h)
         # pg_wal on its own drive keeps the write-once WAL stream out of the
         # cache and commit fsyncs off the data volume's IOPS budget. nvme carves
         # a wal_drive_size_gib partition from the local NVMe (see setup-bcache),
@@ -47,6 +49,7 @@ class Prog::Postgres::PostgresServerNexus < Prog::Base
             encrypted: true, size_gib: [postgres_resource.target_storage_size_gib / 8, 32].max,
             vring_workers: 1, track_written: false,
             network_volume_type: postgres_resource.wal_drive_type,
+            **storage_config[:wal_drive].to_h,
           }
         end
       end
