@@ -115,11 +115,10 @@ class Prog::Postgres::PostgresResourceNexus
 
       # Shared-timeline resources (read replicas, PITR restores before
       # switch_to_new_timeline) must not run backup/lifecycle changes on the
-      # parent's bucket, and a backups-disabled timeline has no bucket to
-      # take a final backup into at all.
+      # parent's bucket.
       timeline = postgres_resource.timeline
       parent = postgres_resource.parent
-      hop_destroy if (parent && timeline == parent.timeline) || timeline.backups_disabled
+      hop_destroy if parent && timeline == parent.timeline
 
       if timeline.leader.nil?
         # No leader (failover / unhealthy primary). Nap; 3h deadline pages if it never recovers.

@@ -15,11 +15,6 @@ class PostgresServer < Sequel::Model
       # nothing
     end
 
-    def aws_scrub_walg_blob_storage_credentials
-      # nothing on disk: credentials live in wal-g.env, which the caller
-      # already blanked
-    end
-
     def aws_storage_device_paths
       # Sort whole block devices by size and drop the smallest (EBS boot, fixed
       # at 16 GiB). Remaining devices are instance-store NVMes — the disks we
@@ -29,10 +24,7 @@ class PostgresServer < Sequel::Model
 
     def aws_attach_s3_policy_if_needed
       if Config.aws_postgres_iam_access && vm.aws_instance.iam_role
-        # A backup-disabled timeline has no bucket or policy to attach, but
-        # the parent policy granted for the restore fetch must still come off
-        # the role once the server switches to its own timeline.
-        client.attach_role_policy(role_name: vm.aws_instance.iam_role, policy_arn: timeline.aws_s3_policy_arn) unless timeline.backups_disabled
+        client.attach_role_policy(role_name: vm.aws_instance.iam_role, policy_arn: timeline.aws_s3_policy_arn)
         _aws_detach_parent_s3_policy
       end
     end

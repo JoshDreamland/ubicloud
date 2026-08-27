@@ -674,22 +674,10 @@ RSpec.describe Validation do
             needs_convergence?: false,
             ongoing_failover?: false,
             read_replica?: false,
-            ephemeral: false,
             flavor: PostgresResource::Flavor::STANDARD,
           ),
         )
       }.not_to raise_error
-    end
-
-    it "invalidates postgres upgrade for an ephemeral database" do
-      expect {
-        described_class.validate_postgres_upgrade(
-          instance_double(
-            PostgresResource,
-            ephemeral: true,
-          ),
-        )
-      }.to raise_error(described_class::ValidationFailed) { |ex| expect(ex.details).to eq({ephemeral: "Ephemeral databases cannot be upgraded"}) }
     end
 
     it "invalidates postgres upgrade when needs_convergence is true" do
@@ -702,7 +690,6 @@ RSpec.describe Validation do
             needs_convergence?: true,
             ongoing_failover?: false,
             read_replica?: false,
-            ephemeral: false,
           ),
         )
       }.to raise_error described_class::ValidationFailed
@@ -718,7 +705,6 @@ RSpec.describe Validation do
             needs_convergence?: false,
             ongoing_failover?: false,
             read_replica?: true,
-            ephemeral: false,
           ),
         )
       }.to raise_error described_class::ValidationFailed
@@ -734,7 +720,6 @@ RSpec.describe Validation do
             needs_convergence?: false,
             ongoing_failover?: false,
             read_replica?: false,
-            ephemeral: false,
             flavor: PostgresResource::Flavor::LANTERN,
           ),
         )
@@ -750,7 +735,6 @@ RSpec.describe Validation do
             needs_convergence?: false,
             ongoing_failover?: false,
             read_replica?: false,
-            ephemeral: false,
             flavor: PostgresResource::Flavor::STANDARD,
           ),
         )
