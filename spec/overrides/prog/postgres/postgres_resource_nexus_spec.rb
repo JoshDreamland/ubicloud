@@ -331,6 +331,17 @@ RSpec.describe Prog::Postgres::PostgresResourceNexus::PrependMethods do # ruboco
       expect { nx.billing_deactivate_suspend }.to hop("destroy")
     end
 
+    it "hops straight to destroy for a backups-disabled timeline, which takes no final backup" do
+      # Persisted on the timeline row, so the short-circuit fires even when
+      # the resource has no push leader at deactivation time.
+      timeline = nx.postgres_resource.timeline
+      timeline.update(backups_disabled: true)
+
+      expect(timeline).not_to receive(:incr_take_backup_for_converge)
+      expect(nx.postgres_resource).not_to receive(:servers)
+      expect { nx.billing_deactivate_suspend }.to hop("destroy")
+    end
+
     it "does NOT short-circuit a post-restore PITR resource that has switched to its own timeline" do
       # After switch_to_new_timeline: same parent_id, but pg.timeline is a fresh
       # timeline distinct from parent.timeline — full deactivate flow is safe.
