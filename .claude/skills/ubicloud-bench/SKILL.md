@@ -1,6 +1,6 @@
 ---
 name: ubicloud-bench
-description: Run pgbench (TPC-B) and HammerDB TPC-C benchmarks against an Ubicloud-managed Postgres server, using a dedicated EC2 bench client provisioned via AWS CLI. Use when the user wants to measure PG throughput/latency or stress-test a particular instance size.
+description: Run pgbench (TPC-B) and HammerDB TPC-C benchmarks against an Ubicloud-managed Postgres server, using a dedicated bench client provisioned via the cloud CLI - EC2 for AWS targets, GCE for GCP targets. Use when the user wants to measure PG throughput/latency or stress-test a particular instance size.
 user-invocable: true
 ---
 
@@ -8,7 +8,16 @@ user-invocable: true
 
 This skill drives a complete benchmark workflow:
 
-1. **Provision** an EC2 bench client (in its own VPC, same physical AZ as the target PG) — `.devcontainer/scripts/bench/bench-provision.sh`.
+1. **Provision** a bench client (in its own VPC, same AZ/zone as the target PG) — `.devcontainer/scripts/bench/bench-provision.sh`.
+
+The provider is taken from the target Postgres resource's location, so one invocation covers both clouds. For a GCP target, set `PG_LOCATION` and make sure `GCP_PROJECT_ID` is exported:
+
+```bash
+PG_LOCATION=gcp-us-east4-cell-0 GCP_PROJECT_ID=ch-pg-test \
+  .devcontainer/scripts/bench/bench-provision.sh <pg-name> --cores 4
+```
+
+`--cores N` maps to `m6id.*` on AWS and `n2-standard-N` on GCP. Steps 2-4 below are provider-agnostic and need no extra flags.
 2. **Run** pgbench or HammerDB TPC-C against an Ubicloud-managed PG over the public network — `bench-run.sh`.
 3. **Fetch** result logs back to the dev container via scp — `bench-fetch.sh`.
 4. **Tear down** everything when done — `bench-destroy.sh`.

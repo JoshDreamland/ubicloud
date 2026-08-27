@@ -1,17 +1,25 @@
 #!/bin/bash
-# Bootstrap a benchmark-client EC2 instance directly via AWS CLI, in its own
-# VPC/subnet/SG/IGW, sized for a given core count, in the same physical AZ as
-# the target Postgres resource. Connectivity is plain SSH/SCP — the SG opens
-# port 22 only to the dev container's current egress IP (auto-detected) or to
+# Bootstrap a benchmark-client VM directly via the cloud CLI, in its own
+# network, sized for a given core count, in the same zone/AZ as the target
+# Postgres resource. Connectivity is plain SSH/SCP — ingress on port 22 is
+# opened only to the dev container's current egress IP (auto-detected) or to
 # the CIDR you pass via --ssh-cidr.
+#
+# The provider is taken from the target Postgres resource's location, so the
+# same invocation works for both:
+#   aws: EC2 instance in its own VPC/subnet/SG/IGW/route-table
+#   gcp: GCE instance in its own VPC/subnet + a firewall rule (GCE needs no
+#        internet gateway or route table objects for egress)
 #
 # Usage:
 #   bench-provision.sh <pg-resource-name> --cores N \
 #     [--instance-type T] [--name VM_NAME] [--az AZ_ID] \
 #     [--ssh-cidr CIDR] [--hammerdb-image IMG]
 #
+#   PG_LOCATION=gcp-us-east4-cell-0 bench-provision.sh <name> --cores 4
+#
 # Defaults:
-#   --az              Physical AZ of the PG primary (from pg-info.sh)
+#   --az              Zone/AZ of the PG primary (from pg-info.sh)
 #   --name            bench-<pg-name>-<rand>
 #   --ssh-cidr        $(curl -s checkip.amazonaws.com)/32 — the dev container's
 #                     current egress IP. If your egress IP changes mid-session
@@ -52,9 +60,26 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+if [ -z "$INSTANCE_TYPE_OVERRIDE" ] && [ -z "$CORES" ]; then
+  echo "One of --cores or --instance-type is required" >&2; exit 1
+fi
+
+# --- 1. Discover PG resource details (also fixes the provider) ---
+eval "$("$SCRIPT_DIR/pg-info.sh" "$PG_NAME")"
+[ -n "${PG_IP:-}"  ] || { echo "pg-info.sh did not return PG_IP for $PG_NAME"  >&2; exit 1; }
+[ -n "${PG_PWD:-}" ] || { echo "pg-info.sh did not return PG_PWD for $PG_NAME" >&2; exit 1; }
+
+# n2 for GCP: cheapest broadly-available amd64 family, needs no per-project
+# allowlist, and amd64 is mandatory because HammerDB upstream ships x86_64 only
+# (which also rules out matching the c4a/Axion PG side).
 if [ -n "$INSTANCE_TYPE_OVERRIDE" ]; then
   VM_SIZE="$INSTANCE_TYPE_OVERRIDE"
-elif [ -n "$CORES" ]; then
+elif [ "$PG_PROVIDER" = "gcp" ]; then
+  case "$CORES" in
+    2|4|8|16|32|64) VM_SIZE="n2-standard-$CORES" ;;
+    *) echo "Unsupported --cores=$CORES for gcp (allowed: 2,4,8,16,32,64)" >&2; exit 1 ;;
+  esac
+else
   case "$CORES" in
     2)  VM_SIZE="m6id.large" ;;
     4)  VM_SIZE="m6id.xlarge" ;;
@@ -64,17 +89,21 @@ elif [ -n "$CORES" ]; then
     64) VM_SIZE="m6id.16xlarge" ;;
     *)  echo "Unsupported --cores=$CORES (allowed: 2,4,8,16,32,64)" >&2; exit 1 ;;
   esac
-else
-  echo "One of --cores or --instance-type is required" >&2; exit 1
 fi
 
-# --- 1. Discover PG resource details ---
-eval "$("$SCRIPT_DIR/pg-info.sh" "$PG_NAME")"
-[ -n "${PG_IP:-}"  ] || { echo "pg-info.sh did not return PG_IP for $PG_NAME"  >&2; exit 1; }
-[ -n "${PG_PWD:-}" ] || { echo "pg-info.sh did not return PG_PWD for $PG_NAME" >&2; exit 1; }
-[ -n "${SRV_AZ:-}" ] || { echo "pg-info.sh did not return SRV_AZ for $PG_NAME" >&2; exit 1; }
-REGION="${PG_LOCATION%-cell-*}"
-AZ_ID="${AZ_OVERRIDE:-$SRV_AZ}"
+if [ "$PG_PROVIDER" = "gcp" ]; then
+  [ -n "${SRV_ZONE:-}" ] || { echo "pg-info.sh did not return SRV_ZONE for $PG_NAME" >&2; exit 1; }
+  GCP_ZONE="${AZ_OVERRIDE:-$SRV_ZONE}"
+  REGION="${GCP_ZONE%-*}"
+  AZ_ID="$GCP_ZONE"
+  : "${GCP_PROJECT_ID:?GCP_PROJECT_ID is not set. Ensure it is defined in docker-compose.yml or exported in your shell.}"
+  # wait_for_vm_state.sh reads this from the environment.
+  export GCP_PROJECT_ID
+else
+  [ -n "${SRV_AZ:-}" ] || { echo "pg-info.sh did not return SRV_AZ for $PG_NAME" >&2; exit 1; }
+  REGION="${PG_LOCATION%-cell-*}"
+  AZ_ID="${AZ_OVERRIDE:-$SRV_AZ}"
+fi
 
 [ -n "$VM_NAME" ] || VM_NAME="bench-$PG_NAME-$(printf '%04x' $RANDOM)"
 META_FILE="/tmp/bench_meta_$VM_NAME"
@@ -96,113 +125,174 @@ echo "az_id:          $AZ_ID"
 echo "ssh_cidr:       $SSH_CIDR  (only this IP can reach port 22)"
 echo
 
-TAG_SPEC_BASE="Key=Project,Value=ubicloud-bench Key=BenchName,Value=$VM_NAME"
-tag_spec() {
-  local rt="$1"; shift
-  local tags="$TAG_SPEC_BASE"
-  while [ $# -gt 0 ]; do tags="$tags $1"; shift; done
-  echo "ResourceType=$rt,Tags=[$(echo "$tags" | awk '{for(i=1;i<=NF;i++)printf "{%s}%s",$i,(i<NF?",":"")}')]"
-}
+if [ "$PG_PROVIDER" = "gcp" ]; then
+  # --- 3-7 (gcp). GCE needs no internet gateway or route table: the default
+  # network route provides egress, so this is a shorter sequence than AWS.
+  # Labels mirror the AWS tags so an orphan sweep can find leftovers.
+  GCP_NETWORK="$VM_NAME-net"
+  GCP_SUBNET="$VM_NAME-subnet"
+  GCP_FW_RULE="$VM_NAME-allow-ssh"
+  GCP_LABELS="project=ubicloud-bench,bench-name=$VM_NAME"
+  GCLOUD=(gcloud --project="$GCP_PROJECT_ID" --quiet)
+  VM_USER="ubuntu"
 
-# --- 3. Resolve AZ ID -> AZ name ---
-AZ_NAME=$(aws ec2 describe-availability-zones --region "$REGION" \
-  --filters "Name=zone-id,Values=$AZ_ID" \
-  --query 'AvailabilityZones[0].ZoneName' --output text)
-[ "$AZ_NAME" != "None" ] || { echo "Could not resolve AZ ID $AZ_ID in $REGION" >&2; exit 1; }
-echo "az_name:        $AZ_NAME"
+  echo "zone:           $GCP_ZONE"
+  echo "image:          ubuntu-2604-lts-amd64  (amd64, pinned for HammerDB compatibility)"
 
-# --- 4. Resolve Ubuntu 26.04 amd64 AMI (pinned: HammerDB upstream is x86_64-only) ---
-INSTANCE_ARCH=$(aws ec2 describe-instance-types --region "$REGION" \
-  --instance-types "$VM_SIZE" \
-  --query 'InstanceTypes[0].ProcessorInfo.SupportedArchitectures[0]' --output text)
-if [ "$INSTANCE_ARCH" != "x86_64" ]; then
-  echo "ERROR: requested $VM_SIZE is $INSTANCE_ARCH; bench framework requires amd64 (HammerDB upstream is x86_64-only). Pick an amd64 instance type (e.g., m6id.* m7i.* m8i.*)." >&2
-  exit 1
+  [ -f "$KEY_FILE" ] || ssh-keygen -t ed25519 -N "" -C "$VM_NAME" -f "$KEY_FILE" >/dev/null
+
+  echo "Creating VPC $GCP_NETWORK + subnet 10.99.1.0/24 in $REGION..."
+  "${GCLOUD[@]}" compute networks create "$GCP_NETWORK" --subnet-mode=custom >/dev/null
+  "${GCLOUD[@]}" compute networks subnets create "$GCP_SUBNET" \
+    --network="$GCP_NETWORK" --region="$REGION" --range=10.99.1.0/24 >/dev/null
+  "${GCLOUD[@]}" compute firewall-rules create "$GCP_FW_RULE" \
+    --network="$GCP_NETWORK" --allow=tcp:22 --source-ranges="$SSH_CIDR" \
+    --description="Bench client SSH for $VM_NAME" >/dev/null
+  echo "NETWORK=$GCP_NETWORK  SUBNET=$GCP_SUBNET  FW=$GCP_FW_RULE (port 22 from $SSH_CIDR)"
+
+  echo "Launching $VM_SIZE in $GCP_ZONE..."
+  "${GCLOUD[@]}" compute instances create "$VM_NAME" \
+    --zone="$GCP_ZONE" --machine-type="$VM_SIZE" --subnet="$GCP_SUBNET" \
+    --image-family=ubuntu-2604-lts-amd64 --image-project=ubuntu-os-cloud \
+    --boot-disk-size=100GB --boot-disk-type=pd-balanced \
+    --labels="$GCP_LABELS" \
+    --metadata="ssh-keys=${VM_USER}:$(cat "${KEY_FILE}.pub")" >/dev/null
+  # No separate instance id on GCE: the name is the handle, scoped by zone.
+  INSTANCE_ID="$VM_NAME"
+
+  "$SCRIPT_DIR/wait_for_vm_state.sh" "$VM_NAME" RUNNING 600 "$GCP_ZONE"
+
+  VM_IP=$("${GCLOUD[@]}" compute instances describe "$VM_NAME" --zone="$GCP_ZONE" \
+    --format='value(networkInterfaces[0].accessConfigs[0].natIP)')
+  [ -n "$VM_IP" ] || { echo "Instance has no external IP" >&2; exit 1; }
+else
+  TAG_SPEC_BASE="Key=Project,Value=ubicloud-bench Key=BenchName,Value=$VM_NAME"
+  tag_spec() {
+    local rt="$1"; shift
+    local tags="$TAG_SPEC_BASE"
+    while [ $# -gt 0 ]; do tags="$tags $1"; shift; done
+    echo "ResourceType=$rt,Tags=[$(echo "$tags" | awk '{for(i=1;i<=NF;i++)printf "{%s}%s",$i,(i<NF?",":"")}')]"
+  }
+
+  # --- 3. Resolve AZ ID -> AZ name ---
+  AZ_NAME=$(aws ec2 describe-availability-zones --region "$REGION" \
+    --filters "Name=zone-id,Values=$AZ_ID" \
+    --query 'AvailabilityZones[0].ZoneName' --output text)
+  [ "$AZ_NAME" != "None" ] || { echo "Could not resolve AZ ID $AZ_ID in $REGION" >&2; exit 1; }
+  echo "az_name:        $AZ_NAME"
+
+  # --- 4. Resolve Ubuntu 26.04 amd64 AMI (pinned: HammerDB upstream is x86_64-only) ---
+  INSTANCE_ARCH=$(aws ec2 describe-instance-types --region "$REGION" \
+    --instance-types "$VM_SIZE" \
+    --query 'InstanceTypes[0].ProcessorInfo.SupportedArchitectures[0]' --output text)
+  if [ "$INSTANCE_ARCH" != "x86_64" ]; then
+    echo "ERROR: requested $VM_SIZE is $INSTANCE_ARCH; bench framework requires amd64 (HammerDB upstream is x86_64-only). Pick an amd64 instance type (e.g., m6id.* m7i.* m8i.*)." >&2
+    exit 1
+  fi
+  AMI_ID=$(aws ssm get-parameter --region "$REGION" \
+    --name "/aws/service/canonical/ubuntu/server/26.04/stable/current/amd64/hvm/ebs-gp3/ami-id" \
+    --query "Parameter.Value" --output text)
+  echo "ami:            $AMI_ID  (amd64, pinned for HammerDB compatibility)"
+
+  # --- 5. SSH keypair (generate locally, import to EC2) ---
+  # Idempotent against re-runs with the same --name: any prior keypair with
+  # this name is deleted before import (private key never leaves the dev
+  # container, so the AWS-side keypair is recreatable trivially).
+  [ -f "$KEY_FILE" ] || ssh-keygen -t ed25519 -N "" -C "$VM_NAME" -f "$KEY_FILE" >/dev/null
+  aws ec2 delete-key-pair --region "$REGION" --key-name "$VM_NAME" 2>/dev/null || true
+  aws ec2 import-key-pair --region "$REGION" --key-name "$VM_NAME" \
+    --public-key-material "fileb://${KEY_FILE}.pub" \
+    --tag-specifications "$(tag_spec key-pair)" >/dev/null
+
+  # --- 6. VPC + IGW + subnet + RTB + SG with SSH ingress ---
+  echo "Creating VPC 10.99.0.0/16..."
+  VPC_ID=$(aws ec2 create-vpc --region "$REGION" --cidr-block 10.99.0.0/16 \
+    --tag-specifications "$(tag_spec vpc)" \
+    --query Vpc.VpcId --output text)
+  aws ec2 modify-vpc-attribute --region "$REGION" --vpc-id "$VPC_ID" --enable-dns-hostnames
+
+  IGW_ID=$(aws ec2 create-internet-gateway --region "$REGION" \
+    --tag-specifications "$(tag_spec internet-gateway)" \
+    --query InternetGateway.InternetGatewayId --output text)
+  aws ec2 attach-internet-gateway --region "$REGION" --vpc-id "$VPC_ID" --internet-gateway-id "$IGW_ID"
+
+  SUBNET_ID=$(aws ec2 create-subnet --region "$REGION" --vpc-id "$VPC_ID" \
+    --availability-zone "$AZ_NAME" --cidr-block 10.99.1.0/24 \
+    --tag-specifications "$(tag_spec subnet)" \
+    --query Subnet.SubnetId --output text)
+  aws ec2 modify-subnet-attribute --region "$REGION" --subnet-id "$SUBNET_ID" --map-public-ip-on-launch
+
+  RTB_ID=$(aws ec2 create-route-table --region "$REGION" --vpc-id "$VPC_ID" \
+    --tag-specifications "$(tag_spec route-table)" \
+    --query RouteTable.RouteTableId --output text)
+  aws ec2 create-route --region "$REGION" --route-table-id "$RTB_ID" \
+    --destination-cidr-block 0.0.0.0/0 --gateway-id "$IGW_ID" >/dev/null
+  aws ec2 associate-route-table --region "$REGION" --route-table-id "$RTB_ID" --subnet-id "$SUBNET_ID" >/dev/null
+
+  SG_ID=$(aws ec2 create-security-group --region "$REGION" --vpc-id "$VPC_ID" \
+    --group-name "$VM_NAME-sg" --description "Bench client SG for $VM_NAME" \
+    --tag-specifications "$(tag_spec security-group)" \
+    --query GroupId --output text)
+  aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_ID" \
+    --protocol tcp --port 22 --cidr "$SSH_CIDR" >/dev/null
+  echo "VPC=$VPC_ID  IGW=$IGW_ID  SUBNET=$SUBNET_ID  RTB=$RTB_ID  SG=$SG_ID (port 22 from $SSH_CIDR)"
+
+  # --- 7. Launch EC2 instance ---
+  echo "Launching $VM_SIZE in $AZ_NAME..."
+  INSTANCE_ID=$(aws ec2 run-instances --region "$REGION" \
+    --image-id "$AMI_ID" --instance-type "$VM_SIZE" \
+    --key-name "$VM_NAME" --security-group-ids "$SG_ID" --subnet-id "$SUBNET_ID" \
+    --tag-specifications "$(tag_spec instance Key=Name,Value=$VM_NAME)" \
+    --query 'Instances[0].InstanceId' --output text)
+  echo "Instance: $INSTANCE_ID"
+
+  "$SCRIPT_DIR/wait_for_vm_state.sh" "$INSTANCE_ID" running 600 "$REGION"
+
+  VM_IP=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INSTANCE_ID" \
+    --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+  [ "$VM_IP" != "None" ] || { echo "Instance has no public IP" >&2; exit 1; }
+  VM_USER="ubuntu"
 fi
-AMI_ID=$(aws ssm get-parameter --region "$REGION" \
-  --name "/aws/service/canonical/ubuntu/server/26.04/stable/current/amd64/hvm/ebs-gp3/ami-id" \
-  --query "Parameter.Value" --output text)
-echo "ami:            $AMI_ID  (amd64, pinned for HammerDB compatibility)"
-
-# --- 5. SSH keypair (generate locally, import to EC2) ---
-# Idempotent against re-runs with the same --name: any prior keypair with
-# this name is deleted before import (private key never leaves the dev
-# container, so the AWS-side keypair is recreatable trivially).
-[ -f "$KEY_FILE" ] || ssh-keygen -t ed25519 -N "" -C "$VM_NAME" -f "$KEY_FILE" >/dev/null
-aws ec2 delete-key-pair --region "$REGION" --key-name "$VM_NAME" 2>/dev/null || true
-aws ec2 import-key-pair --region "$REGION" --key-name "$VM_NAME" \
-  --public-key-material "fileb://${KEY_FILE}.pub" \
-  --tag-specifications "$(tag_spec key-pair)" >/dev/null
-
-# --- 6. VPC + IGW + subnet + RTB + SG with SSH ingress ---
-echo "Creating VPC 10.99.0.0/16..."
-VPC_ID=$(aws ec2 create-vpc --region "$REGION" --cidr-block 10.99.0.0/16 \
-  --tag-specifications "$(tag_spec vpc)" \
-  --query Vpc.VpcId --output text)
-aws ec2 modify-vpc-attribute --region "$REGION" --vpc-id "$VPC_ID" --enable-dns-hostnames
-
-IGW_ID=$(aws ec2 create-internet-gateway --region "$REGION" \
-  --tag-specifications "$(tag_spec internet-gateway)" \
-  --query InternetGateway.InternetGatewayId --output text)
-aws ec2 attach-internet-gateway --region "$REGION" --vpc-id "$VPC_ID" --internet-gateway-id "$IGW_ID"
-
-SUBNET_ID=$(aws ec2 create-subnet --region "$REGION" --vpc-id "$VPC_ID" \
-  --availability-zone "$AZ_NAME" --cidr-block 10.99.1.0/24 \
-  --tag-specifications "$(tag_spec subnet)" \
-  --query Subnet.SubnetId --output text)
-aws ec2 modify-subnet-attribute --region "$REGION" --subnet-id "$SUBNET_ID" --map-public-ip-on-launch
-
-RTB_ID=$(aws ec2 create-route-table --region "$REGION" --vpc-id "$VPC_ID" \
-  --tag-specifications "$(tag_spec route-table)" \
-  --query RouteTable.RouteTableId --output text)
-aws ec2 create-route --region "$REGION" --route-table-id "$RTB_ID" \
-  --destination-cidr-block 0.0.0.0/0 --gateway-id "$IGW_ID" >/dev/null
-aws ec2 associate-route-table --region "$REGION" --route-table-id "$RTB_ID" --subnet-id "$SUBNET_ID" >/dev/null
-
-SG_ID=$(aws ec2 create-security-group --region "$REGION" --vpc-id "$VPC_ID" \
-  --group-name "$VM_NAME-sg" --description "Bench client SG for $VM_NAME" \
-  --tag-specifications "$(tag_spec security-group)" \
-  --query GroupId --output text)
-aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_ID" \
-  --protocol tcp --port 22 --cidr "$SSH_CIDR" >/dev/null
-echo "VPC=$VPC_ID  IGW=$IGW_ID  SUBNET=$SUBNET_ID  RTB=$RTB_ID  SG=$SG_ID (port 22 from $SSH_CIDR)"
-
-# --- 7. Launch EC2 instance ---
-echo "Launching $VM_SIZE in $AZ_NAME..."
-INSTANCE_ID=$(aws ec2 run-instances --region "$REGION" \
-  --image-id "$AMI_ID" --instance-type "$VM_SIZE" \
-  --key-name "$VM_NAME" --security-group-ids "$SG_ID" --subnet-id "$SUBNET_ID" \
-  --tag-specifications "$(tag_spec instance Key=Name,Value=$VM_NAME)" \
-  --query 'Instances[0].InstanceId' --output text)
-echo "Instance: $INSTANCE_ID"
-
-"$SCRIPT_DIR/wait_for_vm_state.sh" "$INSTANCE_ID" running 600 "$REGION"
-
-VM_IP=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INSTANCE_ID" \
-  --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
-[ "$VM_IP" != "None" ] || { echo "Instance has no public IP" >&2; exit 1; }
-VM_USER="ubuntu"
 
 # --- 8. Persist metadata ---
-cat >"$META_FILE" <<META
+# The keys read by bench-run/tail/fetch/ssh-vm (VM_NAME, VM_IP, VM_USER,
+# KEY_FILE, PG_*) are identical for both providers, which is why those four
+# scripts need no provider awareness at all. Only the teardown-specific keys
+# differ.
+{
+  cat <<META
 VM_NAME="$VM_NAME"
 PG_RESOURCE="$PG_NAME"
 PG_LOCATION="$PG_LOCATION"
+PG_PROVIDER="$PG_PROVIDER"
 REGION="$REGION"
 AZ_ID="$AZ_ID"
-AZ_NAME="$AZ_NAME"
 INSTANCE_ID="$INSTANCE_ID"
-VPC_ID="$VPC_ID"
-IGW_ID="$IGW_ID"
-SUBNET_ID="$SUBNET_ID"
-RTB_ID="$RTB_ID"
-SG_ID="$SG_ID"
 KEY_NAME="$VM_NAME"
 KEY_FILE="$KEY_FILE"
 VM_IP="$VM_IP"
 VM_USER="$VM_USER"
 SSH_CIDR="$SSH_CIDR"
 META
+  if [ "$PG_PROVIDER" = "gcp" ]; then
+    cat <<META
+GCP_PROJECT_ID="$GCP_PROJECT_ID"
+GCP_ZONE="$GCP_ZONE"
+GCP_NETWORK="$GCP_NETWORK"
+GCP_SUBNET="$GCP_SUBNET"
+GCP_FW_RULE="$GCP_FW_RULE"
+META
+  else
+    cat <<META
+AZ_NAME="$AZ_NAME"
+VPC_ID="$VPC_ID"
+IGW_ID="$IGW_ID"
+SUBNET_ID="$SUBNET_ID"
+RTB_ID="$RTB_ID"
+SG_ID="$SG_ID"
+META
+  fi
+} >"$META_FILE"
 chmod 600 "$META_FILE"
 
 # --- 9. Open PG firewall rule for this client's public IP ---
@@ -259,7 +349,7 @@ ssh "${SSH_OPTS[@]}" "${VM_USER}@${VM_IP}" \
 cat <<HINT
 
 === Done ===
-VM:        $VM_NAME  ($VM_IP)  size=$VM_SIZE  az=$AZ_ID ($AZ_NAME)
+VM:        $VM_NAME  ($VM_IP)  size=$VM_SIZE  placement=$AZ_ID
 Target PG: $PG_NAME  ($PG_IP)
 Metadata:  $META_FILE
 SSH key:   $KEY_FILE
