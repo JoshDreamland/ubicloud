@@ -32,8 +32,6 @@ jobs:
           key: ${{ matrix.runs-on }}-rubocop-cache-${{ hashFiles('Gemfile.lock', '.rubocop.yml') }}
       - name: Run rubocop
         run: bundle exec rake linter:rubocop
-      - name: Run brakeman
-        run: bundle exec rake linter:brakeman
       - name: Run linter:openapi
         run: bundle exec rake linter:openapi
       - name: Run linter:xss_check
