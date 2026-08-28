@@ -878,7 +878,7 @@ RSpec.describe CloverAdmin do
     # The GitHub runner runs on the other host, so a second host row appears.
     installation = GithubInstallation.create(installation_id: 99, name: "gh-org", type: "Organization", project_id: project.id)
     gh_vm = create_vm(vm_host_id: other_vm_host.id, project_id: service_project.id, name: "gh-runner-vm")
-    GithubRunner.create(vm_id: gh_vm.id, repository_name: "repo", label: "ubicloud", installation_id: installation.id)
+    GithubRunner.create(vm_id: gh_vm.id, location_id: gh_vm.location_id, repository_name: "repo", label: "ubicloud", installation_id: installation.id)
     reload.call
     expect(resource_rows.call).to eq([
       ["VM", "", "customer-vm", vm_host.ubid],
@@ -1492,7 +1492,7 @@ RSpec.describe CloverAdmin do
     create_vm(vm_host_id: vmh.id, name: "customer-vm")
     2.times do |i|
       runner_vm = create_vm(vm_host_id: vmh.id, name: "runner-vm-#{i}")
-      GithubRunner.create(repository_name: "test-repo-#{i}", label: "ubicloud", installation_id: ins.id, vm_id: runner_vm.id)
+      GithubRunner.create(repository_name: "test-repo-#{i}", label: "ubicloud", installation_id: ins.id, vm_id: runner_vm.id, location_id: runner_vm.location_id)
     end
 
     fill_in "UBID, UUID, or prefix:term", with: vmh.ubid
@@ -2094,13 +2094,13 @@ RSpec.describe CloverAdmin do
       rollouts_path = page.current_path
       strand = Prog::RolloutRhizome.assemble
       page.refresh
-      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutRhizome", "start", "0", strand.ubid, "{}", "", "", ""]
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutRhizome", "start", "0", strand.ubid, "", "{}", "", "", ""]
       click_link strand.ubid
       expect(page.title).to eq "Ubicloud Admin - Strand #{strand.ubid}"
 
       strand.run
       visit rollouts_path
-      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutRhizome", "wait_initial_rhizome_install", "0", strand.ubid, "{}", "", "", ""]
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutRhizome", "wait_initial_rhizome_install", "0", strand.ubid, "", "{}", "", "", ""]
     end
 
     it "allows creation of rhizome rollout strands" do
@@ -2108,7 +2108,19 @@ RSpec.describe CloverAdmin do
 
       st = Strand.first(prog: "RolloutRhizome")
       expect(page).to have_flash_notice("Started rollout strand: #{st.ubid}")
-      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutRhizome", "start", "0", st.ubid, "{}", "", "", ""]
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutRhizome", "start", "0", st.ubid, "admin", "{}", "", "", ""]
+      expect(st.stack[0]["auto_exit"]).to be true
+    end
+
+    it "allows creation of rhizome rollout strands with auto exit disabled" do
+      uncheck "rhizome_auto_exit"
+      click_button "Start Rhizome Rollout"
+
+      st = Strand.first(prog: "RolloutRhizome")
+      expect(page).to have_flash_notice("Started rollout strand: #{st.ubid}")
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutRhizome", "start", "0", st.ubid, "admin", "{}", "", "", ""]
+      expect(st.stack[0]["auto_exit"]).to be false
+      expect(st.stack[0]["started_by"]).to eq "admin"
     end
 
     it "shows error for an invalid class/semaphore selection" do
@@ -2128,7 +2140,7 @@ RSpec.describe CloverAdmin do
       click_button "Start Semaphore Rollout"
 
       st = Strand.first(prog: "RolloutSemaphore")
-      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "{}", "", "", "increment resolve"]
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "admin", "{}", "", "", "increment resolve"]
       expect(page).to have_flash_notice("Started rollout strand: #{st.ubid}")
 
       expect(st.stack[0]["semaphore"]).to eq "resolve"
@@ -2136,18 +2148,20 @@ RSpec.describe CloverAdmin do
       expect(st.stack[0]["gap"]).to eq 90
       expect(st.stack[0]["increment"]).to be true
       expect(st.stack[0]["wait_label"]).to be true
+      expect(st.stack[0]["auto_exit"]).to be true
+      expect(st.stack[0]["started_by"]).to eq "admin"
 
       st.run
       page.refresh
-      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "wait_current", "0", st.ubid, "{}", "", "", "increment resolve"]
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "wait_current", "0", st.ubid, "admin", "{}", "", "", "increment resolve"]
 
       Semaphore.where(strand_id: page_st.id, name: "resolve").delete
       st.run
       page.refresh
-      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "{\"remaining\" => 0, \"completed\" => 1}", "", "", "increment resolve"]
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "admin", "{\"remaining\" => 0, \"completed\" => 1}", "", "", "increment resolve"]
     end
 
-    it "allows creation of semaphore increment rollout strands with locations and wait labels" do
+    it "allows creation of semaphore increment rollout strands with locations and wait labels and auto exit disabled" do
       fsn1_vm = create_vm
       hel1_vm = create_vm(location_id: Location::HETZNER_HEL1_ID)
 
@@ -2157,10 +2171,11 @@ RSpec.describe CloverAdmin do
       select "Vm - update_firewall_rules", from: "Class - Semaphore"
       select "hetzner-fsn1"
       fill_in "Wait Label", with: "wait"
+      uncheck "semaphore_auto_exit"
       click_button "Start Semaphore Rollout"
 
       st = Strand.first(prog: "RolloutSemaphore")
-      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "{}", "", "", "increment update_firewall_rules"]
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "admin", "{}", "", "", "increment update_firewall_rules"]
       expect(page).to have_flash_notice("Started rollout strand: #{st.ubid}")
 
       expect(st.stack[0]["semaphore"]).to eq "update_firewall_rules"
@@ -2168,6 +2183,7 @@ RSpec.describe CloverAdmin do
       expect(st.stack[0]["gap"]).to eq 60
       expect(st.stack[0]["increment"]).to be true
       expect(st.stack[0]["wait_label"]).to eq "wait"
+      expect(st.stack[0]["auto_exit"]).to be false
     end
 
     it "allows creation of semaphore increment without wait rollout strands" do
@@ -2178,7 +2194,7 @@ RSpec.describe CloverAdmin do
       click_button "Start Semaphore Rollout"
 
       st = Strand.first(prog: "RolloutSemaphore")
-      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "{}", "", "", "increment resolve"]
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "admin", "{}", "", "", "increment resolve"]
       expect(page).to have_flash_notice("Started rollout strand: #{st.ubid}")
 
       expect(st.stack[0]["semaphore"]).to eq "resolve"
@@ -2186,10 +2202,11 @@ RSpec.describe CloverAdmin do
       expect(st.stack[0]["gap"]).to eq 60
       expect(st.stack[0]["increment"]).to be true
       expect(st.stack[0]["wait_label"]).to be false
+      expect(st.stack[0]["auto_exit"]).to be true
 
       st.run
       page.refresh
-      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "{\"remaining\" => 0, \"completed\" => 1}", "", "", "increment resolve"]
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "admin", "{\"remaining\" => 0, \"completed\" => 1}", "", "", "increment resolve"]
     end
 
     it "allows creation of semaphore decrement rollout strands" do
@@ -2201,17 +2218,18 @@ RSpec.describe CloverAdmin do
       click_button "Start Semaphore Rollout"
 
       st = Strand.first(prog: "RolloutSemaphore")
-      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "{}", "", "", "decrement resolve"]
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "admin", "{}", "", "", "decrement resolve"]
       expect(page).to have_flash_notice("Started rollout strand: #{st.ubid}")
 
       expect(st.stack[0]["semaphore"]).to eq "resolve"
       expect(st.stack[0]["remaining"]).to eq [page_st.id]
       expect(st.stack[0]["gap"]).to eq 90
       expect(st.stack[0]["increment"]).to be false
+      expect(st.stack[0]["auto_exit"]).to be true
 
       st.run
       page.refresh
-      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "{\"remaining\" => 0, \"completed\" => 1}", "", "", "decrement resolve"]
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutSemaphore", "start", "0", st.ubid, "admin", "{\"remaining\" => 0, \"completed\" => 1}", "", "", "decrement resolve"]
     end
 
     it "allows pausing and unpausing strands" do
@@ -2304,6 +2322,7 @@ RSpec.describe CloverAdmin do
       expect(frame["concurrency"]).to eq 10
       expect(frame["pause_stages"]).to be false
       expect(frame["todo"]).to eq [vm_host.id]
+      expect(frame["started_by"]).to eq "admin"
     end
 
     it "allows creation of boot image rollout strands with custom options" do
@@ -2357,7 +2376,7 @@ RSpec.describe CloverAdmin do
       version = Prog::DownloadBootImage::BOOT_IMAGE_SHA256.dig("ubuntu-noble", "x64").keys.max
       st = Prog::RolloutBootImage.assemble(image_name: "ubuntu-noble", version:, concurrency: 10)
       page.refresh
-      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutBootImage", "wait", "0", st.ubid, "{\"image\" => \"ubuntu-noble #{version} x64\"}", "", "", ""]
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutBootImage", "wait", "0", st.ubid, "", "{\"image\" => \"ubuntu-noble #{version} x64\"}", "", "", ""]
 
       frame = st.stack[0]
       frame["todo"] = []
@@ -2367,7 +2386,7 @@ RSpec.describe CloverAdmin do
       st.modified!(:stack)
       st.save_changes
       page.refresh
-      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutBootImage", "wait", "0", st.ubid, "{\"remaining\" => 1, \"completed\" => 1, \"image\" => \"ubuntu-noble #{version} x64\"}", "", "", ""]
+      expect(page.all(".rollouts-table td").map(&:text)).to eq ["RolloutBootImage", "wait", "0", st.ubid, "", "{\"remaining\" => 1, \"completed\" => 1, \"image\" => \"ubuntu-noble #{version} x64\"}", "", "", ""]
 
       click_button "Rollback"
       expect(page).to have_flash_notice("Strand #{st.ubid} updated")
@@ -2815,9 +2834,12 @@ RSpec.describe CloverAdmin do
     repository_name = "test-repo"
     GithubRunner.create(installation_id:, repository_name:, label: "ubicloud", allocated_at: Time.now)
     GithubRunner.create(installation_id:, repository_name:, label: "ubicloud-arm")
-    GithubRunner.create(installation_id:, repository_name:, label: "ubicloud-standard-2", allocated_at: Time.now, vm_id: create_vm(vcpus: 2, allocated_at: Time.now).id)
-    GithubRunner.create(installation_id:, repository_name:, label: "ubicloud-standard-4", allocated_at: Time.now, vm_id: create_vm(vcpus: 4, family: "premium").id)
-    GithubRunner.create(installation_id:, repository_name:, label: "ubicloud-standard-8", allocated_at: Time.now, vm_id: create_vm(vcpus: 8, family: "m7a").id)
+    vm2 = create_vm(vcpus: 2, allocated_at: Time.now)
+    GithubRunner.create(installation_id:, repository_name:, label: "ubicloud-standard-2", allocated_at: Time.now, vm_id: vm2.id, location_id: vm2.location_id)
+    vm4 = create_vm(vcpus: 4, family: "premium")
+    GithubRunner.create(installation_id:, repository_name:, label: "ubicloud-standard-4", allocated_at: Time.now, vm_id: vm4.id, location_id: vm4.location_id)
+    vm8 = create_vm(vcpus: 8, family: "m7a")
+    GithubRunner.create(installation_id:, repository_name:, label: "ubicloud-standard-8", allocated_at: Time.now, vm_id: vm8.id, location_id: vm8.location_id)
     GithubRunner.create(installation_id:, repository_name:, label: "ubicloud-standard-30")
     create_vm_host(location_id: Location::GITHUB_RUNNERS_ID, family: "standard", used_cores: 12, total_cores: 48)
     create_vm_host(location_id: Location::HETZNER_FSN1_ID, family: "premium", used_cores: 12, total_cores: 24)
@@ -3577,7 +3599,7 @@ RSpec.describe CloverAdmin do
       create_vm(vm_host_id: hel1_host.id, vcpus: 4)
       create_vm(vm_host_id: hel1_host.id, family: "burstable", vcpus: 1)
       runner_vm = create_vm(vm_host_id: hel1_host.id, vcpus: 8)
-      GithubRunner.create(label: "ubicloud", repository_name: "my-repo", vm_id: runner_vm.id)
+      GithubRunner.create(label: "ubicloud", repository_name: "my-repo", vm_id: runner_vm.id, location_id: runner_vm.location_id)
 
       click_link "VM Host COGS"
       expect(page.title).to eq "Ubicloud Admin - VM Host COGS"
@@ -3757,7 +3779,7 @@ RSpec.describe CloverAdmin do
 
     installation = GithubInstallation.create(installation_id: 99, name: "gh-org", type: "Organization", project_id: big.id)
     gh_vm = create_vm(project_id: service_project.id, vcpus: 2, name: "gh-runner-vm")
-    GithubRunner.create(vm_id: gh_vm.id, repository_name: "repo", label: "ubicloud", installation_id: installation.id)
+    GithubRunner.create(vm_id: gh_vm.id, location_id: gh_vm.location_id, repository_name: "repo", label: "ubicloud", installation_id: installation.id)
     reload.call
     expect(rows.call).to eq([[big_label, "new", "1", "1", "1", "1", "16", "$0.00"]])
 
@@ -3865,7 +3887,7 @@ RSpec.describe CloverAdmin do
     # GitHub runner: attributed to the customer through the installation.
     installation = GithubInstallation.create(installation_id: 99, name: "gh-org", type: "Organization", project_id: customer.id)
     gh_vm = create_vm(vm_host_id: vm_host.id, project_id: service_project.id, name: "gh-runner-vm")
-    GithubRunner.create(vm_id: gh_vm.id, repository_name: "repo", label: "ubicloud", installation_id: installation.id)
+    GithubRunner.create(vm_id: gh_vm.id, location_id: gh_vm.location_id, repository_name: "repo", label: "ubicloud", installation_id: installation.id)
     reload.call
     expect(summary_rows.call).to eq([[customer_label, "1", "1", "1", "1", "4"]])
     expect(resource_rows.call).to eq([

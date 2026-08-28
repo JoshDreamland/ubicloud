@@ -76,8 +76,6 @@ GEM
     bcrypt_pbkdf (1.1.2)
     bigdecimal (3.3.1)
     bindata (2.5.1)
-    brakeman (8.0.5)
-      racc
     by (1.1.0)
     byebug (13.0.0)
       reline (>= 0.6.0)
@@ -379,6 +377,7 @@ GEM
       hashery (~> 2.0)
       ruby-rc4
       ttfunk
+    perfect_toml (0.9.0)
     pg (1.6.3)
     pg (1.6.3-aarch64-linux)
     pg (1.6.3-aarch64-linux-musl)
@@ -590,7 +589,6 @@ DEPENDENCIES
   aws-sdk-kms
   aws-sdk-s3
   bcrypt_pbkdf
-  brakeman
   by (>= 1.1.0)
   capybara
   capybara-validate_html5 (>= 2.1)
@@ -619,6 +617,7 @@ DEPENDENCIES
   omniauth-google-oauth2
   pagerduty (>= 4.0)
   pdf-reader
+  perfect_toml (= 0.9.0)
   pg-aws_rds_iam!
   prawn
   prawn-table

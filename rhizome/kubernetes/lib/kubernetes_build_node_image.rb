@@ -31,7 +31,7 @@ class KubernetesBuildNodeImage
     r "sudo tee /etc/sysctl.d/72-clover-forward-packets.conf > /dev/null", stdin: SYSCTL_CONF
 
     r "sudo -E apt-get update"
-    r "sudo -E apt-get upgrade -y"
+    r "sudo -E apt-get full-upgrade -y"
     r "sudo -E apt-get install -y ca-certificates curl gpg"
 
     r "sudo install -m 0755 -d /etc/apt/keyrings"
@@ -43,6 +43,8 @@ class KubernetesBuildNodeImage
     r "sudo -E apt-get update"
     r "sudo -E apt-get install -y containerd cri-tools kubelet kubeadm kubectl ruby-bundler"
 
+    r "sudo -E apt-get install -y linux-modules-extra-$(linux-version list | linux-version sort | tail -1)"
+
     r "sudo mkdir -p /etc/containerd"
     r "sudo tee /etc/containerd/config.toml > /dev/null", stdin: r("containerd config default").gsub("SystemdCgroup = false", "SystemdCgroup = true")
 
@@ -51,9 +53,5 @@ class KubernetesBuildNodeImage
 
     r "sudo apt-mark hold kubelet kubeadm kubectl"
     r "sudo systemctl disable unattended-upgrades"
-
-    r "sudo -E apt-get autoremove -y"
-    r "sudo -E apt-get clean"
-    r "sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*"
   end
 end

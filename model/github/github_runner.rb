@@ -24,17 +24,16 @@ class GithubRunner < Sequel::Model
     end
 
     def metal_active_runner_vcpus
-      ds = join(:vm, id: Sequel[:github_runner][:vm_id])
+      ds = self
       if (aws_location_id = Config.github_runner_aws_location_id)
-        ds = ds.exclude(Sequel[:vm][:location_id] => aws_location_id)
+        ds = ds.exclude(location_id: aws_location_id)
       end
       ds.total_active_runner_vcpus
     end
 
     def aws_active_runner_vcpus
       return 0 unless (aws_location_id = Config.github_runner_aws_location_id)
-      join(:vm, id: Sequel[:github_runner][:vm_id])
-        .where(Sequel[:vm][:location_id] => aws_location_id)
+      where(location_id: aws_location_id)
         .total_active_runner_vcpus
     end
   end
@@ -126,10 +125,14 @@ end
 #  allocated_at    | timestamp with time zone |
 #  billed_vm_size  | text                     |
 #  actual_label    | text                     |
+#  location_id     | uuid                     |
 # Indexes:
 #  github_runner_pkey                  | PRIMARY KEY btree (id)
 #  github_runner_vm_id_key             | UNIQUE btree (vm_id)
 #  github_runner_installation_id_index | btree (installation_id)
+# Check constraints:
+#  location_id_and_vm_id_set_together | (location_id IS NOT NULL AND vm_id IS NOT NULL OR location_id IS NULL AND vm_id IS NULL)
 # Foreign key constraints:
 #  github_runner_installation_id_fkey | (installation_id) REFERENCES github_installation(id)
+#  github_runner_location_id_fkey     | (location_id) REFERENCES location(id)
 #  github_runner_repository_id_fkey   | (repository_id) REFERENCES github_repository(id)
