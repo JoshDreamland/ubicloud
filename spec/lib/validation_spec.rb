@@ -161,6 +161,21 @@ RSpec.describe Validation do
         expect { described_class.validate_network_volume_config("gp3", 4096, 80_000, 2000) }.not_to raise_error
       end
 
+      it "rejects a size whose IOPS ceiling falls below the type's floor" do
+        # A 4 GiB Hyperdisk is pinned by GCP to 2000 IOPS, which the type's
+        # 3000 minimum cannot express.
+        expect { described_class.validate_network_volume_config("hyperdisk-balanced", 4, nil, nil) }
+          .to raise_error(described_class::ValidationFailed) { |e|
+            expect(e.details[:storage_size]).to include("requires at least 6 GiB")
+          }
+        expect { described_class.validate_network_volume_config("gp3", 5, nil, nil) }
+          .to raise_error(described_class::ValidationFailed)
+      end
+
+      it "allows io2 down to a single GiB, which its own ratio permits" do
+        expect { described_class.validate_network_volume_config("io2", 1, nil, nil) }.not_to raise_error
+      end
+
       it "fails for an unsupported volume type" do
         expect { described_class.validate_network_volume_config("gp2", 256, nil, nil) }.to raise_error described_class::ValidationFailed
       end

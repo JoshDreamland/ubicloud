@@ -25,9 +25,8 @@ class NetworkVolume < Sequel::Model
   one_to_one :aws_volume, key: :id, read_only: true
   one_to_one :gcp_volume, key: :id, read_only: true
 
-  # The attachment, when one exists. A volume outlives the VM that mounts it,
-  # so this is nil for a volume that is provisioned but not yet attached, or
-  # detached and awaiting reuse.
+  # The attachment. Nil between creating the volume and creating the row that
+  # mounts it; a volume is mounted by at most one VM.
   one_to_one :vm_storage_volume
 
   plugin ResourceMethods
@@ -62,6 +61,6 @@ end
 # Foreign key constraints:
 #  network_volume_location_id_fkey | (location_id) REFERENCES location(id)
 # Referenced By:
-#  aws_volume        | aws_volume_id_fkey                       | (id) REFERENCES network_volume(id)
-#  gcp_volume        | gcp_volume_id_fkey                       | (id) REFERENCES network_volume(id)
+#  aws_volume        | aws_volume_id_fkey                       | (id) REFERENCES network_volume(id) ON DELETE CASCADE
+#  gcp_volume        | gcp_volume_id_fkey                       | (id) REFERENCES network_volume(id) ON DELETE CASCADE
 #  vm_storage_volume | vm_storage_volume_network_volume_id_fkey | (network_volume_id) REFERENCES network_volume(id)

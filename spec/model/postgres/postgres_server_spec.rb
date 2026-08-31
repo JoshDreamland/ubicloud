@@ -1932,6 +1932,22 @@ RSpec.describe PostgresServer do
     end
   end
 
+  describe "#instance_store_device_glob" do
+    it "matches EBS-exposed instance stores on aws" do
+      location.update(provider: "aws")
+      expect(postgres_server.instance_store_device_glob).to eq("/dev/disk/by-id/nvme-Amazon_EC2_NVMe_Instance_Storage*")
+    end
+
+    it "matches local ssds on gcp" do
+      location.update(provider: "gcp")
+      expect(postgres_server.instance_store_device_glob).to eq("/dev/disk/by-id/google-local-nvme-ssd-*")
+    end
+
+    it "raises on metal" do
+      expect { postgres_server.instance_store_device_glob }.to raise_error(RuntimeError, "no instance-store devices on metal")
+    end
+  end
+
   describe "#observe_io_throttle" do
     let(:session) {
       {ssh_session: Net::SSH::Connection::Session.allocate}

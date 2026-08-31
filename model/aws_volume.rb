@@ -21,4 +21,4 @@ end
 #  aws_volume_throughput_positive | (provisioned_throughput_mibps IS NULL OR provisioned_throughput_mibps > 0)
 #  aws_volume_type_check          | (volume_type = ANY (ARRAY['gp3'::text, 'io2'::text]))
 # Foreign key constraints:
-#  aws_volume_id_fkey | (id) REFERENCES network_volume(id)
+#  aws_volume_id_fkey | (id) REFERENCES network_volume(id) ON DELETE CASCADE

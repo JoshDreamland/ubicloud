@@ -77,6 +77,30 @@ RSpec.describe NetworkVolume do
     end
   end
 
+  describe "lifetime" do
+    it "is destroyed with the attachment, taking its configuration with it" do
+      nv = described_class.create(location_id: aws_location.id, size_gib: 64)
+      AwsVolume.create_with_id(nv, volume_type: "gp3")
+      vm = create_vm(location_id: aws_location.id)
+      attachment = VmStorageVolume.create(vm_id: vm.id, boot: false, size_gib: 64, disk_index: 9, network_volume_id: nv.id)
+
+      attachment.destroy
+
+      expect(described_class[nv.id]).to be_nil
+      expect(AwsVolume[nv.id]).to be_nil
+    end
+
+    it "cannot be mounted by two VMs at once" do
+      nv = described_class.create(location_id: aws_location.id, size_gib: 64)
+      vm = create_vm(location_id: aws_location.id)
+      other = create_vm(location_id: aws_location.id)
+      VmStorageVolume.create(vm_id: vm.id, boot: false, size_gib: 64, disk_index: 9, network_volume_id: nv.id)
+
+      expect { VmStorageVolume.create(vm_id: other.id, boot: false, size_gib: 64, disk_index: 9, network_volume_id: nv.id) }
+        .to raise_error(Sequel::ValidationFailed, /network_volume_id is already taken/)
+    end
+  end
+
   describe "database constraints" do
     it "rejects a non-positive size" do
       expect { described_class.create(location_id: aws_location.id, size_gib: 0) }

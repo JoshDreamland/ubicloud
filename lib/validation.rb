@@ -182,6 +182,15 @@ module Validation
     limits = NetworkVolume::LIMITS[volume_type]
     fail ValidationFailed.new({network_volume_type: "Unsupported network volume type: #{volume_type}"}) unless limits
 
+    # Below a certain size the IOPS-per-GiB ceiling falls under the type's own
+    # floor, and the provider fixes performance at values the type's envelope
+    # cannot express: a 4 GiB Hyperdisk is pinned to 2000 IOPS. Reject the size
+    # rather than provision with a default the provider will refuse.
+    min_size_gib = (limits.iops.begin.to_f / limits.max_iops_per_gib).ceil
+    if size_gib.to_i < min_size_gib
+      fail ValidationFailed.new({storage_size: "#{volume_type} requires at least #{min_size_gib} GiB, since it is limited to #{limits.max_iops_per_gib} IOPS per GiB and requires #{limits.iops.begin}."})
+    end
+
     if iops
       unless limits.iops.cover?(iops)
         fail ValidationFailed.new({provisioned_iops: "IOPS for #{volume_type} must be between #{limits.iops.begin} and #{limits.iops.end}."})

@@ -2,11 +2,15 @@
 
 Sequel.migration do
   change do
-    # A provider-managed volume has a lifetime of its own: it is created before
-    # the VM that mounts it and can outlive that VM. Its own table lets an
-    # attachment come and go without destroying the volume, and keeps
-    # provider-specific configuration out of vm_storage_volume, which is
-    # otherwise a metal table.
+    # A provider-managed volume is created before the VM that mounts it, so it
+    # needs an identity of its own: the provider call is keyed by this row's
+    # ubid, which is what makes a lost response recoverable rather than an
+    # orphaned volume. Its own table also keeps provider-specific configuration
+    # out of vm_storage_volume, which is otherwise a metal table.
+    #
+    # A volume is destroyed with the VM that mounts it. Detaching and reusing a
+    # volume across VM replacements would save the restore from backup, but
+    # nothing does that yet, so nothing here pretends to.
     create_table(:network_volume) do
       column :id, :uuid, primary_key: true, default: Sequel.lit("gen_random_ubid_uuid(699)") # nv ubid type
       column :created_at, :timestamptz, null: false, default: Sequel::CURRENT_TIMESTAMP
@@ -27,7 +31,7 @@ Sequel.migration do
     # Provider-specific configuration, keyed by the shared row, as with
     # location and location_credential_aws.
     create_table(:aws_volume) do
-      foreign_key :id, :network_volume, type: :uuid, primary_key: true
+      foreign_key :id, :network_volume, type: :uuid, primary_key: true, on_delete: :cascade
       column :volume_type, :text, collate: '"C"', null: false
       column :provisioned_iops, :integer
       column :provisioned_throughput_mibps, :integer
@@ -40,7 +44,7 @@ Sequel.migration do
     # io2 derives throughput from IOPS, so only gp3 and hyperdisk-balanced
     # accept a throughput; the per-provider tables keep that asymmetry local.
     create_table(:gcp_volume) do
-      foreign_key :id, :network_volume, type: :uuid, primary_key: true
+      foreign_key :id, :network_volume, type: :uuid, primary_key: true, on_delete: :cascade
       column :volume_type, :text, collate: '"C"', null: false
       column :provisioned_iops, :integer
       column :provisioned_throughput_mibps, :integer
@@ -52,8 +56,10 @@ Sequel.migration do
 
     # The attachment. Metal volumes keep their existing shape and reference
     # nothing; only provider-managed volumes point at a network_volume row.
+    # A volume is mounted by at most one VM: EBS multi-attach is io2-only and
+    # needs a cluster-aware filesystem, and ext4 is not one.
     alter_table(:vm_storage_volume) do
-      add_foreign_key :network_volume_id, :network_volume, type: :uuid
+      add_foreign_key :network_volume_id, :network_volume, type: :uuid, unique: true
     end
   end
 end

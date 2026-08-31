@@ -102,8 +102,17 @@ module ContentGenerator
       ]
     end
 
-    def self.storage_size(flavor, location, family, vm_size, storage_size)
-      unit_price = BillingRate.unit_price_from_resource_properties("PostgresStorage", flavor, location.name, location.byoc)
+    def self.storage_type(flavor, location, family, vm_size, storage_type)
+      Option::POSTGRES_STORAGE_TYPE_OPTIONS[storage_type].description
+    end
+
+    def self.network_volume_type(flavor, location, family, vm_size, storage_type, network_volume_type)
+      return "None" if network_volume_type == PostgresResource::NetworkVolumeType::NONE
+      Option::POSTGRES_NETWORK_VOLUME_TYPE_OPTIONS[network_volume_type].description
+    end
+
+    def self.storage_size(flavor, location, family, vm_size, storage_type, network_volume_type, storage_size)
+      unit_price = BillingRate.unit_price_from_resource_properties("PostgresStorage", PostgresResource.storage_billing_family(flavor, storage_type, network_volume_type), location.name, location.byoc)
 
       [
         "#{storage_size}GB",
@@ -117,18 +126,19 @@ module ContentGenerator
       "Postgres #{version}"
     end
 
-    def self.ha_type(flavor, location, family, vm_size, storage_size, ha_type)
+    def self.ha_type(flavor, location, family, vm_size, storage_type, network_volume_type, storage_size, ha_type)
       vcpu_count = Option::POSTGRES_SIZE_OPTIONS[vm_size].vcpu_count
       ha_type = Option::POSTGRES_HA_OPTIONS[ha_type]
       compute_unit_price = BillingRate.unit_price_from_resource_properties("PostgresVCpu", "#{flavor}-#{family}", location.name, location.byoc)
-      storage_unit_price = BillingRate.unit_price_from_resource_properties("PostgresStorage", flavor, location.name, location.byoc)
+      storage_unit_price = BillingRate.unit_price_from_resource_properties("PostgresStorage", PostgresResource.storage_billing_family(flavor, storage_type, network_volume_type), location.name, location.byoc)
       standby_count = ha_type.standby_count
+      standby_unit_price = (vcpu_count * compute_unit_price) + (storage_size.to_i * storage_unit_price)
 
       [
         ha_type.description,
         "",
-        "$#{"%.2f" % (standby_count * ((vcpu_count * compute_unit_price) + (storage_size.to_i * storage_unit_price)) * 60 * 672)}/mo",
-        "$#{"%.3f" % (standby_count * ((vcpu_count * compute_unit_price) + (storage_size.to_i * storage_unit_price)) * 60)}/hour",
+        "$#{"%.2f" % (standby_count * standby_unit_price * 60 * 672)}/mo",
+        "$#{"%.3f" % (standby_count * standby_unit_price * 60)}/hour",
       ]
     end
 

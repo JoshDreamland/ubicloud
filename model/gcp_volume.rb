@@ -21,4 +21,4 @@ end
 #  gcp_volume_throughput_positive | (provisioned_throughput_mibps IS NULL OR provisioned_throughput_mibps > 0)
 #  gcp_volume_type_check          | (volume_type = 'hyperdisk-balanced'::text)
 # Foreign key constraints:
-#  gcp_volume_id_fkey | (id) REFERENCES network_volume(id)
+#  gcp_volume_id_fkey | (id) REFERENCES network_volume(id) ON DELETE CASCADE

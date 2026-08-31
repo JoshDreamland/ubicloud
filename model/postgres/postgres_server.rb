@@ -302,8 +302,12 @@ class PostgresServer < Sequel::Model
     resource.read_replica?
   end
 
+  def data_volumes
+    vm.vm_storage_volumes.reject(&:boot).sort_by(&:disk_index)
+  end
+
   def storage_size_gib
-    vm.vm_storage_volumes.reject(&:boot).sum(&:size_gib)
+    data_volumes.sum(&:size_gib)
   end
 
   def fallback_active?

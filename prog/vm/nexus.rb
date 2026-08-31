@@ -223,7 +223,8 @@ class Prog::Vm::Nexus < Prog::Base
 
   # A provider-managed volume is its own resource: create it, then let the
   # attachment reference it. The provider id is filled in once the provider
-  # call returns, so a lost response cannot orphan a volume.
+  # call returns; creation is keyed by the volume's ubid, so a lost response
+  # cannot orphan a volume. The volume is destroyed with the attachment.
   def self.network_volume_attrs(location, volume)
     return {} unless (volume_type = volume[:network_volume_type])
 

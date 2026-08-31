@@ -67,12 +67,14 @@ class Clover
           "location" => pg.location,
           "family" => Option::POSTGRES_SIZE_OPTIONS[size]&.family,
           "size" => size,
+          "storage_type" => pg.storage_type,
+          "network_volume_type" => pg.network_volume_type || PostgresResource.network_volume_type_none,
           "storage_size" => target_storage_size_gib,
           "ha_type" => ha_type,
           "version" => pg.version,
         }
 
-        validate_postgres_input(pg.name, postgres_params)
+        validate_postgres_input(pg.name, postgres_params, storage_type: pg.storage_type, network_volume_type: pg.network_volume_type)
 
         if target_storage_size_gib < pg.representative_server.storage_size_gib
           usage_gib = pg.observed_disk_usage_gib
@@ -398,6 +400,10 @@ class Clover
             target_vm_size: pg.target_vm_size,
             target_storage_size_gib: pg.target_storage_size_gib,
             ha_type: PostgresResource.ha_type_none,
+            storage_type: pg.storage_type,
+            network_volume_type: pg.network_volume_type,
+            network_volume_iops: pg.network_volume_iops,
+            network_volume_throughput_mibps: pg.network_volume_throughput_mibps,
             target_version: pg.version,
             flavor: pg.flavor,
             parent_id: pg.id,
@@ -467,6 +473,10 @@ class Clover
             name:,
             target_vm_size: pg.target_vm_size,
             target_storage_size_gib: pg.target_storage_size_gib,
+            storage_type: pg.storage_type,
+            network_volume_type: pg.network_volume_type,
+            network_volume_iops: pg.network_volume_iops,
+            network_volume_throughput_mibps: pg.network_volume_throughput_mibps,
             target_version: pg.version,
             flavor: pg.flavor,
             parent_id: pg.id,
